@@ -56,7 +56,11 @@ target_link_libraries(sontag
     CLI11::CLI11
 )
 
-add_executable(sontag_cli app/sontag.cpp)
+add_executable(
+    sontag_cli
+    app/sontag.cpp
+    app/cli.cpp
+)
 target_link_libraries(sontag_cli PRIVATE sontag)
 
 set(warning_flags -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-function -Werror=vla -Wno-deprecated-declaration)
