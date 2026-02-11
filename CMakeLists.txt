@@ -50,6 +50,12 @@ target_compile_features(sontag PUBLIC cxx_std_23)
 
 add_subdirectory(external)
 
+target_link_libraries(sontag 
+    PUBLIC 
+    glaze::glaze
+    CLI11::CLI11
+)
+
 set(warning_flags -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-function -Werror=vla -Wno-deprecated-declaration)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     list(APPEND warning_flags -Wno-unknown-warning-option)
