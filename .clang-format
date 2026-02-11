@@ -68,13 +68,13 @@ IncludeBlocks: Regroup
 IncludeCategories:
   - Regex: '^"[^/]*.h(pp)?"$'
     Priority: 1
-  - Regex: '^"unlog'
+  - Regex: '^"sontag'
     Priority: 2
-  - Regex: '^<unlog'
+  - Regex: '^<sontag'
     Priority: 3
-  - Regex: '^"(fmt|spdlog|catch2)'
+  - Regex: '^"(CLI11|catch2|glaze)'
     Priority: 4
-  - Regex: '^<(fmt|spdlog|catch2)'
+  - Regex: '^<(CLI11|catch2|glaze)'
     Priority: 5
   - Regex: '^<.*\.h(pp)?>$'
     Priority: 6

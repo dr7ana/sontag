@@ -7,3 +7,6 @@
 [submodule "external/glaze"]
 	path = external/glaze
 	url = https://github.com/stephenberry/glaze.git
+[submodule "external/linenoise"]
+	path = external/linenoise
+	url = https://github.com/antirez/linenoise.git

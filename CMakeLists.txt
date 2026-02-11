@@ -42,6 +42,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(sontag
+    src/cli.cpp
     src/interpreter.cpp
 )
 
@@ -59,7 +60,6 @@ target_link_libraries(sontag
 add_executable(
     sontag_cli
     app/sontag.cpp
-    app/cli.cpp
 )
 target_link_libraries(sontag_cli PRIVATE sontag)
 

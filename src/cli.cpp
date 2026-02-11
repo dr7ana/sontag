@@ -1,0 +1,781 @@
+#include "sontag/cli.hpp"
+
+#include <glaze/glaze.hpp>
+
+#include <CLI/CLI.hpp>
+#include <unistd.h>
+
+#include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
+
+namespace sontag::cli { namespace detail {
+
+    using namespace std::string_view_literals;
+    namespace fs = std::filesystem;
+
+    struct persisted_config {
+        int schema_version{1};
+        std::string clang{};
+        std::string cxx_standard{};
+        std::string opt_level{};
+        std::optional<std::string> target{};
+        std::optional<std::string> cpu{};
+        std::string cache_dir{};
+        std::string output{};
+        std::string color{};
+    };
+
+    struct snapshot_record {
+        std::string name{};
+        std::size_t cell_count{};
+    };
+
+    struct persisted_snapshots {
+        int schema_version{1};
+        std::string active_snapshot{"current"};
+        std::vector<snapshot_record> snapshots{{snapshot_record{"current", 0U}}};
+    };
+
+    struct persisted_cells {
+        int schema_version{1};
+        std::vector<std::string> cells{};
+    };
+
+    struct repl_state {
+        std::vector<std::string> cells{};
+        persisted_snapshots snapshot_data{};
+        fs::path session_dir{};
+        fs::path config_path{};
+        fs::path snapshots_path{};
+        fs::path cells_path{};
+        std::string session_id{};
+    };
+
+    struct code_balance_state {
+        int paren_depth{0};
+        int brace_depth{0};
+        int bracket_depth{0};
+
+        bool in_single_quote{false};
+        bool in_double_quote{false};
+        bool escape_next{false};
+        bool in_line_comment{false};
+        bool in_block_comment{false};
+    };
+
+}}  // namespace sontag::cli::detail
+
+namespace glz {
+
+    template <>
+    struct meta<sontag::cli::detail::persisted_config> {
+        using T = sontag::cli::detail::persisted_config;
+        static constexpr auto value =
+                object("schema_version",
+                       &T::schema_version,
+                       "clang",
+                       &T::clang,
+                       "cxx_standard",
+                       &T::cxx_standard,
+                       "opt_level",
+                       &T::opt_level,
+                       "target",
+                       &T::target,
+                       "cpu",
+                       &T::cpu,
+                       "cache_dir",
+                       &T::cache_dir,
+                       "output",
+                       &T::output,
+                       "color",
+                       &T::color);
+    };
+
+    template <>
+    struct meta<sontag::cli::detail::snapshot_record> {
+        using T = sontag::cli::detail::snapshot_record;
+        static constexpr auto value = object("name", &T::name, "cell_count", &T::cell_count);
+    };
+
+    template <>
+    struct meta<sontag::cli::detail::persisted_snapshots> {
+        using T = sontag::cli::detail::persisted_snapshots;
+        static constexpr auto value =
+                object("schema_version",
+                       &T::schema_version,
+                       "active_snapshot",
+                       &T::active_snapshot,
+                       "snapshots",
+                       &T::snapshots);
+    };
+
+    template <>
+    struct meta<sontag::cli::detail::persisted_cells> {
+        using T = sontag::cli::detail::persisted_cells;
+        static constexpr auto value = object("schema_version", &T::schema_version, "cells", &T::cells);
+    };
+
+}  // namespace glz
+
+namespace sontag::cli {
+
+    namespace detail {
+
+        static constexpr std::string_view trim_view(std::string_view value) {
+            auto first = value.find_first_not_of(" \t\r\n");
+            if (first == std::string_view::npos) {
+                return {};
+            }
+            auto last = value.find_last_not_of(" \t\r\n");
+            return value.substr(first, (last - first) + 1U);
+        }
+
+        static void update_depth(int& depth, int delta) {
+            depth += delta;
+            if (depth < 0) {
+                depth = 0;
+            }
+        }
+
+        static void update_code_balance_state(code_balance_state& state, std::string_view line) {
+            std::size_t i = 0U;
+            while (i < line.size()) {
+                auto c = line[i];
+                auto next = (i + 1U < line.size()) ? line[i + 1U] : '\0';
+
+                if (state.in_line_comment) {
+                    break;
+                }
+
+                if (state.in_block_comment) {
+                    if (c == '*' && next == '/') {
+                        state.in_block_comment = false;
+                        i += 2U;
+                        continue;
+                    }
+                    ++i;
+                    continue;
+                }
+
+                if (state.in_single_quote) {
+                    if (state.escape_next) {
+                        state.escape_next = false;
+                        ++i;
+                        continue;
+                    }
+                    if (c == '\\') {
+                        state.escape_next = true;
+                        ++i;
+                        continue;
+                    }
+                    if (c == '\'') {
+                        state.in_single_quote = false;
+                    }
+                    ++i;
+                    continue;
+                }
+
+                if (state.in_double_quote) {
+                    if (state.escape_next) {
+                        state.escape_next = false;
+                        ++i;
+                        continue;
+                    }
+                    if (c == '\\') {
+                        state.escape_next = true;
+                        ++i;
+                        continue;
+                    }
+                    if (c == '"') {
+                        state.in_double_quote = false;
+                    }
+                    ++i;
+                    continue;
+                }
+
+                if (c == '/' && next == '/') {
+                    state.in_line_comment = true;
+                    break;
+                }
+                if (c == '/' && next == '*') {
+                    state.in_block_comment = true;
+                    i += 2U;
+                    continue;
+                }
+
+                if (c == '\'') {
+                    state.in_single_quote = true;
+                    ++i;
+                    continue;
+                }
+                if (c == '"') {
+                    state.in_double_quote = true;
+                    ++i;
+                    continue;
+                }
+
+                switch (c) {
+                    case '(':
+                        update_depth(state.paren_depth, 1);
+                        break;
+                    case ')':
+                        update_depth(state.paren_depth, -1);
+                        break;
+                    case '{':
+                        update_depth(state.brace_depth, 1);
+                        break;
+                    case '}':
+                        update_depth(state.brace_depth, -1);
+                        break;
+                    case '[':
+                        update_depth(state.bracket_depth, 1);
+                        break;
+                    case ']':
+                        update_depth(state.bracket_depth, -1);
+                        break;
+                    default:
+                        break;
+                }
+
+                ++i;
+            }
+
+            state.in_line_comment = false;
+        }
+
+        static bool cell_is_complete(const code_balance_state& state) {
+            return state.paren_depth == 0 && state.brace_depth == 0 && state.bracket_depth == 0 &&
+                   !state.in_single_quote && !state.in_double_quote && !state.in_block_comment;
+        }
+
+        static persisted_config make_persisted_config(const startup_config& cfg) {
+            persisted_config data{};
+            data.clang = cfg.clang_path.string();
+            data.cxx_standard = std::string(to_string(cfg.language_standard));
+            data.opt_level = std::string(to_string(cfg.opt_level));
+            data.target = cfg.target_triple;
+            data.cpu = cfg.cpu;
+            data.cache_dir = cfg.cache_dir.string();
+            data.output = std::string(to_string(cfg.output));
+            data.color = std::string(to_string(cfg.color));
+            return data;
+        }
+
+        static void apply_persisted_config(const persisted_config& data, startup_config& cfg) {
+            cfg.clang_path = data.clang;
+
+            if (!try_parse_cxx_standard(data.cxx_standard, cfg.language_standard)) {
+                throw std::runtime_error("invalid cxx_standard in persisted config: " + data.cxx_standard);
+            }
+            if (!try_parse_optimization_level(data.opt_level, cfg.opt_level)) {
+                throw std::runtime_error("invalid opt_level in persisted config: " + data.opt_level);
+            }
+            if (!try_parse_output_mode(data.output, cfg.output)) {
+                throw std::runtime_error("invalid output in persisted config: " + data.output);
+            }
+            if (!try_parse_color_mode(data.color, cfg.color)) {
+                throw std::runtime_error("invalid color in persisted config: " + data.color);
+            }
+
+            cfg.target_triple = data.target;
+            cfg.cpu = data.cpu;
+            cfg.cache_dir = data.cache_dir;
+        }
+
+        static std::string read_text_file(const fs::path& path) {
+            std::ifstream in{path};
+            if (!in) {
+                throw std::runtime_error("failed to open " + path.string());
+            }
+            std::ostringstream ss{};
+            ss << in.rdbuf();
+            if (!in.good() && !in.eof()) {
+                throw std::runtime_error("failed to read " + path.string());
+            }
+            return ss.str();
+        }
+
+        template <typename T>
+        static void write_json_file(const T& value, const fs::path& path) {
+            std::string json{};
+            auto ec = glz::write_json(value, json);
+            if (ec) {
+                throw std::runtime_error("failed to serialize json for " + path.string());
+            }
+
+            std::ofstream out{path};
+            if (!out) {
+                throw std::runtime_error("failed to open " + path.string());
+            }
+            out << json << '\n';
+            if (!out) {
+                throw std::runtime_error("failed to write " + path.string());
+            }
+        }
+
+        template <typename T>
+        static T read_json_file(const fs::path& path) {
+            T value{};
+            auto json = read_text_file(path);
+            auto ec = glz::read_json(value, json);
+            if (ec) {
+                throw std::runtime_error("failed to parse json file " + path.string());
+            }
+            return value;
+        }
+
+        static std::string make_session_id() {
+            auto now = std::chrono::system_clock::now();
+            auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+            auto timestamp_ms = static_cast<long long>(epoch_ms % 1000LL);
+            auto timestamp_s = std::chrono::system_clock::to_time_t(now);
+
+            std::tm local_tm{};
+            localtime_r(&timestamp_s, &local_tm);
+
+            std::ostringstream os{};
+            os << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
+            os << '_' << std::setw(3) << std::setfill('0') << timestamp_ms;
+            os << "_pid" << static_cast<long>(::getpid());
+            return os.str();
+        }
+
+        static void upsert_snapshot(persisted_snapshots& data, std::string_view name, std::size_t cell_count) {
+            auto it = std::find_if(data.snapshots.begin(), data.snapshots.end(), [name](const snapshot_record& entry) {
+                return entry.name == name;
+            });
+            if (it == data.snapshots.end()) {
+                data.snapshots.push_back(snapshot_record{std::string(name), cell_count});
+                return;
+            }
+            it->cell_count = cell_count;
+        }
+
+        static void persist_snapshots(const repl_state& state) {
+            write_json_file(state.snapshot_data, state.snapshots_path);
+        }
+
+        static void persist_cells(const repl_state& state) {
+            persisted_cells data{};
+            data.cells = state.cells;
+            write_json_file(data, state.cells_path);
+        }
+
+        static void persist_current_snapshot(repl_state& state) {
+            upsert_snapshot(state.snapshot_data, "current"sv, state.cells.size());
+            persist_snapshots(state);
+        }
+
+        static fs::path session_root(const startup_config& cfg) {
+            return cfg.cache_dir / "sessions";
+        }
+
+        static repl_state make_state_paths(const fs::path& session_dir) {
+            repl_state state{};
+            state.session_dir = session_dir;
+            state.session_id = session_dir.filename().string();
+            state.config_path = state.session_dir / "config.json";
+            state.snapshots_path = state.session_dir / "snapshots.json";
+            state.cells_path = state.session_dir / "cells.json";
+            return state;
+        }
+
+        static std::optional<fs::path> find_latest_session(const fs::path& sessions_root) {
+            std::error_code ec{};
+            if (!fs::exists(sessions_root, ec) || ec) {
+                return std::nullopt;
+            }
+
+            std::optional<fs::path> latest{};
+            for (const auto& entry : fs::directory_iterator(sessions_root, ec)) {
+                if (ec) {
+                    throw std::runtime_error("failed to enumerate " + sessions_root.string());
+                }
+                if (!entry.is_directory()) {
+                    continue;
+                }
+                if (!latest || entry.path().filename().string() > latest->filename().string()) {
+                    latest = entry.path();
+                }
+            }
+            return latest;
+        }
+
+        static repl_state bootstrap_session(const startup_config& cfg) {
+            auto sessions_root = cfg.cache_dir / "sessions";
+            std::error_code ec{};
+            fs::create_directories(sessions_root, ec);
+            if (ec) {
+                throw std::runtime_error("failed to create sessions root: " + sessions_root.string());
+            }
+
+            auto session_id = make_session_id();
+            auto session_dir = sessions_root / session_id;
+
+            fs::create_directories(session_dir, ec);
+            if (ec) {
+                throw std::runtime_error("failed to create session dir: " + session_dir.string());
+            }
+
+            auto state = make_state_paths(session_dir);
+
+            write_json_file(make_persisted_config(cfg), state.config_path);
+            write_json_file(state.snapshot_data, state.snapshots_path);
+            persist_cells(state);
+
+            return state;
+        }
+
+        static repl_state resume_session(startup_config& cfg, std::string_view resume_id) {
+            auto sessions_root = session_root(cfg);
+
+            std::optional<fs::path> session_dir{};
+            if (resume_id == "latest"sv) {
+                session_dir = find_latest_session(sessions_root);
+            }
+            else {
+                auto candidate = sessions_root / std::string(resume_id);
+                std::error_code ec{};
+                if (fs::exists(candidate, ec) && !ec && fs::is_directory(candidate, ec) && !ec) {
+                    session_dir = candidate;
+                }
+            }
+
+            if (!session_dir) {
+                throw std::runtime_error("unable to resolve --resume target: " + std::string(resume_id));
+            }
+
+            auto state = make_state_paths(*session_dir);
+            auto persisted_cfg = read_json_file<persisted_config>(state.config_path);
+            apply_persisted_config(persisted_cfg, cfg);
+
+            if (fs::exists(state.snapshots_path)) {
+                state.snapshot_data = read_json_file<persisted_snapshots>(state.snapshots_path);
+            }
+            if (fs::exists(state.cells_path)) {
+                auto cell_data = read_json_file<persisted_cells>(state.cells_path);
+                state.cells = std::move(cell_data.cells);
+            }
+
+            persist_current_snapshot(state);
+            persist_cells(state);
+            return state;
+        }
+
+        static repl_state start_session(startup_config& cfg) {
+            if (cfg.resume_session) {
+                return resume_session(cfg, *cfg.resume_session);
+            }
+            return bootstrap_session(cfg);
+        }
+
+        static void print_config(const startup_config& cfg, std::ostream& os) {
+            os << "language_standard=" << to_string(cfg.language_standard) << '\n';
+            os << "opt_level=" << to_string(cfg.opt_level) << '\n';
+            os << "target=" << (cfg.target_triple ? *cfg.target_triple : "<default>") << '\n';
+            os << "cpu=" << (cfg.cpu ? *cfg.cpu : "<default>") << '\n';
+            os << "clang=" << cfg.clang_path.string() << '\n';
+            os << "cache_dir=" << cfg.cache_dir.string() << '\n';
+            os << "output=" << to_string(cfg.output) << '\n';
+            os << "color=" << to_string(cfg.color) << '\n';
+        }
+
+        static void print_snapshots(const repl_state& state, std::ostream& os) {
+            os << "snapshots:\n";
+            for (const auto& entry : state.snapshot_data.snapshots) {
+                os << "  " << entry.name << " (cells=" << entry.cell_count << ")";
+                if (entry.name == "current") {
+                    os << " [current]";
+                }
+                os << '\n';
+            }
+        }
+
+        static bool apply_set_command(startup_config& cfg, std::string_view assignment, std::ostream& err) {
+            auto eq = assignment.find('=');
+            if (eq == std::string_view::npos) {
+                err << "invalid :set, expected key=value\n";
+                return false;
+            }
+
+            auto key = trim_view(assignment.substr(0, eq));
+            auto value = trim_view(assignment.substr(eq + 1U));
+            if (key.empty() || value.empty()) {
+                err << "invalid :set, key and value must be non-empty\n";
+                return false;
+            }
+
+            if (key == "std"sv || key == "lang.std"sv) {
+                if (!try_parse_cxx_standard(value, cfg.language_standard)) {
+                    err << "invalid std: " << value << " (expected c++20|c++23|c++2c)\n";
+                    return false;
+                }
+                return true;
+            }
+
+            if (key == "opt"sv || key == "build.opt"sv) {
+                if (!try_parse_optimization_level(value, cfg.opt_level)) {
+                    err << "invalid opt: " << value << " (expected O0|O1|O2|O3|Ofast|Oz)\n";
+                    return false;
+                }
+                return true;
+            }
+
+            if (key == "target"sv || key == "build.target"sv) {
+                cfg.target_triple = std::string(value);
+                return true;
+            }
+
+            if (key == "cpu"sv || key == "build.cpu"sv) {
+                cfg.cpu = std::string(value);
+                return true;
+            }
+
+            if (key == "output"sv) {
+                if (!try_parse_output_mode(value, cfg.output)) {
+                    err << "invalid output: " << value << " (expected table|json)\n";
+                    return false;
+                }
+                return true;
+            }
+
+            if (key == "color"sv) {
+                if (!try_parse_color_mode(value, cfg.color)) {
+                    err << "invalid color: " << value << " (expected auto|always|never)\n";
+                    return false;
+                }
+                return true;
+            }
+
+            err << "unknown :set key: " << key << '\n';
+            return false;
+        }
+
+        static void print_help(std::ostream& os) {
+            os << "commands:\n";
+            os << "  :help\n";
+            os << "  :show config\n";
+            os << "  :set <key>=<value>\n";
+            os << "  :reset\n";
+            os << "  :mark <name>\n";
+            os << "  :snapshots\n";
+            os << "  :quit\n";
+            os << "examples:\n";
+            os << "  :set std=c++23\n";
+            os << "  :set opt=O3\n";
+            os << "  :set output=json\n";
+            os << "  :mark baseline\n";
+        }
+
+        static bool process_command(
+                const std::string& line, startup_config& cfg, repl_state& state, bool& should_quit) {
+            auto cmd = trim_view(line);
+            if (cmd == ":quit"sv || cmd == ":q"sv) {
+                should_quit = true;
+                return true;
+            }
+            if (cmd == ":help"sv) {
+                print_help(std::cout);
+                return true;
+            }
+            if (cmd == ":show config"sv) {
+                print_config(cfg, std::cout);
+                return true;
+            }
+            if (cmd == ":reset"sv) {
+                state.cells.clear();
+                persist_cells(state);
+                persist_current_snapshot(state);
+                std::cout << "session reset\n";
+                return true;
+            }
+            if (cmd == ":snapshots"sv) {
+                print_snapshots(state, std::cout);
+                return true;
+            }
+            if (cmd.starts_with(":mark "sv)) {
+                auto name = trim_view(cmd.substr(6U));
+                if (name.empty()) {
+                    std::cerr << "invalid :mark, expected a snapshot name\n";
+                    return true;
+                }
+                upsert_snapshot(state.snapshot_data, name, state.cells.size());
+                persist_snapshots(state);
+                std::cout << "marked snapshot '" << name << "' at cell_count=" << state.cells.size() << '\n';
+                return true;
+            }
+            if (cmd.starts_with(":set "sv)) {
+                auto assignment = trim_view(cmd.substr(5U));
+                if (apply_set_command(cfg, assignment, std::cerr)) {
+                    std::cout << "updated " << assignment << '\n';
+                }
+                return true;
+            }
+            if (cmd.starts_with(":"sv)) {
+                std::cerr << "unknown command: " << cmd << '\n';
+                return true;
+            }
+            return false;
+        }
+
+        static std::optional<std::string> normalize_optional(std::string value) {
+            auto trimmed = trim_view(value);
+            if (trimmed.empty()) {
+                return std::nullopt;
+            }
+            return std::string(trimmed);
+        }
+
+    }  // namespace detail
+
+    void run_repl(startup_config& cfg) {
+        auto resumed_session = cfg.resume_session;
+        auto state = detail::start_session(cfg);
+        std::string line{};
+        std::string pending_cell{};
+        detail::code_balance_state balance{};
+        bool should_quit = false;
+
+        std::cout << "sontag m0 repl\n";
+        if (resumed_session) {
+            std::cout << "resumed session from: " << *resumed_session << '\n';
+        }
+        std::cout << "session: " << state.session_id << '\n';
+        std::cout << "session dir: " << state.session_dir.string() << '\n';
+        std::cout << "type :help for commands\n";
+
+        while (!should_quit) {
+            std::string_view prompt = pending_cell.empty() ? "sontag> "sv : "...> "sv;
+            std::cout << prompt << std::flush;
+            if (!std::getline(std::cin, line)) {
+                if (!pending_cell.empty()) {
+                    std::cerr << "warning: discarding incomplete cell at EOF\n";
+                }
+                std::cout << '\n';
+                break;
+            }
+
+            if (line.empty()) {
+                if (!pending_cell.empty()) {
+                    pending_cell.push_back('\n');
+                }
+                continue;
+            }
+
+            if (pending_cell.empty() && detail::process_command(line, cfg, state, should_quit)) {
+                continue;
+            }
+
+            if (!pending_cell.empty()) {
+                pending_cell.push_back('\n');
+            }
+            pending_cell += line;
+            detail::update_code_balance_state(balance, line);
+
+            if (!detail::cell_is_complete(balance)) {
+                continue;
+            }
+
+            state.cells.push_back(pending_cell);
+            detail::persist_cells(state);
+            detail::persist_current_snapshot(state);
+            std::cout << "stored cell #" << state.cells.size() << '\n';
+            pending_cell.clear();
+            balance = detail::code_balance_state{};
+        }
+
+        return;
+    }
+
+    std::optional<int> parse_cli(int argc, char** argv, startup_config& cfg) {
+        CLI::App app{"sontag"};
+
+        bool show_version = false;
+        std::string std_arg{std::string{to_string(cfg.language_standard)}};
+        std::string opt_arg{std::string{to_string(cfg.opt_level)}};
+        std::string output_arg{std::string{to_string(cfg.output)}};
+        std::string color_arg{std::string{to_string(cfg.color)}};
+        std::string target_arg{};
+        std::string cpu_arg{};
+        std::string resume_arg{};
+        std::string clang_arg{cfg.clang_path.string()};
+        std::string cache_dir_arg{cfg.cache_dir.string()};
+
+        app.add_flag("--version", show_version, "Print version and exit");
+        app.add_option("--std", std_arg, "C++ standard: c++20|c++23|c++2c");
+        app.add_option("-O,--opt", opt_arg, "Optimization level: O0|O1|O2|O3|Ofast|Oz");
+        app.add_option("--target", target_arg, "LLVM target triple");
+        app.add_option("--cpu", cpu_arg, "Target CPU");
+        app.add_option("--resume", resume_arg, "Resume session id or latest");
+        app.add_option("--clang", clang_arg, "clang++ executable path");
+        app.add_option("--cache-dir", cache_dir_arg, "Cache/artifact directory");
+        app.add_option("--output", output_arg, "Output mode: table|json");
+        app.add_option("--color", color_arg, "Color mode: auto|always|never");
+        app.add_flag("--no-color", "Force color mode to never");
+        app.add_flag("--print-config", cfg.print_config, "Print resolved config and exit");
+        app.add_flag("--quiet", cfg.quiet, "Suppress non-essential output");
+        app.add_flag("--verbose", cfg.verbose, "Enable verbose output");
+
+        try {
+            app.parse(argc, argv);
+        } catch (const CLI::ParseError& e) {
+            return std::optional<int>{app.exit(e)};
+        }
+
+        if (cfg.quiet && cfg.verbose) {
+            std::cerr << "--quiet and --verbose are mutually exclusive\n";
+            return std::optional<int>{2};
+        }
+
+        if (!try_parse_cxx_standard(std_arg, cfg.language_standard)) {
+            std::cerr << "invalid --std value: " << std_arg << " (expected c++20|c++23|c++2c)\n";
+            return std::optional<int>{2};
+        }
+        if (!try_parse_optimization_level(opt_arg, cfg.opt_level)) {
+            std::cerr << "invalid --opt value: " << opt_arg << " (expected O0|O1|O2|O3|Ofast|Oz)\n";
+            return std::optional<int>{2};
+        }
+        if (!try_parse_output_mode(output_arg, cfg.output)) {
+            std::cerr << "invalid --output value: " << output_arg << " (expected table|json)\n";
+            return std::optional<int>{2};
+        }
+        if (!try_parse_color_mode(color_arg, cfg.color)) {
+            std::cerr << "invalid --color value: " << color_arg << " (expected auto|always|never)\n";
+            return std::optional<int>{2};
+        }
+
+        cfg.target_triple = detail::normalize_optional(target_arg);
+        cfg.cpu = detail::normalize_optional(cpu_arg);
+        cfg.resume_session = detail::normalize_optional(resume_arg);
+        cfg.clang_path = clang_arg;
+        cfg.cache_dir = cache_dir_arg;
+
+        if (app.get_option("--no-color")->count() > 0U) {
+            cfg.color = color_mode::never;
+        }
+
+        if (show_version) {
+            std::cout << "sontag 0.1.0\n";
+            return std::optional<int>{0};
+        }
+
+        if (cfg.print_config) {
+            detail::print_config(cfg, std::cout);
+            return std::optional<int>{0};
+        }
+
+        return std::nullopt;
+    }
+
+}  // namespace sontag::cli
