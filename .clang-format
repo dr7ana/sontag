@@ -1,0 +1,101 @@
+BasedOnStyle: Google
+
+AccessModifierOffset: -2
+
+# alignment
+AlignAfterOpenBracket: AlwaysBreak
+AlignConsecutiveAssignments: 'false'
+AlignConsecutiveDeclarations: 'false'
+AlignEscapedNewlines: Left
+AlignOperands: AlignAfterOperator
+AlignTrailingComments: 'true'
+
+# inlining
+AllowAllArgumentsOnNextLine: 'true'
+AllowShortBlocksOnASingleLine: 'false'
+AllowShortCaseLabelsOnASingleLine: 'false'
+AllowShortCompoundRequirementOnASingleLine: 'true'
+AllowShortFunctionsOnASingleLine: 'Inline'
+AllowShortIfStatementsOnASingleLine: 'false'
+AllowShortLoopsOnASingleLine: 'false'
+IndentRequiresClause: 'true'
+RequiresClausePosition: 'OwnLine'
+
+# breaking
+AlwaysBreakAfterReturnType: None
+AlwaysBreakTemplateDeclarations: Yes
+BreakBeforeBinaryOperators: None
+BreakBeforeBraces: Custom
+BreakBeforeConceptDeclarations: 'Always'
+BreakBeforeTernaryOperators: 'true'
+BreakConstructorInitializers: AfterColon
+PenaltyBreakString: '3'
+
+# bracing
+BraceWrapping:
+  AfterCaseLabel: true
+  AfterClass: false
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterExternBlock: false
+  AfterFunction: false
+  AfterNamespace: false
+  AfterStruct: false
+  AfterUnion: false
+  BeforeCatch: false
+  BeforeElse: true
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+
+ColumnLimit: 120
+CompactNamespaces: 'true'
+ConstructorInitializerIndentWidth: 8
+ContinuationIndentWidth: 8
+Cpp11BracedListStyle: 'true'
+IndentWidth: 4
+KeepEmptyLinesAtTheStartOfBlocks: 'true'
+NamespaceIndentation: All
+QualifierAlignment: Left
+RemoveSemicolon: true
+
+#includes
+SortIncludes: CaseInsensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"[^/]*.h(pp)?"$'
+    Priority: 1
+  - Regex: '^"unlog'
+    Priority: 2
+  - Regex: '^<unlog'
+    Priority: 3
+  - Regex: '^"(fmt|spdlog|catch2)'
+    Priority: 4
+  - Regex: '^<(fmt|spdlog|catch2)'
+    Priority: 5
+  - Regex: '^<.*\.h(pp)?>$'
+    Priority: 6
+  - Regex: '(<)(.)+(>)'
+    Priority: 7
+
+# spacing
+SpaceBeforeParens: ControlStatements
+SpacesInAngles: 'false'
+SpacesInContainerLiterals: 'false'
+SpacesInParentheses: 'false'
+SpacesInSquareBrackets: 'false'
+
+Standard: Latest
+
+UseTab: Never
+
+# treat pointers and reference declarations as if part of the type
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# when wrapping function calls/declarations, force each parameter to have its own line
+BinPackParameters: 'false'
+BinPackArguments: 'false'

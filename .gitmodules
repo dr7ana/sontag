@@ -1,0 +1,9 @@
+[submodule "tests/Catch2"]
+	path = tests/Catch2
+	url = https://github.com/catchorg/Catch2.git
+[submodule "external/CLI11"]
+	path = external/CLI11
+	url = https://github.com/CLIUtils/CLI11.git
+[submodule "external/glaze"]
+	path = external/glaze
+	url = https://github.com/stephenberry/glaze.git

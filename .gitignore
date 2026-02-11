@@ -1,0 +1,17 @@
+/build*
+.cache/
+.vscode/
+.DS_Store
+.gdb_history
+*.pem
+*.PEM
+*.der
+*.DER
+rebuild.sh
+full_rebuild.sh
+notes.txt
+/compile_commands.json
+bazel-*
+*.json
+*.bazel.lock
+.bazelrc.user
