@@ -1,5 +1,7 @@
 #include "sontag/cli.hpp"
 
+#include "editor.hpp"
+
 #include <glaze/glaze.hpp>
 
 #include <CLI/CLI.hpp>
@@ -642,6 +644,7 @@ namespace sontag::cli {
     void run_repl(startup_config& cfg) {
         auto resumed_session = cfg.resume_session;
         auto state = detail::start_session(cfg);
+        line_editor editor{cfg};
         std::string line{};
         std::string pending_cell{};
         detail::code_balance_state balance{};
@@ -657,14 +660,15 @@ namespace sontag::cli {
 
         while (!should_quit) {
             std::string_view prompt = pending_cell.empty() ? "sontag> "sv : "...> "sv;
-            std::cout << prompt << std::flush;
-            if (!std::getline(std::cin, line)) {
+            auto next_line = editor.read_line(prompt);
+            if (!next_line) {
                 if (!pending_cell.empty()) {
                     std::cerr << "warning: discarding incomplete cell at EOF\n";
                 }
                 std::cout << '\n';
                 break;
             }
+            line = std::move(*next_line);
 
             if (line.empty()) {
                 if (!pending_cell.empty()) {
@@ -672,6 +676,8 @@ namespace sontag::cli {
                 }
                 continue;
             }
+
+            editor.record_history(line);
 
             if (pending_cell.empty() && detail::process_command(line, cfg, state, should_quit)) {
                 continue;
@@ -711,6 +717,8 @@ namespace sontag::cli {
         std::string resume_arg{};
         std::string clang_arg{cfg.clang_path.string()};
         std::string cache_dir_arg{cfg.cache_dir.string()};
+        std::string history_file_arg{cfg.history_file.string()};
+        bool no_history = false;
 
         app.add_flag("--version", show_version, "Print version and exit");
         app.add_option("--std", std_arg, "C++ standard: c++20|c++23|c++2c");
@@ -720,6 +728,8 @@ namespace sontag::cli {
         app.add_option("--resume", resume_arg, "Resume session id or latest");
         app.add_option("--clang", clang_arg, "clang++ executable path");
         app.add_option("--cache-dir", cache_dir_arg, "Cache/artifact directory");
+        app.add_option("--history-file", history_file_arg, "Persistent REPL history path");
+        app.add_flag("--no-history", no_history, "Disable persistent REPL history");
         app.add_option("--output", output_arg, "Output mode: table|json");
         app.add_option("--color", color_arg, "Color mode: auto|always|never");
         app.add_flag("--no-color", "Force color mode to never");
@@ -760,6 +770,10 @@ namespace sontag::cli {
         cfg.resume_session = detail::normalize_optional(resume_arg);
         cfg.clang_path = clang_arg;
         cfg.cache_dir = cache_dir_arg;
+        cfg.history_file = history_file_arg;
+        if (no_history) {
+            cfg.history_enabled = false;
+        }
 
         if (app.get_option("--no-color")->count() > 0U) {
             cfg.color = color_mode::never;

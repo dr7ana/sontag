@@ -43,6 +43,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(sontag
     src/cli.cpp
+    src/editor.cpp
     src/interpreter.cpp
 )
 
@@ -55,6 +56,7 @@ target_link_libraries(sontag
     PUBLIC 
     glaze::glaze
     CLI11::CLI11
+    linenoise::linenoise
 )
 
 add_executable(

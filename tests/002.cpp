@@ -33,6 +33,8 @@ namespace sontag::test {
                 "latest",
                 "--cache-dir",
                 "/tmp/sontag_tests",
+                "--history-file",
+                "/tmp/sontag_tests/history.txt",
                 "--output",
                 "json",
                 "--color",
@@ -50,6 +52,7 @@ namespace sontag::test {
         REQUIRE(cfg.resume_session);
         CHECK(*cfg.resume_session == "latest");
         CHECK(cfg.cache_dir == "/tmp/sontag_tests");
+        CHECK(cfg.history_file == "/tmp/sontag_tests/history.txt");
         CHECK(cfg.output == output_mode::json);
         CHECK(cfg.color == color_mode::never);
     }
@@ -84,6 +87,16 @@ namespace sontag::test {
         auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);
         REQUIRE(result);
         CHECK(*result == 0);
+    }
+
+    TEST_CASE("002: parse_cli handles history toggles", "[002][cli]") {
+        startup_config cfg{};
+        std::vector<std::string> args{"sontag", "--no-history"};
+        auto argv = detail::to_argv(args);
+
+        auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);
+        CHECK(!result);
+        CHECK_FALSE(cfg.history_enabled);
     }
 
 }  // namespace sontag::test
