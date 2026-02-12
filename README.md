@@ -23,8 +23,7 @@ the C++ interpreter against simply interpreting
 ## Build
 
 ```bash
-mkdir -p build
-cd build
+mkdir -p build && cd build
 cmake ..
 ninja -v
 ```
@@ -35,7 +34,7 @@ ninja -v
 ./build/sontag
 ```
 
-### Running tests
+### Running tests:
 
 ```bash
 ./build/tests/alltests
@@ -57,7 +56,7 @@ values[1] = value * 2;
 :mca
 ```
 
-### Output
+### Output:
 
 ```bash
 sontag > :decl int value = 64;
@@ -92,6 +91,9 @@ sontag >
 
 - interactive C++ cell entry in a REPL loop
 - top-level declaration cells (`:decl`) and executable cells
+- file ingestion commands:
+  - `:declfile <path>` loads full file text as one declarative cell
+  - `:file <path>` AST-splits a source file into declarative prefix + driver body (`main` or `__sontag_main`)
 - generated translation unit preview (`:show all`)
 - symbol listing from compiled output (`:symbols`)
 - assembly output (`:asm`)
@@ -110,6 +112,12 @@ sontag >
 ## How Input Works
 
 - `:decl <code>` stores top-level declarations (includes, globals, functions).
+- `:declfile <path>` appends an entire file as one declarative cell.
+- `:file <path>` replaces current cells by loading a file and extracting:
+  - top-level declarative text before the driver function
+  - one executable cell from the selected driver body
+  - if both `main` and `__sontag_main` exist, import fails
+  - if neither exists, import fails and suggests `:declfile`
 - non-command input stores executable cells in synthesized `__sontag_main()`.
 - press `Shift+Tab` (or `Ctrl+Enter`) to insert a newline while composing a multi-line cell.
 - use `:show all` to inspect the full generated source in order: declarations first, then executable cells wrapped in the synthesized function.

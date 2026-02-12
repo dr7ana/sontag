@@ -64,6 +64,13 @@ namespace sontag::test { namespace detail {
         return value;
     }
 
+    static void write_text_file(const fs::path& path, std::string_view text) {
+        std::ofstream out{path};
+        REQUIRE(out.good());
+        out << text;
+        REQUIRE(out.good());
+    }
+
     static std::optional<size_t> snapshot_cell_count(const persisted_snapshots& snapshots, std::string_view name) {
         for (const auto& record : snapshots.snapshots) {
             if (record.name == name) {
@@ -229,6 +236,7 @@ namespace glz {
 }  // namespace glz
 
 namespace sontag::test {
+    using namespace sontag::literals;
 
     TEST_CASE("005: session bootstrap persists config cells and snapshots", "[005][session]") {
         detail::temp_dir temp{"sontag_session_bootstrap"};
@@ -439,6 +447,114 @@ namespace sontag::test {
         REQUIRE(persisted_cells.exec_cells.size() == 1U);
         CHECK(persisted_cells.decl_cells[0] == "int base = 5;");
         CHECK(persisted_cells.exec_cells[0] == "int x = base;");
+    }
+
+    TEST_CASE("005: declfile appends full file as a declarative cell", "[005][session][declfile]") {
+        detail::temp_dir temp{"sontag_declfile"};
+        auto source_path = temp.path / "decl_only.hpp";
+        detail::write_text_file(
+                source_path,
+                "#include <cstdint>\n"
+                "using u64 = std::uint64_t;\n"
+                "u64 base = 8;\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":declfile \"{}\"\n:show all\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("stored decl #1 (state: valid)") != std::string::npos);
+        CHECK(output.out.find("#include <cstdint>") != std::string::npos);
+        CHECK(output.out.find("using u64 = std::uint64_t;") != std::string::npos);
+        CHECK(output.out.find("u64 base = 8;") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        CHECK(persisted_cells.exec_cells.empty());
+    }
+
+    TEST_CASE("005: file loads declarative prefix and driver body", "[005][session][file]") {
+        detail::temp_dir temp{"sontag_file_load"};
+        auto source_path = temp.path / "program.cpp";
+        detail::write_text_file(
+                source_path,
+                "#include <cstdint>\n"
+                "uint64_t value = 64;\n"
+                "\n"
+                "int __sontag_main() {\n"
+                "    uint64_t doubled = value * 2;\n"
+                "    return static_cast<int>(doubled);\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":file {}\n:show all\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("loaded file") != std::string::npos);
+        CHECK(output.out.find("#include <cstdint>") != std::string::npos);
+        CHECK(output.out.find("uint64_t value = 64;") != std::string::npos);
+        CHECK(output.out.find("uint64_t doubled = value * 2;") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.decl_cells[0].find("uint64_t value = 64;") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("uint64_t doubled = value * 2;") != std::string::npos);
+    }
+
+    TEST_CASE("005: file rejects source with both main and __sontag_main", "[005][session][file]") {
+        detail::temp_dir temp{"sontag_file_conflict"};
+        auto source_path = temp.path / "conflict.cpp";
+        detail::write_text_file(
+                source_path,
+                "int main() { return 0; }\n"
+                "int __sontag_main() { return 0; }\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":file {}\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.err.find("file contains both __sontag_main and main; keep only one driver function") !=
+              std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        CHECK(persisted_cells.decl_cells.empty());
+        CHECK(persisted_cells.exec_cells.empty());
+    }
+
+    TEST_CASE("005: file rejects source with no driver and suggests declfile", "[005][session][file]") {
+        detail::temp_dir temp{"sontag_file_no_driver"};
+        auto source_path = temp.path / "no_driver.cpp";
+        detail::write_text_file(
+                source_path,
+                "#include <cstdint>\n"
+                "uint64_t value = 64;\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":file {}\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.err.find("no driver function found (expected main or __sontag_main)") != std::string::npos);
+        CHECK(output.err.find("use :declfile <path>") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        CHECK(persisted_cells.decl_cells.empty());
+        CHECK(persisted_cells.exec_cells.empty());
     }
 
 }  // namespace sontag::test
