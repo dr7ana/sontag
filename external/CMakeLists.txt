@@ -6,6 +6,7 @@ if(GIT_FOUND)
     include(check_submodule)
     check_submodule(CLI11)
     check_submodule(glaze)
+    check_submodule(isocline)
     check_submodule(linenoise)
 endif()
 
@@ -14,6 +15,10 @@ add_subdirectory(CLI11)
 
 # glaze
 add_subdirectory(glaze)
+
+# isocline
+set(IC_USE_CXX TRUE CACHE BOOL "" FALSES)
+add_subdirectory(isocline)
 
 # linenoise
 add_library(linenoise STATIC linenoise/linenoise.c)

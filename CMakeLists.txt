@@ -70,6 +70,7 @@ target_link_libraries(sontag
     glaze::glaze
     CLI11::CLI11
     linenoise::linenoise
+    isocline::isocline
 )
 
 add_executable(

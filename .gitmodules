@@ -10,3 +10,6 @@
 [submodule "external/linenoise"]
 	path = external/linenoise
 	url = https://github.com/antirez/linenoise.git
+[submodule "external/isocline"]
+	path = external/isocline
+	url = https://github.com/daanx/isocline.git
