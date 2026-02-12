@@ -22,7 +22,7 @@ cmake ..
 ninja -v
 ```
 
-Binary output:
+### Binary output:
 
 ```bash
 ./sontag
