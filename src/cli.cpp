@@ -755,6 +755,10 @@ examples:
             os.flush();
         }
 
+        static constexpr bool is_command_separator(char c) {
+            return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+        }
+
         static bool matches_command(std::string_view cmd, std::string_view name) {
             if (!cmd.starts_with(name)) {
                 return false;
@@ -763,7 +767,7 @@ examples:
                 return true;
             }
             auto next = cmd[name.size()];
-            return next == ' ' || next == '\t';
+            return is_command_separator(next);
         }
 
         static std::optional<std::string_view> command_argument(std::string_view cmd, std::string_view name) {
@@ -1092,8 +1096,8 @@ examples:
                 }
                 return true;
             }
-            if (cmd.starts_with(":mark "sv)) {
-                auto name = trim_view(cmd.substr(6U));
+            if (auto mark_arg = command_argument(cmd, ":mark"sv)) {
+                auto name = trim_view(*mark_arg);
                 if (name.empty()) {
                     std::cerr << "invalid :mark, expected a snapshot name\n";
                     return true;
@@ -1103,8 +1107,8 @@ examples:
                 std::cout << "marked snapshot '" << name << "' at cell_count=" << total_cell_count(state) << '\n';
                 return true;
             }
-            if (cmd.starts_with(":set "sv)) {
-                auto assignment = trim_view(cmd.substr(5U));
+            if (auto set_arg = command_argument(cmd, ":set"sv)) {
+                auto assignment = trim_view(*set_arg);
                 if (apply_set_command(cfg, assignment, std::cerr)) {
                     std::cout << "updated " << assignment << '\n';
                 }
@@ -1169,7 +1173,7 @@ examples:
         std::cout << "type :help for commands\n";
 
         while (!should_quit) {
-            std::string_view prompt = pending_cell.empty() ? "sontag> "sv : "...> "sv;
+            std::string_view prompt = pending_cell.empty() ? "sontag > "sv : "...> "sv;
             auto next_line = editor.read_line(prompt);
             if (!next_line) {
                 if (!pending_cell.empty()) {
