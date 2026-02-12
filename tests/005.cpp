@@ -514,6 +514,9 @@ namespace sontag::test {
         CHECK(output.out.find("#include <cstdint>") != std::string::npos);
         CHECK(output.out.find("uint64_t value = 64;") != std::string::npos);
         CHECK(output.out.find("uint64_t doubled = value * 2;") != std::string::npos);
+        CHECK(output.out.find("return static_cast<int>(doubled);") != std::string::npos);
+        CHECK(output.out.find("return 0;") == std::string::npos);
+        CHECK(output.out.find("return static_cast<int>(doubled);\n\n}") == std::string::npos);
 
         auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");

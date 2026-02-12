@@ -162,6 +162,239 @@ namespace sontag {
 
         using namespace std::string_view_literals;
 
+        static std::string_view trim_ascii(std::string_view value);
+
+        static bool is_identifier_char(char c) {
+            return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+        }
+
+        static std::string strip_comments_and_string_literals(std::string_view text) {
+            std::string out{};
+            out.reserve(text.size());
+
+            bool in_single_quote = false;
+            bool in_double_quote = false;
+            bool in_line_comment = false;
+            bool in_block_comment = false;
+            bool escape_next = false;
+            bool in_raw_string = false;
+            std::string raw_delimiter{};
+
+            size_t i = 0U;
+            while (i < text.size()) {
+                auto c = text[i];
+                auto next = (i + 1U < text.size()) ? text[i + 1U] : '\0';
+
+                if (in_line_comment) {
+                    if (c == '\n') {
+                        in_line_comment = false;
+                        out.push_back('\n');
+                    }
+                    else {
+                        out.push_back(' ');
+                    }
+                    ++i;
+                    continue;
+                }
+
+                if (in_block_comment) {
+                    if (c == '*' && next == '/') {
+                        out.push_back(' ');
+                        out.push_back(' ');
+                        i += 2U;
+                        in_block_comment = false;
+                        continue;
+                    }
+                    out.push_back(c == '\n' ? '\n' : ' ');
+                    ++i;
+                    continue;
+                }
+
+                if (in_raw_string) {
+                    if (c == ')' && i + raw_delimiter.size() + 1U < text.size() &&
+                        text.substr(i + 1U, raw_delimiter.size()) == raw_delimiter &&
+                        text[i + 1U + raw_delimiter.size()] == '"') {
+                        out.push_back(' ');
+                        for (size_t k = 0U; k < raw_delimiter.size(); ++k) {
+                            out.push_back(' ');
+                        }
+                        out.push_back(' ');
+                        i += raw_delimiter.size() + 2U;
+                        in_raw_string = false;
+                        raw_delimiter.clear();
+                        continue;
+                    }
+                    out.push_back(c == '\n' ? '\n' : ' ');
+                    ++i;
+                    continue;
+                }
+
+                if (in_single_quote) {
+                    if (escape_next) {
+                        escape_next = false;
+                        out.push_back(' ');
+                        ++i;
+                        continue;
+                    }
+                    if (c == '\\') {
+                        escape_next = true;
+                        out.push_back(' ');
+                        ++i;
+                        continue;
+                    }
+                    if (c == '\'') {
+                        in_single_quote = false;
+                    }
+                    out.push_back(c == '\n' ? '\n' : ' ');
+                    ++i;
+                    continue;
+                }
+
+                if (in_double_quote) {
+                    if (escape_next) {
+                        escape_next = false;
+                        out.push_back(' ');
+                        ++i;
+                        continue;
+                    }
+                    if (c == '\\') {
+                        escape_next = true;
+                        out.push_back(' ');
+                        ++i;
+                        continue;
+                    }
+                    if (c == '"') {
+                        in_double_quote = false;
+                    }
+                    out.push_back(c == '\n' ? '\n' : ' ');
+                    ++i;
+                    continue;
+                }
+
+                if (c == '/' && next == '/') {
+                    in_line_comment = true;
+                    out.push_back(' ');
+                    out.push_back(' ');
+                    i += 2U;
+                    continue;
+                }
+                if (c == '/' && next == '*') {
+                    in_block_comment = true;
+                    out.push_back(' ');
+                    out.push_back(' ');
+                    i += 2U;
+                    continue;
+                }
+
+                if (c == 'R' && next == '"') {
+                    auto open_paren = text.find('(', i + 2U);
+                    if (open_paren != std::string_view::npos) {
+                        bool valid_delimiter = true;
+                        for (size_t k = i + 2U; k < open_paren; ++k) {
+                            auto delimiter_char = text[k];
+                            if (delimiter_char == '\\' || delimiter_char == ')' || delimiter_char == '(' ||
+                                std::isspace(static_cast<unsigned char>(delimiter_char))) {
+                                valid_delimiter = false;
+                                break;
+                            }
+                        }
+                        if (valid_delimiter) {
+                            raw_delimiter = std::string{text.substr(i + 2U, open_paren - (i + 2U))};
+                            in_raw_string = true;
+                            for (size_t k = i; k <= open_paren; ++k) {
+                                out.push_back(' ');
+                            }
+                            i = open_paren + 1U;
+                            continue;
+                        }
+                    }
+                }
+
+                if (c == '\'') {
+                    in_single_quote = true;
+                    out.push_back(' ');
+                    ++i;
+                    continue;
+                }
+                if (c == '"') {
+                    in_double_quote = true;
+                    out.push_back(' ');
+                    ++i;
+                    continue;
+                }
+
+                out.push_back(c);
+                ++i;
+            }
+
+            return out;
+        }
+
+        static bool has_trailing_return_statement(const std::vector<std::string>& exec_cells) {
+            if (exec_cells.empty()) {
+                return false;
+            }
+
+            std::string joined_exec{};
+            for (size_t i = 0U; i < exec_cells.size(); ++i) {
+                joined_exec.append(exec_cells[i]);
+                if (i + 1U < exec_cells.size()) {
+                    joined_exec.push_back('\n');
+                }
+            }
+
+            auto sanitized = strip_comments_and_string_literals(joined_exec);
+            auto text = trim_ascii(sanitized);
+            if (text.empty() || !text.ends_with(';')) {
+                return false;
+            }
+
+            auto last_semicolon = text.rfind(';');
+            if (last_semicolon == std::string_view::npos) {
+                return false;
+            }
+
+            auto before = text.substr(0U, last_semicolon);
+            auto statement_separator = before.find_last_of(";{}");
+            auto statement =
+                    statement_separator == std::string_view::npos ? before : before.substr(statement_separator + 1U);
+            statement = trim_ascii(statement);
+
+            constexpr auto return_keyword = "return"sv;
+            if (!statement.starts_with(return_keyword)) {
+                return false;
+            }
+            if (statement.size() == return_keyword.size()) {
+                return true;
+            }
+
+            return !is_identifier_char(statement[return_keyword.size()]);
+        }
+
+        static void write_exec_cell(std::ostringstream& source, std::string_view cell) {
+            size_t cursor = 0U;
+            while (cursor <= cell.size()) {
+                auto line_end = cell.find('\n', cursor);
+                auto line = line_end == std::string_view::npos ? cell.substr(cursor)
+                                                               : cell.substr(cursor, line_end - cursor);
+
+                if (line.empty()) {
+                    source << '\n';
+                }
+                else if (line.front() == ' ' || line.front() == '\t') {
+                    source << line << '\n';
+                }
+                else {
+                    source << "    " << line << '\n';
+                }
+
+                if (line_end == std::string_view::npos) {
+                    break;
+                }
+                cursor = line_end + 1U;
+            }
+        }
+
         static std::string read_text_file(const fs::path& path) {
             std::ifstream in{path};
             if (!in) {
@@ -195,10 +428,17 @@ namespace sontag {
             source << "int __sontag_main() {\n";
             for (size_t i = 0U; i < exec_cells.size(); ++i) {
                 source << "    // exec cell " << (i + 1U) << '\n';
-                source << "    " << exec_cells[i] << '\n';
-                source << '\n';
+                write_exec_cell(source, exec_cells[i]);
+                if (i + 1U < exec_cells.size()) {
+                    source << '\n';
+                }
             }
-            source << "    return 0;\n";
+            if (!has_trailing_return_statement(exec_cells)) {
+                if (!exec_cells.empty()) {
+                    source << '\n';
+                }
+                source << "    return 0;\n";
+            }
             source << "}\n";
             return source.str();
         }
