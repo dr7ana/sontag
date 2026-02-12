@@ -362,14 +362,35 @@ namespace sontag::cli {
         }
 
         template <typename T>
-        static T read_json_file(const fs::path& path) {
+        static T read_json_file(const fs::path& path, bool allow_unknown_keys = false) {
             T value{};
             auto json = read_text_file(path);
-            auto ec = glz::read_json(value, json);
-            if (ec) {
-                throw std::runtime_error("failed to parse json file " + path.string());
+            if (allow_unknown_keys) {
+                auto ec = glz::read<glz::opts{.error_on_unknown_keys = false}>(value, json);
+                if (ec) {
+                    throw std::runtime_error("failed to parse json file " + path.string());
+                }
+            }
+            else {
+                auto ec = glz::read_json(value, json);
+                if (ec) {
+                    throw std::runtime_error("failed to parse json file " + path.string());
+                }
             }
             return value;
+        }
+
+        static void validate_supported_schema_version(int schema_version, const fs::path& path) {
+            constexpr int supported_schema_version = 1;
+            if (schema_version > supported_schema_version) {
+                auto message = std::string{"unsupported schema_version in "};
+                message.append(path.string());
+                message.append(": ");
+                message.append(std::to_string(schema_version));
+                message.append(" > ");
+                message.append(std::to_string(supported_schema_version));
+                throw std::runtime_error(message);
+            }
         }
 
         static std::string make_session_id() {
@@ -496,14 +517,18 @@ namespace sontag::cli {
             }
 
             auto state = make_state_paths(*session_dir);
-            auto persisted_cfg = read_json_file<persisted_config>(state.config_path);
+            auto persisted_cfg = read_json_file<persisted_config>(state.config_path, true);
+            validate_supported_schema_version(persisted_cfg.schema_version, state.config_path);
             apply_persisted_config(persisted_cfg, cfg);
 
             if (fs::exists(state.snapshots_path)) {
-                state.snapshot_data = read_json_file<persisted_snapshots>(state.snapshots_path);
+                auto snapshot_data = read_json_file<persisted_snapshots>(state.snapshots_path, true);
+                validate_supported_schema_version(snapshot_data.schema_version, state.snapshots_path);
+                state.snapshot_data = std::move(snapshot_data);
             }
             if (fs::exists(state.cells_path)) {
-                auto cell_data = read_json_file<persisted_cells>(state.cells_path);
+                auto cell_data = read_json_file<persisted_cells>(state.cells_path, true);
+                validate_supported_schema_version(cell_data.schema_version, state.cells_path);
                 state.cells = std::move(cell_data.cells);
             }
 

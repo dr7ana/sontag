@@ -94,8 +94,7 @@ namespace sontag::test {
         CHECK(parsed.text.find("foo") != std::string::npos);
         REQUIRE_FALSE(parsed.clang_command.empty());
         CHECK(parsed.clang_command[0].find("clang++") != std::string::npos);
-        CHECK(std::find(parsed.clang_command.begin(), parsed.clang_command.end(), "-S") !=
-              parsed.clang_command.end());
+        CHECK(std::find(parsed.clang_command.begin(), parsed.clang_command.end(), "-S") != parsed.clang_command.end());
     }
 
     TEST_CASE("004: unresolved symbol reports clear failure", "[004][analysis][symbol]") {

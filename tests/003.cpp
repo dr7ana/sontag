@@ -94,10 +94,7 @@ namespace sontag::test {
         request.opt_level = optimization_level::o2;
         request.cells = {"int add(int a, int b) { return a + b; }"};
 
-        std::vector<analysis_kind> commands{
-                analysis_kind::asm_text,
-                analysis_kind::ir,
-                analysis_kind::diag};
+        std::vector<analysis_kind> commands{analysis_kind::asm_text, analysis_kind::ir, analysis_kind::diag};
         std::vector<analysis_result> results{};
         results.reserve(commands.size());
 
