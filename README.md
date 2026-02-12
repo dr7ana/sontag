@@ -64,6 +64,10 @@ values[1] = value * 2;
 - graph generation (`:graph <subcommand>`)
   - control-flow graphs (`:graph cfg`)
   - function call graphs (`:graph call`)
+  - def-use graphs (`:graph defuse`)
+- structured visualization data export (`:inspect <subcommand>`)
+  - source/IR/asm line-map data (`:inspect asm`)
+  - mca summary/heatmap data (`:inspect mca`)
 
 ## How Input Works
 
@@ -88,8 +92,11 @@ values[1] = value * 2;
 - `:diag [symbol|@last]` runs compile diagnostics on the current snapshot and prints compiler errors/warnings (optionally filtered by symbol).
 - `:mca [symbol|@last]` compiles to assembly, runs microarchitecture analysis, and prints throughput/latency/resource-pressure analysis text.
 - `:mca` does not operate on data symbols (for example `[D]`/`[B]` entries from `:symbols`).
+- `:inspect asm [symbol|@last]` emits structured JSON containing aligned source/IR/asm line records for downstream tooling.
+- `:inspect mca [summary|heatmap] [symbol|@last]` emits structured JSON from `llvm-mca` output and prints a compact terminal summary.
 - `:graph cfg [symbol|@last]` compiles to LLVM IR, builds a function-scoped control-flow graph, and emits graph summary + DOT artifact (with optional rendered image).
 - `:graph call [symbol|@last]` compiles to LLVM IR, builds a root-scoped function call graph, and emits graph summary + DOT artifact (with optional rendered image).
+- `:graph defuse [symbol|@last]` compiles to LLVM IR, builds a function-scoped def-use graph, and emits graph summary + DOT artifact (with optional rendered image).
 
 ## `:graph`
 
@@ -122,3 +129,26 @@ Output includes:
   - `edges`: number of call edges
   - `dot`: path to the DOT artifact in `artifacts/graphs/call`
   - `rendered`: rendered graph path (or `<none>` if rendering is unavailable)
+
+## `:inspect`
+
+Use `:inspect <subcommand>` for structured visualization data payloads.
+
+Supported subcommands:
+- `asm`: source/IR/asm alignment payload (JSON).
+- `mca summary`: parsed llvm-mca summary payload (JSON).
+- `mca heatmap`: parsed llvm-mca resource-pressure payload (JSON).
+
+Examples:
+
+```text
+:inspect asm
+:inspect asm __sontag_main
+:inspect mca
+:inspect mca summary
+:inspect mca heatmap __sontag_main
+```
+
+Notes:
+- `:inspect` commands emit JSON artifacts under `artifacts/inspect/...` and print a compact terminal summary.
+- `:inspect` commands do not generate rendered image files.

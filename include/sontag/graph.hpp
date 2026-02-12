@@ -25,6 +25,14 @@ namespace sontag::graph {
         std::string dot_text{};
     };
 
+    struct defuse_graph_artifact {
+        std::string function_name{};
+        std::string function_display_name{};
+        size_t node_count{};
+        size_t edge_count{};
+        std::string dot_text{};
+    };
+
     std::optional<std::string> find_first_ir_function_name(std::string_view ir_text);
 
     std::optional<cfg_graph_artifact> build_cfg_graph_artifact(
@@ -33,6 +41,12 @@ namespace sontag::graph {
     std::optional<call_graph_artifact> build_call_graph_artifact(
             std::string_view ir_text,
             std::string_view root_function,
+            const symbol_display_map* display_names = nullptr,
+            bool include_inline_annotations = false);
+
+    std::optional<defuse_graph_artifact> build_defuse_graph_artifact(
+            std::string_view ir_text,
+            std::string_view function_name,
             const symbol_display_map* display_names = nullptr);
 
 }  // namespace sontag::graph

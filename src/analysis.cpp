@@ -3,6 +3,8 @@
 #include "sontag/config.hpp"
 #include "sontag/graph.hpp"
 
+#include <glaze/glaze.hpp>
+
 #include <cxxabi.h>
 extern "C" {
 #include <fcntl.h>
@@ -27,6 +29,133 @@ extern "C" {
 
 namespace fs = std::filesystem;
 using namespace sontag::literals;
+
+namespace sontag::detail {
+
+    struct inspect_line_record {
+        size_t line{};
+        std::string text{};
+    };
+
+    struct inspect_asm_map_payload {
+        int schema_version{1};
+        std::string symbol{};
+        std::string symbol_display{};
+        std::vector<inspect_line_record> source{};
+        std::vector<inspect_line_record> ir{};
+        std::vector<inspect_line_record> asm_lines{};
+    };
+
+    struct inspect_mca_summary_payload {
+        int schema_version{1};
+        std::string symbol{};
+        std::string symbol_display{};
+        std::string source_path{};
+        int iterations{};
+        int instructions{};
+        int total_cycles{};
+        int total_uops{};
+        double dispatch_width{};
+        double uops_per_cycle{};
+        double ipc{};
+        double block_rthroughput{};
+        std::vector<std::string> warnings{};
+    };
+
+    struct inspect_mca_heatmap_row {
+        std::string label{};
+        double value{};
+        std::string bar{};
+    };
+
+    struct inspect_mca_heatmap_payload {
+        int schema_version{1};
+        std::string symbol{};
+        std::string symbol_display{};
+        std::vector<inspect_mca_heatmap_row> rows{};
+    };
+
+}  // namespace sontag::detail
+
+namespace glz {
+
+    template <>
+    struct meta<sontag::detail::inspect_line_record> {
+        using T = sontag::detail::inspect_line_record;
+        static constexpr auto value = object("line", &T::line, "text", &T::text);
+    };
+
+    template <>
+    struct meta<sontag::detail::inspect_asm_map_payload> {
+        using T = sontag::detail::inspect_asm_map_payload;
+        static constexpr auto value =
+                object("schema_version",
+                       &T::schema_version,
+                       "symbol",
+                       &T::symbol,
+                       "symbol_display",
+                       &T::symbol_display,
+                       "source",
+                       &T::source,
+                       "ir",
+                       &T::ir,
+                       "asm",
+                       &T::asm_lines);
+    };
+
+    template <>
+    struct meta<sontag::detail::inspect_mca_summary_payload> {
+        using T = sontag::detail::inspect_mca_summary_payload;
+        static constexpr auto value =
+                object("schema_version",
+                       &T::schema_version,
+                       "symbol",
+                       &T::symbol,
+                       "symbol_display",
+                       &T::symbol_display,
+                       "source_path",
+                       &T::source_path,
+                       "iterations",
+                       &T::iterations,
+                       "instructions",
+                       &T::instructions,
+                       "total_cycles",
+                       &T::total_cycles,
+                       "total_uops",
+                       &T::total_uops,
+                       "dispatch_width",
+                       &T::dispatch_width,
+                       "uops_per_cycle",
+                       &T::uops_per_cycle,
+                       "ipc",
+                       &T::ipc,
+                       "block_rthroughput",
+                       &T::block_rthroughput,
+                       "warnings",
+                       &T::warnings);
+    };
+
+    template <>
+    struct meta<sontag::detail::inspect_mca_heatmap_row> {
+        using T = sontag::detail::inspect_mca_heatmap_row;
+        static constexpr auto value = object("label", &T::label, "value", &T::value, "bar", &T::bar);
+    };
+
+    template <>
+    struct meta<sontag::detail::inspect_mca_heatmap_payload> {
+        using T = sontag::detail::inspect_mca_heatmap_payload;
+        static constexpr auto value =
+                object("schema_version",
+                       &T::schema_version,
+                       "symbol",
+                       &T::symbol,
+                       "symbol_display",
+                       &T::symbol_display,
+                       "rows",
+                       &T::rows);
+    };
+
+}  // namespace glz
 
 namespace sontag {
     namespace detail {
@@ -285,8 +414,12 @@ namespace sontag {
                     base_args.emplace_back(arg_tokens::output_path);
                     base_args.push_back(artifact_path.string());
                     break;
+                case analysis_kind::inspect_asm_map:
+                case analysis_kind::inspect_mca_summary:
+                case analysis_kind::inspect_mca_heatmap:
                 case analysis_kind::graph_cfg:
                 case analysis_kind::graph_call:
+                case analysis_kind::graph_defuse:
                     break;
             }
             return base_args;
@@ -891,6 +1024,222 @@ namespace sontag {
             return "png";
         }
 
+        template <typename T>
+        static std::string serialize_json_payload(const T& payload) {
+            std::string json{};
+            auto ec = glz::write_json(payload, json);
+            if (ec) {
+                throw std::runtime_error("failed to serialize json payload");
+            }
+            return json;
+        }
+
+        static graph::symbol_display_map make_symbol_display_map(
+                const std::optional<std::vector<analysis_symbol>>& defined_symbols) {
+            graph::symbol_display_map display_names{};
+            if (!defined_symbols) {
+                return display_names;
+            }
+            for (const auto& symbol : *defined_symbols) {
+                display_names.emplace(symbol.mangled, symbol.demangled);
+            }
+            return display_names;
+        }
+
+        static std::string resolve_symbol_display_name(
+                std::string_view mangled, const graph::symbol_display_map& display_names) {
+            if (auto it = display_names.find(std::string{mangled}); it != display_names.end()) {
+                return it->second;
+            }
+            return demangle_symbol_name(mangled);
+        }
+
+        static std::vector<inspect_line_record> make_line_records(std::string_view text) {
+            auto lines = split_lines(std::string{text});
+            std::vector<inspect_line_record> records{};
+            records.reserve(lines.size());
+            for (size_t i = 0U; i < lines.size(); ++i) {
+                records.push_back(inspect_line_record{.line = i + 1U, .text = lines[i]});
+            }
+            return records;
+        }
+
+        static std::optional<double> parse_number_after_colon(std::string_view line) {
+            auto colon = line.find(':');
+            if (colon == std::string_view::npos || colon + 1U >= line.size()) {
+                return std::nullopt;
+            }
+            auto value = std::string{trim_ascii(line.substr(colon + 1U))};
+            if (value.empty()) {
+                return std::nullopt;
+            }
+            char* end = nullptr;
+            auto parsed = std::strtod(value.c_str(), &end);
+            if (end == value.c_str()) {
+                return std::nullopt;
+            }
+            return parsed;
+        }
+
+        static std::optional<double> parse_numeric_token(std::string_view token) {
+            auto value = std::string{trim_ascii(token)};
+            if (value.empty()) {
+                return std::nullopt;
+            }
+            char* end = nullptr;
+            auto parsed = std::strtod(value.c_str(), &end);
+            if (end == value.c_str()) {
+                return std::nullopt;
+            }
+            return parsed;
+        }
+
+        static void parse_mca_summary(std::string_view mca_text, inspect_mca_summary_payload& payload) {
+            auto lines = split_lines(std::string{mca_text});
+            for (const auto& line : lines) {
+                auto trimmed = trim_ascii(line);
+                if (trimmed.empty()) {
+                    continue;
+                }
+                if (trimmed.starts_with("Iterations:"sv)) {
+                    if (auto value = parse_number_after_colon(trimmed)) {
+                        payload.iterations = static_cast<int>(*value);
+                    }
+                    continue;
+                }
+                if (trimmed.starts_with("Instructions:"sv)) {
+                    if (auto value = parse_number_after_colon(trimmed)) {
+                        payload.instructions = static_cast<int>(*value);
+                    }
+                    continue;
+                }
+                if (trimmed.starts_with("Total Cycles:"sv)) {
+                    if (auto value = parse_number_after_colon(trimmed)) {
+                        payload.total_cycles = static_cast<int>(*value);
+                    }
+                    continue;
+                }
+                if (trimmed.starts_with("Total uOps:"sv)) {
+                    if (auto value = parse_number_after_colon(trimmed)) {
+                        payload.total_uops = static_cast<int>(*value);
+                    }
+                    continue;
+                }
+                if (trimmed.starts_with("Dispatch Width:"sv)) {
+                    if (auto value = parse_number_after_colon(trimmed)) {
+                        payload.dispatch_width = *value;
+                    }
+                    continue;
+                }
+                if (trimmed.starts_with("uOps Per Cycle:"sv)) {
+                    if (auto value = parse_number_after_colon(trimmed)) {
+                        payload.uops_per_cycle = *value;
+                    }
+                    continue;
+                }
+                if (trimmed.starts_with("IPC:"sv)) {
+                    if (auto value = parse_number_after_colon(trimmed)) {
+                        payload.ipc = *value;
+                    }
+                    continue;
+                }
+                if (trimmed.starts_with("Block RThroughput:"sv)) {
+                    if (auto value = parse_number_after_colon(trimmed)) {
+                        payload.block_rthroughput = *value;
+                    }
+                }
+            }
+        }
+
+        static std::vector<std::string_view> split_whitespace_tokens(std::string_view line) {
+            std::vector<std::string_view> tokens{};
+            size_t i = 0U;
+            while (i < line.size()) {
+                while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) {
+                    ++i;
+                }
+                if (i >= line.size()) {
+                    break;
+                }
+                auto start = i;
+                while (i < line.size() && !std::isspace(static_cast<unsigned char>(line[i]))) {
+                    ++i;
+                }
+                tokens.push_back(line.substr(start, i - start));
+            }
+            return tokens;
+        }
+
+        static std::vector<inspect_mca_heatmap_row> parse_mca_heatmap_rows(std::string_view mca_text) {
+            auto lines = split_lines(std::string{mca_text});
+            std::vector<std::string> resources{};
+
+            bool in_resources = false;
+            for (const auto& line : lines) {
+                auto trimmed = trim_ascii(line);
+                if (trimmed.empty()) {
+                    if (in_resources) {
+                        break;
+                    }
+                    continue;
+                }
+                if (trimmed == "Resources:"sv) {
+                    in_resources = true;
+                    continue;
+                }
+                if (!in_resources) {
+                    continue;
+                }
+                auto dash = trimmed.find("- "sv);
+                if (dash == std::string_view::npos || dash + 2U >= trimmed.size()) {
+                    continue;
+                }
+                resources.emplace_back(trimmed.substr(dash + 2U));
+            }
+
+            std::vector<double> pressure{};
+            for (size_t i = 0U; i < lines.size(); ++i) {
+                auto trimmed = trim_ascii(lines[i]);
+                if (trimmed != "Resource pressure per iteration:"sv) {
+                    continue;
+                }
+                if (i + 2U >= lines.size()) {
+                    break;
+                }
+                auto values_line = trim_ascii(lines[i + 2U]);
+                auto tokens = split_whitespace_tokens(values_line);
+                for (const auto token : tokens) {
+                    if (token == "-"sv) {
+                        pressure.push_back(0.0);
+                        continue;
+                    }
+                    auto parsed = parse_numeric_token(token);
+                    if (parsed) {
+                        pressure.push_back(*parsed);
+                    }
+                    else {
+                        pressure.push_back(0.0);
+                    }
+                }
+                break;
+            }
+
+            std::vector<inspect_mca_heatmap_row> rows{};
+            auto count = std::min(resources.size(), pressure.size());
+            rows.reserve(count);
+            for (size_t i = 0U; i < count; ++i) {
+                auto scaled = static_cast<int>(pressure[i] * 10.0);
+                if (scaled < 0) {
+                    scaled = 0;
+                }
+                std::string bar{};
+                bar.assign(static_cast<size_t>(scaled), '#');
+                rows.push_back(
+                        inspect_mca_heatmap_row{.label = resources[i], .value = pressure[i], .bar = std::move(bar)});
+            }
+            return rows;
+        }
+
         static std::vector<std::string> build_dot_executable_candidates(const analysis_request& request) {
             std::vector<std::string> candidates{};
             if (request.dot_path) {
@@ -923,9 +1272,28 @@ namespace sontag {
 
         auto artifacts_root = request.session_dir / "artifacts";
         auto inputs_dir = artifacts_root / "inputs";
-        auto kind_dir = kind == analysis_kind::graph_cfg  ? artifacts_root / "graphs" / "cfg"
-                      : kind == analysis_kind::graph_call ? artifacts_root / "graphs" / "call"
-                                                          : artifacts_root / "{}"_format(kind);
+        fs::path kind_dir{};
+        switch (kind) {
+            case analysis_kind::graph_cfg:
+                kind_dir = artifacts_root / "graphs" / "cfg";
+                break;
+            case analysis_kind::graph_call:
+                kind_dir = artifacts_root / "graphs" / "call";
+                break;
+            case analysis_kind::graph_defuse:
+                kind_dir = artifacts_root / "graphs" / "defuse";
+                break;
+            case analysis_kind::inspect_asm_map:
+                kind_dir = artifacts_root / "inspect" / "asm";
+                break;
+            case analysis_kind::inspect_mca_summary:
+            case analysis_kind::inspect_mca_heatmap:
+                kind_dir = artifacts_root / "inspect" / "mca";
+                break;
+            default:
+                kind_dir = artifacts_root / "{}"_format(kind);
+                break;
+        }
 
         detail::ensure_dir(inputs_dir);
         detail::ensure_dir(kind_dir);
@@ -946,8 +1314,14 @@ namespace sontag {
             case analysis_kind::dump:
                 extension = ".txt";
                 break;
+            case analysis_kind::inspect_asm_map:
+            case analysis_kind::inspect_mca_summary:
+            case analysis_kind::inspect_mca_heatmap:
+                extension = ".json";
+                break;
             case analysis_kind::graph_cfg:
             case analysis_kind::graph_call:
+            case analysis_kind::graph_defuse:
                 extension = ".dot";
                 break;
         }
@@ -974,7 +1348,8 @@ namespace sontag {
         result.stdout_path = stdout_path;
         result.stderr_path = stderr_path;
 
-        if (kind == analysis_kind::graph_cfg || kind == analysis_kind::graph_call) {
+        if (kind == analysis_kind::graph_cfg || kind == analysis_kind::graph_call ||
+            kind == analysis_kind::graph_defuse) {
             auto ir_path = kind_dir / (id + ".graph.ll");
             auto compile_command = detail::build_command(request, analysis_kind::ir, source_path, ir_path);
             auto compile_exit = detail::run_process(compile_command, stdout_path, stderr_path);
@@ -1007,6 +1382,9 @@ namespace sontag {
                     throw std::runtime_error("unable to resolve symbol: {}"_format(*request.symbol));
                 }
             }
+            else if (kind == analysis_kind::graph_call) {
+                resolved_symbol = std::nullopt;
+            }
             else {
                 if (defined_symbols) {
                     resolved_symbol = detail::resolve_symbol_name(*defined_symbols, "__sontag_main");
@@ -1018,7 +1396,7 @@ namespace sontag {
                     resolved_symbol = graph::find_first_ir_function_name(ir_text);
                 }
             }
-            if (!resolved_symbol) {
+            if (kind != analysis_kind::graph_call && !resolved_symbol) {
                 throw std::runtime_error("unable to resolve graph root function");
             }
 
@@ -1043,18 +1421,16 @@ namespace sontag {
                         cfg_artifact->edge_count,
                         artifact_path.string());
             }
-            else {
-                graph::symbol_display_map symbol_display_names{};
-                if (defined_symbols) {
-                    for (const auto& symbol : *defined_symbols) {
-                        symbol_display_names.emplace(symbol.mangled, symbol.demangled);
-                    }
-                }
+            else if (kind == analysis_kind::graph_call) {
+                auto symbol_display_names = detail::make_symbol_display_map(defined_symbols);
 
                 auto call_artifact = graph::build_call_graph_artifact(
-                        ir_text, *resolved_symbol, symbol_display_names.empty() ? nullptr : &symbol_display_names);
+                        ir_text,
+                        resolved_symbol ? *resolved_symbol : std::string_view{},
+                        symbol_display_names.empty() ? nullptr : &symbol_display_names,
+                        request.verbose);
                 if (!call_artifact) {
-                    throw std::runtime_error("unable to build call graph for function: {}"_format(*resolved_symbol));
+                    throw std::runtime_error("unable to build call graph");
                 }
 
                 dot_text = call_artifact->dot_text;
@@ -1062,6 +1438,21 @@ namespace sontag {
                         call_artifact->root_display_name,
                         call_artifact->node_count,
                         call_artifact->edge_count,
+                        artifact_path.string());
+            }
+            else {
+                auto symbol_display_names = detail::make_symbol_display_map(defined_symbols);
+                auto defuse_artifact = graph::build_defuse_graph_artifact(
+                        ir_text, *resolved_symbol, symbol_display_names.empty() ? nullptr : &symbol_display_names);
+                if (!defuse_artifact) {
+                    throw std::runtime_error("unable to build defuse graph for function: {}"_format(*resolved_symbol));
+                }
+
+                dot_text = defuse_artifact->dot_text;
+                artifact_summary = "function: {}\nnodes: {}\nedges: {}\ndot: {}\n"_format(
+                        defuse_artifact->function_display_name,
+                        defuse_artifact->node_count,
+                        defuse_artifact->edge_count,
                         artifact_path.string());
             }
             detail::write_text_file(artifact_path, dot_text);
@@ -1135,6 +1526,194 @@ namespace sontag {
             result.command = std::move(compile_command);
             result.artifact_text = std::move(artifact_text);
             result.diagnostics_text = std::move(diagnostics_text);
+            return result;
+        }
+
+        if (kind == analysis_kind::inspect_asm_map) {
+            auto asm_path = kind_dir / (id + ".viz.s");
+            auto ir_path = kind_dir / (id + ".viz.ll");
+
+            auto asm_stdout_path = kind_dir / (id + ".asm.stdout.txt");
+            auto asm_stderr_path = kind_dir / (id + ".asm.stderr.txt");
+            auto ir_stdout_path = kind_dir / (id + ".ir.stdout.txt");
+            auto ir_stderr_path = kind_dir / (id + ".ir.stderr.txt");
+
+            auto asm_command = detail::build_command(request, analysis_kind::asm_text, source_path, asm_path);
+            auto asm_exit = detail::run_process(asm_command, asm_stdout_path, asm_stderr_path);
+            if (asm_exit != 0) {
+                result.exit_code = asm_exit;
+                result.success = false;
+                result.command = std::move(asm_command);
+                result.artifact_text = detail::read_text_file(asm_stdout_path);
+                result.diagnostics_text = detail::read_text_file(asm_stderr_path);
+                detail::write_text_file(artifact_path, result.artifact_text);
+                return result;
+            }
+
+            auto ir_command = detail::build_command(request, analysis_kind::ir, source_path, ir_path);
+            auto ir_exit = detail::run_process(ir_command, ir_stdout_path, ir_stderr_path);
+            if (ir_exit != 0) {
+                result.exit_code = ir_exit;
+                result.success = false;
+                result.command = std::move(ir_command);
+                result.artifact_text = detail::read_text_file(ir_stdout_path);
+                result.diagnostics_text = detail::read_text_file(ir_stderr_path);
+                detail::write_text_file(artifact_path, result.artifact_text);
+                return result;
+            }
+
+            auto asm_text = detail::read_text_file(asm_path);
+            auto ir_text = detail::read_text_file(ir_path);
+            auto source_text = detail::read_text_file(source_path);
+
+            auto defined_symbols = detail::try_collect_defined_symbols(request);
+            auto symbol_display_names = detail::make_symbol_display_map(defined_symbols);
+
+            std::optional<std::string> resolved_symbol{};
+            if (request.symbol) {
+                if (defined_symbols) {
+                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, *request.symbol);
+                }
+                if (!resolved_symbol) {
+                    resolved_symbol = detail::resolve_symbol_name(request, *request.symbol);
+                }
+                if (!resolved_symbol) {
+                    throw std::runtime_error("unable to resolve symbol: {}"_format(*request.symbol));
+                }
+            }
+            else {
+                if (defined_symbols) {
+                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, "__sontag_main");
+                }
+                if (!resolved_symbol) {
+                    resolved_symbol = detail::resolve_symbol_name(request, "__sontag_main");
+                }
+            }
+
+            if (resolved_symbol) {
+                auto extracted_asm = detail::extract_asm_for_symbol(asm_text, *resolved_symbol);
+                if (!extracted_asm.empty()) {
+                    asm_text = std::move(extracted_asm);
+                }
+                auto extracted_ir = detail::extract_ir_for_symbol(ir_text, *resolved_symbol);
+                if (!extracted_ir.empty()) {
+                    ir_text = std::move(extracted_ir);
+                }
+            }
+
+            auto symbol_name = resolved_symbol ? *resolved_symbol : std::string{"<all>"};
+            auto symbol_display = detail::resolve_symbol_display_name(symbol_name, symbol_display_names);
+
+            auto payload = detail::inspect_asm_map_payload{
+                    .symbol = symbol_name,
+                    .symbol_display = symbol_display,
+                    .source = detail::make_line_records(source_text),
+                    .ir = detail::make_line_records(ir_text),
+                    .asm_lines = detail::make_line_records(asm_text)};
+            auto payload_json = detail::serialize_json_payload(payload);
+            detail::write_text_file(artifact_path, payload_json);
+
+            auto diagnostics_text =
+                    detail::join_text(detail::read_text_file(asm_stderr_path), detail::read_text_file(ir_stderr_path));
+            detail::write_text_file(stderr_path, diagnostics_text);
+
+            result.exit_code = 0;
+            result.success = true;
+            result.command = std::move(ir_command);
+            result.artifact_text = "symbol: {}\nsource_lines: {}\nir_lines: {}\nasm_lines: {}\njson: {}\n"_format(
+                    payload.symbol_display,
+                    payload.source.size(),
+                    payload.ir.size(),
+                    payload.asm_lines.size(),
+                    artifact_path.string());
+            result.diagnostics_text = std::move(diagnostics_text);
+            return result;
+        }
+
+        if (kind == analysis_kind::inspect_mca_summary || kind == analysis_kind::inspect_mca_heatmap) {
+            auto mca_result = run_analysis(request, analysis_kind::mca);
+            if (!mca_result.success) {
+                result.exit_code = mca_result.exit_code;
+                result.success = false;
+                result.command = mca_result.command;
+                result.artifact_text = mca_result.artifact_text;
+                result.diagnostics_text = mca_result.diagnostics_text;
+                detail::write_text_file(artifact_path, mca_result.artifact_text);
+                return result;
+            }
+
+            auto defined_symbols = detail::try_collect_defined_symbols(request);
+            auto symbol_display_names = detail::make_symbol_display_map(defined_symbols);
+            std::string symbol_name{};
+            if (request.symbol) {
+                if (defined_symbols) {
+                    if (auto resolved = detail::resolve_symbol_name(*defined_symbols, *request.symbol)) {
+                        symbol_name = *resolved;
+                    }
+                }
+                if (symbol_name.empty()) {
+                    symbol_name = *request.symbol;
+                }
+            }
+            else {
+                symbol_name = "__sontag_main";
+            }
+
+            auto symbol_display = detail::resolve_symbol_display_name(symbol_name, symbol_display_names);
+
+            std::string payload_json{};
+            std::string artifact_summary{};
+            if (kind == analysis_kind::inspect_mca_summary) {
+                auto payload = detail::inspect_mca_summary_payload{
+                        .symbol = symbol_name,
+                        .symbol_display = symbol_display,
+                        .source_path = mca_result.source_path.string()};
+                detail::parse_mca_summary(mca_result.artifact_text, payload);
+                payload.warnings = detail::split_lines(mca_result.diagnostics_text);
+                payload_json = detail::serialize_json_payload(payload);
+                auto rows = detail::parse_mca_heatmap_rows(mca_result.artifact_text);
+
+                std::ostringstream summary{};
+                summary << "symbol: " << payload.symbol_display << '\n';
+                summary << "iterations: " << payload.iterations << '\n';
+                summary << "instructions: " << payload.instructions << '\n';
+                summary << "cycles: " << payload.total_cycles << '\n';
+                summary << "ipc: " << payload.ipc << '\n';
+                summary << "block_rthroughput: " << payload.block_rthroughput << '\n';
+                if (!rows.empty()) {
+                    summary << "resource pressure (top " << std::min<size_t>(8U, rows.size()) << "):\n";
+                    for (size_t i = 0U; i < rows.size() && i < 8U; ++i) {
+                        summary << "  " << rows[i].label << " " << rows[i].bar << " (" << rows[i].value << ")\n";
+                    }
+                }
+                summary << "json: " << artifact_path.string() << '\n';
+                artifact_summary = summary.str();
+            }
+            else {
+                auto payload = detail::inspect_mca_heatmap_payload{
+                        .symbol = symbol_name,
+                        .symbol_display = symbol_display,
+                        .rows = detail::parse_mca_heatmap_rows(mca_result.artifact_text)};
+                payload_json = detail::serialize_json_payload(payload);
+
+                std::ostringstream summary{};
+                summary << "symbol: " << payload.symbol_display << '\n';
+                summary << "heatmap rows: " << payload.rows.size() << '\n';
+                for (const auto& row : payload.rows) {
+                    summary << "  " << row.label << " " << row.bar << " (" << row.value << ")\n";
+                }
+                summary << "json: " << artifact_path.string() << '\n';
+                artifact_summary = summary.str();
+            }
+
+            detail::write_text_file(artifact_path, payload_json);
+            detail::write_text_file(stderr_path, mca_result.diagnostics_text);
+
+            result.exit_code = 0;
+            result.success = true;
+            result.command = std::move(mca_result.command);
+            result.artifact_text = std::move(artifact_summary);
+            result.diagnostics_text = std::move(mca_result.diagnostics_text);
             return result;
         }
 

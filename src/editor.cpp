@@ -26,6 +26,7 @@ namespace sontag::cli { namespace detail {
             ":ir",
             ":diag",
             ":mca",
+            ":inspect",
             ":graph",
             ":quit",
             ":q",
@@ -34,7 +35,9 @@ namespace sontag::cli { namespace detail {
     static const char* clear_completions[] = {"last", nullptr};
     static const char* show_completions[] = {"config", "decl", "exec", "all", nullptr};
     static const char* set_completions[] = {"std", "opt", "output", "color", nullptr};
-    static const char* graph_completions[] = {"cfg", "call", nullptr};
+    static const char* graph_completions[] = {"cfg", "call", "defuse", nullptr};
+    static const char* inspect_completions[] = {"asm", "mca", nullptr};
+    static const char* inspect_mca_completions[] = {"summary", "heatmap", nullptr};
     static const char* analysis_target_completions[] = {"@last", "__sontag_main", nullptr};
 
     static constexpr std::string_view trim_left(std::string_view value) {
@@ -84,6 +87,14 @@ namespace sontag::cli { namespace detail {
         complete_from(cenv, prefix, graph_completions);
     }
 
+    static void complete_inspect_args(ic_completion_env_t* cenv, const char* prefix) {
+        complete_from(cenv, prefix, inspect_completions);
+    }
+
+    static void complete_inspect_mca_args(ic_completion_env_t* cenv, const char* prefix) {
+        complete_from(cenv, prefix, inspect_mca_completions);
+    }
+
     static void complete_analysis_args(ic_completion_env_t* cenv, const char* prefix) {
         complete_from(cenv, prefix, analysis_target_completions);
     }
@@ -126,11 +137,42 @@ namespace sontag::cli { namespace detail {
             auto rest = trim_left(trimmed.substr(command.size()));
             auto graph_subcommand = first_token(rest);
             auto has_graph_arg = graph_subcommand.size() < rest.size();
-            if ((graph_subcommand == "cfg"sv || graph_subcommand == "call"sv) && has_graph_arg) {
+            if ((graph_subcommand == "cfg"sv || graph_subcommand == "call"sv || graph_subcommand == "defuse"sv) &&
+                has_graph_arg) {
                 ic_complete_word(cenv, prefix, complete_analysis_args, nullptr);
                 return;
             }
             ic_complete_word(cenv, prefix, complete_graph_args, nullptr);
+            return;
+        }
+        if (command == ":inspect"sv) {
+            auto rest = trim_left(trimmed.substr(command.size()));
+            auto inspect_subcommand = first_token(rest);
+            if (inspect_subcommand == "asm"sv) {
+                auto has_asm_arg = inspect_subcommand.size() < rest.size();
+                if (has_asm_arg) {
+                    ic_complete_word(cenv, prefix, complete_analysis_args, nullptr);
+                    return;
+                }
+                ic_complete_word(cenv, prefix, complete_inspect_args, nullptr);
+                return;
+            }
+            if (inspect_subcommand == "mca"sv) {
+                auto mca_rest = trim_left(rest.substr(inspect_subcommand.size()));
+                auto mca_subcommand = first_token(mca_rest);
+                auto has_mca_arg = mca_subcommand.size() < mca_rest.size();
+                if ((mca_subcommand == "summary"sv || mca_subcommand == "heatmap"sv) && has_mca_arg) {
+                    ic_complete_word(cenv, prefix, complete_analysis_args, nullptr);
+                    return;
+                }
+                if (mca_subcommand.empty()) {
+                    ic_complete_word(cenv, prefix, complete_inspect_mca_args, nullptr);
+                    return;
+                }
+                ic_complete_word(cenv, prefix, complete_analysis_args, nullptr);
+                return;
+            }
+            ic_complete_word(cenv, prefix, complete_inspect_args, nullptr);
             return;
         }
         if (command == ":asm"sv || command == ":dump"sv || command == ":ir"sv || command == ":diag"sv ||

@@ -46,6 +46,7 @@ namespace sontag::graph {
         struct call_node {
             std::string name{};
             std::string display_name{};
+            std::string annotation{};
             bool is_defined{false};
         };
 
@@ -56,10 +57,28 @@ namespace sontag::graph {
             std::vector<call_edge> edges{};
         };
 
+        struct defuse_edge {
+            size_t from{};
+            size_t to{};
+            std::string label{};
+        };
+
+        struct defuse_node {
+            size_t id{};
+            std::string instruction{};
+        };
+
+        struct defuse_graph {
+            std::string function_name{};
+            std::string function_display_name{};
+            std::vector<defuse_node> nodes{};
+            std::vector<defuse_edge> edges{};
+        };
+
         static constexpr auto cfg_pseudo_entry = "__entry__"sv;
         static constexpr auto cfg_pseudo_exit = "__exit__"sv;
 
-        static std::string_view trim_ascii(std::string_view value) {
+        static constexpr std::string_view trim_ascii(std::string_view value) {
             auto first = value.find_first_not_of(" \t\r\n");
             if (first == std::string_view::npos) {
                 return {};
@@ -76,6 +95,10 @@ namespace sontag::graph {
                 lines.push_back(line);
             }
             return lines;
+        }
+
+        static constexpr bool contains_token(std::string_view haystack, std::string_view needle) {
+            return haystack.find(needle) != std::string_view::npos;
         }
 
         static void append_unique(std::vector<std::string>& values, std::string value) {
@@ -459,12 +482,16 @@ namespace sontag::graph {
         }
 
         static std::optional<call_graph> parse_call_graph_from_ir(
-                std::string_view ir_text, std::string_view root_name, const symbol_display_map* display_names) {
+                std::string_view ir_text,
+                std::string_view root_name,
+                const symbol_display_map* display_names,
+                bool include_inline_annotations) {
             auto lines = split_lines(ir_text);
 
             std::unordered_map<std::string, std::vector<std::string>> adjacency{};
             std::unordered_set<std::string> defined{};
             std::vector<std::string> function_order{};
+            std::unordered_map<std::string, std::string> inline_hints{};
 
             bool in_function = false;
             int brace_depth = 0;
@@ -488,6 +515,14 @@ namespace sontag::graph {
                     adjacency.try_emplace(current_function);
                     if (defined.insert(current_function).second) {
                         function_order.push_back(current_function);
+                    }
+                    if (include_inline_annotations) {
+                        if (contains_token(trimmed, "alwaysinline"sv)) {
+                            inline_hints[current_function] = "alwaysinline";
+                        }
+                        else if (contains_token(trimmed, "noinline"sv)) {
+                            inline_hints[current_function] = "noinline";
+                        }
                     }
 
                     for (auto c : trimmed) {
@@ -528,6 +563,7 @@ namespace sontag::graph {
             }
 
             std::string root{};
+            bool whole_snapshot = false;
             if (!root_name.empty()) {
                 root = std::string{root_name};
                 if (!defined.contains(root)) {
@@ -535,12 +571,12 @@ namespace sontag::graph {
                 }
             }
             else {
-                root = function_order.front();
+                whole_snapshot = true;
             }
 
             call_graph graph{};
             graph.root_function = root;
-            graph.root_display_name = resolve_display_name(root, display_names);
+            graph.root_display_name = whole_snapshot ? "<all>" : resolve_display_name(root, display_names);
 
             std::unordered_set<std::string> node_seen{};
             auto append_node = [&](std::string_view name) {
@@ -548,17 +584,32 @@ namespace sontag::graph {
                 if (!node_seen.insert(node_name).second) {
                     return;
                 }
+                std::string annotation{};
+                if (include_inline_annotations) {
+                    if (auto it = inline_hints.find(node_name); it != inline_hints.end()) {
+                        annotation = it->second;
+                    }
+                }
                 graph.nodes.push_back(
                         call_node{
                                 .name = std::move(node_name),
                                 .display_name = resolve_display_name(name, display_names),
+                                .annotation = std::move(annotation),
                                 .is_defined = defined.contains(std::string{name})});
             };
 
             std::unordered_set<std::string> scheduled{};
             std::vector<std::string> worklist{};
-            worklist.push_back(root);
-            scheduled.insert(root);
+            if (whole_snapshot) {
+                for (const auto& name : function_order) {
+                    worklist.push_back(name);
+                    scheduled.insert(name);
+                }
+            }
+            else {
+                worklist.push_back(root);
+                scheduled.insert(root);
+            }
 
             std::unordered_set<std::string> edge_seen{};
             for (size_t i = 0U; i < worklist.size(); ++i) {
@@ -698,7 +749,8 @@ namespace sontag::graph {
 
         static std::string render_call_graph_dot(const call_graph& graph) {
             std::ostringstream dot{};
-            dot << "digraph call_" << sanitize_dot_identifier(graph.root_function) << " {\n";
+            auto graph_name = graph.root_function.empty() ? "all"sv : std::string_view{graph.root_function};
+            dot << "digraph call_" << sanitize_dot_identifier(graph_name) << " {\n";
             dot << "  rankdir=TB;\n";
             dot << "  node [shape=box,fontname=\"monospace\"];\n";
 
@@ -709,12 +761,16 @@ namespace sontag::graph {
 
                 std::string label{};
                 append_dot_escaped(label, graph.nodes[i].display_name);
+                if (!graph.nodes[i].annotation.empty()) {
+                    label.append("\\n");
+                    append_dot_escaped(label, graph.nodes[i].annotation);
+                }
 
                 std::string style{};
                 if (!graph.nodes[i].is_defined) {
                     style.append("dashed");
                 }
-                if (graph.nodes[i].name == graph.root_function) {
+                if (!graph.root_function.empty() && graph.nodes[i].name == graph.root_function) {
                     if (!style.empty()) {
                         style.push_back(',');
                     }
@@ -725,7 +781,7 @@ namespace sontag::graph {
                 if (!style.empty()) {
                     dot << ",style=\"" << style << "\"";
                 }
-                if (graph.nodes[i].name == graph.root_function) {
+                if (!graph.root_function.empty() && graph.nodes[i].name == graph.root_function) {
                     dot << ",fillcolor=\"#f5f5f5\"";
                 }
                 dot << "];\n";
@@ -738,6 +794,170 @@ namespace sontag::graph {
                     continue;
                 }
                 dot << "  " << from->second << " -> " << to->second << ";\n";
+            }
+
+            dot << "}\n";
+            return dot.str();
+        }
+
+        static std::optional<std::string> extract_defined_ssa_token(std::string_view line) {
+            auto trimmed = trim_ascii(line);
+            if (!trimmed.starts_with('%')) {
+                return std::nullopt;
+            }
+            auto eq = trimmed.find(" = "sv);
+            if (eq == std::string_view::npos || eq == 0U) {
+                return std::nullopt;
+            }
+            return std::string{trimmed.substr(0U, eq)};
+        }
+
+        static bool is_ssa_char(char c) {
+            return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.' || c == '$' || c == '-';
+        }
+
+        static std::vector<std::string> extract_ssa_tokens(std::string_view line) {
+            std::vector<std::string> tokens{};
+            size_t i = 0U;
+            while (i < line.size()) {
+                if (line[i] != '%') {
+                    ++i;
+                    continue;
+                }
+
+                auto start = i;
+                ++i;
+                if (i < line.size() && line[i] == '"') {
+                    ++i;
+                    while (i < line.size()) {
+                        if (line[i] == '"' && line[i - 1U] != '\\') {
+                            ++i;
+                            break;
+                        }
+                        ++i;
+                    }
+                    if (i > start + 1U) {
+                        append_unique(tokens, std::string{line.substr(start, i - start)});
+                    }
+                    continue;
+                }
+
+                auto token_start = i;
+                while (i < line.size() && is_ssa_char(line[i])) {
+                    ++i;
+                }
+                if (i > token_start) {
+                    append_unique(tokens, std::string{line.substr(start, i - start)});
+                }
+            }
+            return tokens;
+        }
+
+        static void append_defuse_edge(std::vector<defuse_edge>& edges, defuse_edge edge) {
+            for (const auto& existing : edges) {
+                if (existing.from == edge.from && existing.to == edge.to && existing.label == edge.label) {
+                    return;
+                }
+            }
+            edges.push_back(std::move(edge));
+        }
+
+        static std::optional<defuse_graph> parse_defuse_graph_from_ir(
+                std::string_view ir_text, std::string_view function_name, const symbol_display_map* display_names) {
+            auto lines = split_lines(ir_text);
+            defuse_graph graph{};
+
+            bool in_function = false;
+            int brace_depth = 0;
+            std::unordered_map<std::string, size_t> last_definition{};
+
+            for (const auto& line : lines) {
+                auto trimmed = trim_ascii(line);
+                if (!in_function) {
+                    if (!trimmed.starts_with("define "sv)) {
+                        continue;
+                    }
+                    auto name = parse_ir_function_name(trimmed);
+                    if (!name || *name != function_name) {
+                        continue;
+                    }
+                    graph.function_name = *name;
+                    graph.function_display_name = resolve_display_name(*name, display_names);
+                    in_function = true;
+                    brace_depth = 0;
+                    continue;
+                }
+
+                for (auto c : trimmed) {
+                    if (c == '{') {
+                        ++brace_depth;
+                    }
+                    else if (c == '}') {
+                        --brace_depth;
+                    }
+                }
+
+                if (trimmed.empty() || trimmed == "{"sv || trimmed == "}"sv || trimmed.starts_with(';') ||
+                    is_ir_block_label(trimmed)) {
+                    if (brace_depth <= 0 && trimmed == "}"sv) {
+                        break;
+                    }
+                    continue;
+                }
+
+                auto node_id = graph.nodes.size();
+                graph.nodes.push_back(defuse_node{.id = node_id, .instruction = std::string{trimmed}});
+
+                auto defined = extract_defined_ssa_token(trimmed);
+                auto uses = extract_ssa_tokens(trimmed);
+                for (const auto& use_token : uses) {
+                    if (defined && *defined == use_token) {
+                        continue;
+                    }
+                    if (auto it = last_definition.find(use_token); it != last_definition.end()) {
+                        append_defuse_edge(
+                                graph.edges, defuse_edge{.from = it->second, .to = node_id, .label = use_token});
+                    }
+                }
+
+                if (defined) {
+                    last_definition[*defined] = node_id;
+                }
+            }
+
+            if (graph.function_name.empty()) {
+                return std::nullopt;
+            }
+            return graph;
+        }
+
+        static std::string make_defuse_label(const defuse_node& node) {
+            std::string label{};
+            label.append("i");
+            label.append("{}"_format(node.id));
+            label.append(": ");
+            append_dot_escaped(label, node.instruction);
+            return label;
+        }
+
+        static std::string render_defuse_graph_dot(const defuse_graph& graph) {
+            std::ostringstream dot{};
+            dot << "digraph defuse_" << sanitize_dot_identifier(graph.function_name) << " {\n";
+            dot << "  rankdir=LR;\n";
+            dot << "  node [shape=box,fontname=\"monospace\"];\n";
+
+            for (const auto& node : graph.nodes) {
+                dot << "  n" << node.id << " [label=\"" << make_defuse_label(node) << "\"];\n";
+            }
+
+            for (const auto& edge : graph.edges) {
+                dot << "  n" << edge.from << " -> n" << edge.to;
+                if (!edge.label.empty()) {
+                    std::string escaped{};
+                    append_dot_escaped(escaped, edge.label);
+                    dot << " [label=\"" << escaped << "\"]";
+                }
+                dot << ";\n";
             }
 
             dot << "}\n";
@@ -764,8 +984,12 @@ namespace sontag::graph {
     }
 
     std::optional<call_graph_artifact> build_call_graph_artifact(
-            std::string_view ir_text, std::string_view root_function, const symbol_display_map* display_names) {
-        auto parsed = detail::parse_call_graph_from_ir(ir_text, root_function, display_names);
+            std::string_view ir_text,
+            std::string_view root_function,
+            const symbol_display_map* display_names,
+            bool include_inline_annotations) {
+        auto parsed =
+                detail::parse_call_graph_from_ir(ir_text, root_function, display_names, include_inline_annotations);
         if (!parsed) {
             return std::nullopt;
         }
@@ -775,6 +999,20 @@ namespace sontag::graph {
                 .node_count = parsed->nodes.size(),
                 .edge_count = parsed->edges.size(),
                 .dot_text = detail::render_call_graph_dot(*parsed)};
+    }
+
+    std::optional<defuse_graph_artifact> build_defuse_graph_artifact(
+            std::string_view ir_text, std::string_view function_name, const symbol_display_map* display_names) {
+        auto parsed = detail::parse_defuse_graph_from_ir(ir_text, function_name, display_names);
+        if (!parsed) {
+            return std::nullopt;
+        }
+        return defuse_graph_artifact{
+                .function_name = parsed->function_name,
+                .function_display_name = parsed->function_display_name,
+                .node_count = parsed->nodes.size(),
+                .edge_count = parsed->edges.size(),
+                .dot_text = detail::render_defuse_graph_dot(*parsed)};
     }
 
 }  // namespace sontag::graph

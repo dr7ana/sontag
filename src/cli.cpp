@@ -736,8 +736,11 @@ namespace sontag::cli {
   :ir [symbol|@last]
   :diag [symbol|@last]
   :mca [symbol|@last]
+  :inspect asm [symbol|@last]
+  :inspect mca [summary|heatmap] [symbol|@last]
   :graph cfg [symbol|@last]
   :graph call [symbol|@last]
+  :graph defuse [symbol|@last]
   :quit
 examples:
   :decl #include <cstdint>
@@ -750,6 +753,8 @@ examples:
   :mark baseline
   :asm
   :dump
+  :inspect asm
+  :inspect mca
   :graph cfg
   :graph call
 )";
@@ -879,7 +884,9 @@ examples:
             }
 
             if (result.kind == analysis_kind::mca || result.kind == analysis_kind::dump ||
-                result.kind == analysis_kind::graph_cfg || result.kind == analysis_kind::graph_call) {
+                result.kind == analysis_kind::inspect_asm_map || result.kind == analysis_kind::inspect_mca_summary ||
+                result.kind == analysis_kind::inspect_mca_heatmap || result.kind == analysis_kind::graph_cfg ||
+                result.kind == analysis_kind::graph_call || result.kind == analysis_kind::graph_defuse) {
                 os << "{}: {}\n"_format(result.kind, result.success ? "success"sv : "failed"sv);
             }
 
@@ -1139,11 +1146,43 @@ examples:
                 return true;
             }
             if (process_analysis_command(
+                        cmd, ":inspect asm"sv, analysis_kind::inspect_asm_map, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
+            if (process_analysis_command(
+                        cmd,
+                        ":inspect mca heatmap"sv,
+                        analysis_kind::inspect_mca_heatmap,
+                        cfg,
+                        state,
+                        std::cout,
+                        std::cerr)) {
+                return true;
+            }
+            if (process_analysis_command(
+                        cmd,
+                        ":inspect mca summary"sv,
+                        analysis_kind::inspect_mca_summary,
+                        cfg,
+                        state,
+                        std::cout,
+                        std::cerr)) {
+                return true;
+            }
+            if (process_analysis_command(
+                        cmd, ":inspect mca"sv, analysis_kind::inspect_mca_summary, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
+            if (process_analysis_command(
                         cmd, ":graph cfg"sv, analysis_kind::graph_cfg, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
             if (process_analysis_command(
                         cmd, ":graph call"sv, analysis_kind::graph_call, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
+            if (process_analysis_command(
+                        cmd, ":graph defuse"sv, analysis_kind::graph_defuse, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
             if (cmd.starts_with(":"sv)) {

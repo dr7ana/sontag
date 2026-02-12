@@ -20,6 +20,7 @@ add_executable(
     004.cpp
     005.cpp
     006.cpp
+    008.cpp
 )
 
 target_link_libraries(alltests PRIVATE tests_common Catch2::Catch2WithMain)

@@ -10,7 +10,19 @@
 
 namespace sontag {
 
-    enum class analysis_kind { asm_text, ir, diag, mca, dump, graph_cfg, graph_call };
+    enum class analysis_kind {
+        asm_text,
+        ir,
+        diag,
+        mca,
+        dump,
+        inspect_asm_map,
+        inspect_mca_summary,
+        inspect_mca_heatmap,
+        graph_cfg,
+        graph_call,
+        graph_defuse,
+    };
 
     inline constexpr std::string_view to_string(analysis_kind kind) {
         switch (kind) {
@@ -24,10 +36,18 @@ namespace sontag {
                 return "mca"sv;
             case analysis_kind::dump:
                 return "dump"sv;
+            case analysis_kind::inspect_asm_map:
+                return "inspect asm"sv;
+            case analysis_kind::inspect_mca_summary:
+                return "inspect mca summary"sv;
+            case analysis_kind::inspect_mca_heatmap:
+                return "inspect mca heatmap"sv;
             case analysis_kind::graph_cfg:
                 return "graph cfg"sv;
             case analysis_kind::graph_call:
                 return "graph call"sv;
+            case analysis_kind::graph_defuse:
+                return "graph defuse"sv;
         }
         return "diag"sv;
     }
