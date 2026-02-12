@@ -60,6 +60,7 @@ values[1] = value * 2
 
 - `:decl <code>` stores top-level declarations (includes, globals, functions).
 - non-command input stores executable cells in synthesized `__sontag_repl_main()`.
+- press `Shift+Tab` to insert a newline while composing a multi-line cell.
 - use `:show all` to inspect the full generated source in order: declarations first, then executable cells wrapped in the synthesized function.
 
 ## Snapshots and `@last`
