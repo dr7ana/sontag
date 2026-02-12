@@ -261,6 +261,107 @@ namespace sontag::test {
         CHECK(detail::has_prefixed_arg(args, "--disassemble-symbols="));
     }
 
+    TEST_CASE("003: graph cfg emits dot artifact and summary", "[003][analysis][graph]") {
+        detail::temp_dir temp{"sontag_m3_graph_cfg"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+
+        auto result = run_analysis(request, analysis_kind::graph_cfg);
+        CHECK(result.success);
+        CHECK(result.exit_code == 0);
+        CHECK(result.artifact_path.string().find("/artifacts/graphs/cfg/") != std::string::npos);
+        CHECK(result.artifact_path.extension() == ".dot");
+        CHECK(result.artifact_text.find("__sontag_main") != std::string::npos);
+        CHECK(result.artifact_text.find("dot: ") != std::string::npos);
+        CHECK(result.artifact_text.find("rendered: ") != std::string::npos);
+        CHECK(detail::fs::exists(result.artifact_path));
+
+        auto dot_text = detail::read_lines(result.artifact_path);
+        REQUIRE_FALSE(dot_text.empty());
+        CHECK(dot_text.front().find("digraph cfg_") != std::string::npos);
+        std::string joined{};
+        for (const auto& line : dot_text) {
+            joined.append(line);
+            joined.push_back('\n');
+        }
+        CHECK(joined.find("->") != std::string::npos);
+    }
+
+    TEST_CASE("003: graph cfg honors symbol target", "[003][analysis][graph][symbol]") {
+        detail::temp_dir temp{"sontag_m3_graph_cfg_symbol"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {
+                "int foo(int x) { return x + 1; }\n"
+                "int bar(int x) { return x + 2; }\n"};
+        request.symbol = "foo";
+
+        auto result = run_analysis(request, analysis_kind::graph_cfg);
+        CHECK(result.success);
+        CHECK(result.exit_code == 0);
+        CHECK(result.artifact_text.find("function: ") != std::string::npos);
+        CHECK(result.artifact_text.find("foo") != std::string::npos);
+
+        auto dot_text = detail::read_lines(result.artifact_path);
+        std::string joined{};
+        for (const auto& line : dot_text) {
+            joined.append(line);
+            joined.push_back('\n');
+        }
+        CHECK(joined.find("digraph cfg_") != std::string::npos);
+    }
+
+    TEST_CASE("003: graph call emits dot artifact and summary", "[003][analysis][graph][call]") {
+        detail::temp_dir temp{"sontag_m3_graph_call"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {
+                "int leaf(int x) { return x + 1; }\n"
+                "int helper(int y) { return leaf(y) * 2; }\n"
+                "int top(int z) { return helper(z) + leaf(z); }\n"};
+        request.symbol = "top";
+
+        auto result = run_analysis(request, analysis_kind::graph_call);
+        CHECK(result.success);
+        CHECK(result.exit_code == 0);
+        CHECK(result.artifact_path.string().find("/artifacts/graphs/call/") != std::string::npos);
+        CHECK(result.artifact_path.extension() == ".dot");
+        CHECK(result.artifact_text.find("root: ") != std::string::npos);
+        CHECK(result.artifact_text.find("top") != std::string::npos);
+        CHECK(result.artifact_text.find("nodes: ") != std::string::npos);
+        CHECK(result.artifact_text.find("edges: ") != std::string::npos);
+        CHECK(result.artifact_text.find("dot: ") != std::string::npos);
+        CHECK(detail::fs::exists(result.artifact_path));
+
+        auto dot_text = detail::read_lines(result.artifact_path);
+        REQUIRE_FALSE(dot_text.empty());
+        CHECK(dot_text.front().find("digraph call_") != std::string::npos);
+
+        std::string joined{};
+        for (const auto& line : dot_text) {
+            joined.append(line);
+            joined.push_back('\n');
+        }
+        CHECK(joined.find("top(int)") != std::string::npos);
+        CHECK(joined.find("helper(int)") != std::string::npos);
+        CHECK(joined.find("leaf(int)") != std::string::npos);
+        CHECK(joined.find("label=\"_Z3topi\"") == std::string::npos);
+        CHECK(joined.find("->") != std::string::npos);
+    }
+
     TEST_CASE("003: symbol listing returns current snapshot symbols", "[003][analysis][symbols]") {
         detail::temp_dir temp{"sontag_m1_symbols"};
 
@@ -276,7 +377,7 @@ namespace sontag::test {
         REQUIRE_FALSE(symbols.empty());
 
         auto has_repl_entry = std::ranges::any_of(symbols, [](const analysis_symbol& symbol) {
-            return symbol.demangled == "__sontag_repl_main()" || symbol.mangled == "__sontag_repl_main";
+            return symbol.demangled == "__sontag_main()" || symbol.mangled == "__sontag_main";
         });
         auto has_foo = std::ranges::any_of(symbols, [](const analysis_symbol& symbol) {
             return symbol.demangled.find("foo(") != std::string::npos ||

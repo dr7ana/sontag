@@ -1,9 +1,8 @@
 #pragma once
 
-#include "utils.hpp"
+#include "format.hpp"
 
 #include <cstddef>
-#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -22,6 +21,7 @@ namespace sontag {
      * - cache_dir: Root directory for all session metadata and generated artifacts.
      * - history_file: Path to persisted interactive command history.
      * - history_enabled: Enable/disable persistent history writes.
+     * - banner_enabled: Show/hide the startup ASCII banner in REPL sessions.
      * - color_mode: ANSI color behavior for terminal output.
      * - pager_enabled: Pipe long outputs (asm/ir/diag) through a pager.
      * - output_mode: Default machine/human output shape ("table" or "json").
@@ -51,7 +51,7 @@ namespace sontag {
      *
      * Safety and resource limits
      * - compile_timeout_ms: Max compile-time budget per analysis action.
-     * - run_timeout_ms: Max wall-time budget for runtime A/B runs.
+     * - run_timeout_ms: Max wall-time budget for runtime comparison runs.
      * - max_cell_bytes: Reject over-sized code cells in the REPL.
      * - max_artifact_mb: Soft cap for generated artifact sizes.
      * - jobs: Worker concurrency for non-interactive analysis tasks.
@@ -64,15 +64,6 @@ namespace sontag {
      * - mca_enabled: Enable llvm-mca checks/commands by default.
      * - mca_cpu: Optional CPU override specifically for llvm-mca.
      * - mca_path: llvm-mca executable path override.
-     *
-     * A/B runtime defaults
-     * - ab_iters: Default measured iteration count.
-     * - ab_warmup: Default warmup iteration count.
-     * - ab_min_samples: Minimum sample count before reporting.
-     * - ab_confidence: Confidence interval target (for example 0.95).
-     * - ab_pin_cpu: Optional CPU core id for affinity pinning.
-     * - ab_seed: Deterministic seed for generated benchmark inputs.
-     * - ab_input_size: Default generated fixture/input size.
      *
      * Graph defaults
      * - graph_format: Default render format (dot/svg/png).
@@ -115,6 +106,24 @@ namespace sontag {
         return "auto"sv;
     }
 
+    inline constexpr std::string_view to_string(optimization_level level) {
+        switch (level) {
+            case optimization_level::o0:
+                return "O0"sv;
+            case optimization_level::o1:
+                return "O1"sv;
+            case optimization_level::o2:
+                return "O2"sv;
+            case optimization_level::o3:
+                return "O3"sv;
+            case optimization_level::ofast:
+                return "Ofast"sv;
+            case optimization_level::oz:
+                return "Oz"sv;
+        }
+        return "O2"sv;
+    }
+
     inline constexpr std::string_view to_string(cxx_standard standard) {
         switch (standard) {
             case cxx_standard::cxx20:
@@ -123,6 +132,18 @@ namespace sontag {
                 return "c++23"sv;
             case cxx_standard::cxx2c:
                 return "c++2c"sv;
+        }
+        return "c++23"sv;
+    }
+
+    inline constexpr std::string_view to_string(debug_info_level level) {
+        switch (level) {
+            case debug_info_level::none:
+                return "none"sv;
+            case debug_info_level::line:
+                return "lines"sv;
+            case debug_info_level::full:
+                return "full"sv;
         }
         return "c++23"sv;
     }
@@ -149,24 +170,6 @@ namespace sontag {
             return parsed;
         }
         return cxx_standard::cxx23;
-    }
-
-    inline constexpr std::string_view to_string(optimization_level level) {
-        switch (level) {
-            case optimization_level::o0:
-                return "O0"sv;
-            case optimization_level::o1:
-                return "O1"sv;
-            case optimization_level::o2:
-                return "O2"sv;
-            case optimization_level::o3:
-                return "O3"sv;
-            case optimization_level::ofast:
-                return "Ofast"sv;
-            case optimization_level::oz:
-                return "Oz"sv;
-        }
-        return "O2"sv;
     }
 
     inline constexpr bool try_parse_optimization_level(std::string_view text, optimization_level& out) {
@@ -231,6 +234,7 @@ namespace sontag {
         std::filesystem::path cache_dir{".sontag"};
         std::filesystem::path history_file{".sontag/history"};
         bool history_enabled{true};
+        bool banner_enabled{true};
         color_mode color{color_mode::automatic};
         bool pager_enabled{false};
         output_mode output{output_mode::table};
@@ -259,8 +263,8 @@ namespace sontag {
 
         int compile_timeout_ms{30'000};
         int run_timeout_ms{30'000};
-        std::size_t max_cell_bytes{1U << 20U};
-        std::size_t max_artifact_mb{64U};
+        size_t max_cell_bytes{1U << 20U};
+        size_t max_artifact_mb{64U};
         unsigned jobs{1U};
 
         std::optional<std::string> default_symbol{};
@@ -270,14 +274,6 @@ namespace sontag {
         bool mca_enabled{false};
         std::optional<std::string> mca_cpu{};
         std::filesystem::path mca_path{"llvm-mca"};
-
-        int ab_iters{1'000};
-        int ab_warmup{100};
-        int ab_min_samples{25};
-        double ab_confidence{0.95};
-        std::optional<int> ab_pin_cpu{};
-        std::optional<std::uint64_t> ab_seed{};
-        int ab_input_size{1'024};
 
         std::string graph_format{"png"};
         std::optional<std::filesystem::path> dot_path{};
@@ -291,3 +287,46 @@ namespace sontag {
     };
 
 }  // namespace sontag
+
+namespace std {
+    //
+    template <>
+    struct formatter<sontag::output_mode, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::output_mode& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+
+    template <>
+    struct formatter<sontag::color_mode, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::color_mode& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+
+    template <>
+    struct formatter<sontag::debug_info_level, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::debug_info_level& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+
+    template <>
+    struct formatter<sontag::cxx_standard, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::cxx_standard& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+
+    template <>
+    struct formatter<sontag::optimization_level, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::optimization_level& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+}  // namespace std

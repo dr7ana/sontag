@@ -20,7 +20,7 @@ namespace sontag::test { namespace detail {
 
     struct snapshot_record {
         std::string name{};
-        std::size_t cell_count{};
+        size_t cell_count{};
     };
 
     struct persisted_snapshots {
@@ -64,7 +64,7 @@ namespace sontag::test { namespace detail {
         return value;
     }
 
-    static std::optional<std::size_t> snapshot_cell_count(const persisted_snapshots& snapshots, std::string_view name) {
+    static std::optional<size_t> snapshot_cell_count(const persisted_snapshots& snapshots, std::string_view name) {
         for (const auto& record : snapshots.snapshots) {
             if (record.name == name) {
                 return record.cell_count;
@@ -89,13 +89,13 @@ namespace sontag::test { namespace detail {
     }
 
     static void write_all(int fd, std::string_view text) {
-        auto offset = std::size_t{0};
+        size_t offset = 0U;
         while (offset < text.size()) {
             auto* data = text.data() + offset;
             auto remaining = text.size() - offset;
             auto bytes = ::write(fd, data, remaining);
             REQUIRE(bytes > 0);
-            offset += static_cast<std::size_t>(bytes);
+            offset += static_cast<size_t>(bytes);
         }
     }
 
@@ -354,7 +354,7 @@ namespace sontag::test {
                 ":quit\n");
 
         auto decl_pos = output.out.find("#include <cstdint>");
-        auto main_pos = output.out.find("int __sontag_repl_main() {");
+        auto main_pos = output.out.find("int __sontag_main() {");
         auto first_pos = output.out.find("uint64_t first = 1;");
         auto second_pos = output.out.find("uint64_t second = first + 1;");
         REQUIRE(decl_pos != std::string::npos);
@@ -380,7 +380,7 @@ namespace sontag::test {
                 ":quit\n");
 
         CHECK(output.out.find("symbols:") != std::string::npos);
-        CHECK(output.out.find("__sontag_repl_main") != std::string::npos);
+        CHECK(output.out.find("__sontag_main") != std::string::npos);
         CHECK(output.out.find("foo(") != std::string::npos);
     }
 

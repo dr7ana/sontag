@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sontag/config.hpp"
+#include "config.hpp"
 
 #include <filesystem>
 #include <optional>
@@ -10,22 +10,26 @@
 
 namespace sontag {
 
-    enum class analysis_kind { asm_text, ir, diag, mca, dump };
+    enum class analysis_kind { asm_text, ir, diag, mca, dump, graph_cfg, graph_call };
 
     inline constexpr std::string_view to_string(analysis_kind kind) {
         switch (kind) {
             case analysis_kind::asm_text:
-                return "asm";
+                return "asm"sv;
             case analysis_kind::ir:
-                return "ir";
+                return "ir"sv;
             case analysis_kind::diag:
-                return "diag";
+                return "diag"sv;
             case analysis_kind::mca:
-                return "mca";
+                return "mca"sv;
             case analysis_kind::dump:
-                return "dump";
+                return "dump"sv;
+            case analysis_kind::graph_cfg:
+                return "graph cfg"sv;
+            case analysis_kind::graph_call:
+                return "graph call"sv;
         }
-        return "diag";
+        return "diag"sv;
     }
 
     struct analysis_request {
@@ -42,6 +46,8 @@ namespace sontag {
         std::optional<std::string> mca_cpu{};
         std::filesystem::path mca_path{"llvm-mca"};
         std::filesystem::path objdump_path{"llvm-objdump"};
+        std::string graph_format{"png"};
+        std::optional<std::filesystem::path> dot_path{};
         bool verbose{false};
     };
 
@@ -69,3 +75,13 @@ namespace sontag {
     std::vector<analysis_symbol> list_symbols(const analysis_request& request);
 
 }  // namespace sontag
+
+namespace std {
+    template <>
+    struct formatter<sontag::analysis_kind, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::analysis_kind& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+}  // namespace std

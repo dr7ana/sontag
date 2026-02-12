@@ -5,8 +5,8 @@
 #include <format>
 
 namespace sontag {
-    template <typename T>
-    concept to_string_formattable = T::to_string_formattable && requires(T a) {
+    template <typename T, typename U = std::remove_cvref_t<T>>
+    concept to_string_formattable = U::to_string_formattable && requires(U a) {
         { a.to_string() } -> std::convertible_to<std::string_view>;
     };
 

@@ -31,6 +31,8 @@ namespace sontag::test {
                 "/tmp/sontag_tests",
                 "--history-file",
                 "/tmp/sontag_tests/history.txt",
+                "--banner",
+                "false",
                 "--output",
                 "json",
                 "--color",
@@ -53,6 +55,7 @@ namespace sontag::test {
         CHECK(*cfg.resume_session == "latest");
         CHECK(cfg.cache_dir == "/tmp/sontag_tests");
         CHECK(cfg.history_file == "/tmp/sontag_tests/history.txt");
+        CHECK_FALSE(cfg.banner_enabled);
         CHECK(cfg.output == output_mode::json);
         CHECK(cfg.color == color_mode::never);
     }
@@ -71,6 +74,16 @@ namespace sontag::test {
         SECTION("quiet and verbose cannot be combined") {
             startup_config cfg{};
             std::vector<std::string> args{"sontag", "--quiet", "--verbose"};
+            auto argv = detail::to_argv(args);
+
+            auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);
+            REQUIRE(result);
+            CHECK(*result == 2);
+        }
+
+        SECTION("invalid banner value is rejected") {
+            startup_config cfg{};
+            std::vector<std::string> args{"sontag", "--banner", "maybe"};
             auto argv = detail::to_argv(args);
 
             auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);
@@ -97,6 +110,16 @@ namespace sontag::test {
         auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);
         CHECK(!result);
         CHECK_FALSE(cfg.history_enabled);
+    }
+
+    TEST_CASE("002: parse_cli handles banner toggles", "[002][cli]") {
+        startup_config cfg{};
+        std::vector<std::string> args{"sontag", "--no-banner"};
+        auto argv = detail::to_argv(args);
+
+        auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);
+        CHECK(!result);
+        CHECK_FALSE(cfg.banner_enabled);
     }
 
 }  // namespace sontag::test

@@ -55,6 +55,7 @@ namespace glz {
 }  // namespace glz
 
 namespace sontag::test {
+    using namespace sontag::literals;
 
     TEST_CASE("004: analysis result json payload is parseable", "[004][analysis][json]") {
         detail::temp_dir temp{"sontag_m1_json_payload"};
@@ -71,7 +72,7 @@ namespace sontag::test {
         REQUIRE(result.success);
 
         detail::analysis_json_payload payload{};
-        payload.command = std::string(to_string(result.kind));
+        payload.command = "{}"_format(result.kind);
         payload.success = result.success;
         payload.exit_code = result.exit_code;
         payload.source_path = result.source_path.string();
@@ -112,7 +113,7 @@ namespace sontag::test {
             (void)run_analysis(request, analysis_kind::asm_text);
             FAIL("expected unresolved symbol failure");
         } catch (const std::runtime_error& e) {
-            auto message = std::string{e.what()};
+            std::string message{e.what()};
             CHECK(message.find("unable to resolve symbol") != std::string::npos);
             CHECK(message.find("does_not_exist") != std::string::npos);
         }

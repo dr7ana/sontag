@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sontag/config.hpp"
+#include "config.hpp"
 
 #include <optional>
 

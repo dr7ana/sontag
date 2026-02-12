@@ -111,11 +111,11 @@ namespace sontag::test { namespace detail {
         auto read_fd = pipe_fds[0];
         auto write_fd = pipe_fds[1];
 
-        auto offset = std::size_t{0};
+        size_t offset = 0U;
         while (offset < script.size()) {
             auto bytes = ::write(write_fd, script.data() + offset, script.size() - offset);
             REQUIRE(bytes > 0);
-            offset += static_cast<std::size_t>(bytes);
+            offset += static_cast<size_t>(bytes);
         }
         REQUIRE(::close(write_fd) == 0);
 
@@ -245,7 +245,7 @@ namespace sontag::test {
             detail::run_repl_script(cfg, ":quit\n"sv);
             FAIL("expected unsupported schema_version failure");
         } catch (const std::runtime_error& e) {
-            auto message = std::string{e.what()};
+            std::string message{e.what()};
             CHECK(message.find("unsupported schema_version") != std::string::npos);
         }
     }

@@ -46,7 +46,7 @@ namespace sontag::cli { namespace detail {
 
     struct snapshot_record {
         std::string name{};
-        std::size_t cell_count{};
+        size_t cell_count{};
     };
 
     struct persisted_snapshots {
@@ -206,7 +206,7 @@ namespace sontag::cli {
         }
 
         static constexpr void update_code_balance_state(code_balance_state& state, std::string_view line) {
-            std::size_t i = 0U;
+            size_t i = 0U;
             while (i < line.size()) {
                 auto c = line[i];
                 auto next = (i + 1U < line.size()) ? line[i + 1U] : '\0';
@@ -319,15 +319,15 @@ namespace sontag::cli {
         static persisted_config make_persisted_config(const startup_config& cfg) {
             persisted_config data{};
             data.clang = cfg.clang_path.string();
-            data.cxx_standard = std::string(to_string(cfg.language_standard));
-            data.opt_level = std::string(to_string(cfg.opt_level));
+            data.cxx_standard = "{}"_format(cfg.language_standard);
+            data.opt_level = "{}"_format(cfg.opt_level);
             data.target = cfg.target_triple;
             data.cpu = cfg.cpu;
             data.mca_cpu = cfg.mca_cpu;
             data.mca_path = cfg.mca_path.string();
             data.cache_dir = cfg.cache_dir.string();
-            data.output = std::string(to_string(cfg.output));
-            data.color = std::string(to_string(cfg.color));
+            data.output = "{}"_format(cfg.output);
+            data.color = "{}"_format(cfg.color);
             return data;
         }
 
@@ -434,7 +434,7 @@ namespace sontag::cli {
             return os.str();
         }
 
-        static void upsert_snapshot(persisted_snapshots& data, std::string_view name, std::size_t cell_count) {
+        static void upsert_snapshot(persisted_snapshots& data, std::string_view name, size_t cell_count) {
             auto it = std::find_if(data.snapshots.begin(), data.snapshots.end(), [name](const snapshot_record& entry) {
                 return entry.name == name;
             });
@@ -449,7 +449,7 @@ namespace sontag::cli {
             write_json_file(state.snapshot_data, state.snapshots_path);
         }
 
-        static std::size_t total_cell_count(const repl_state& state) {
+        static size_t total_cell_count(const repl_state& state) {
             return state.decl_cells.size() + state.exec_cells.size();
         }
 
@@ -583,17 +583,19 @@ namespace sontag::cli {
                    "  mca_path={}\n"
                    "  cache_dir={}\n"
                    "  output={}\n"
+                   "  banner={}\n"
                    "  color={}\n"_format(
-                           to_string(cfg.language_standard),
-                           to_string(cfg.opt_level),
+                           cfg.language_standard,
+                           cfg.opt_level,
                            optional_or_default(cfg.target_triple),
                            optional_or_default(cfg.cpu),
                            cfg.clang_path.string(),
                            optional_or_default(cfg.mca_cpu),
                            cfg.mca_path.string(),
                            cfg.cache_dir.string(),
-                           to_string(cfg.output),
-                           to_string(cfg.color)));
+                           cfg.output,
+                           cfg.banner_enabled,
+                           cfg.color));
         }
 
         static void print_snapshots(const repl_state& state, std::ostream& os) {
@@ -614,7 +616,7 @@ namespace sontag::cli {
                 return;
             }
 
-            for (auto i = std::size_t{0}; i < cells.size(); ++i) {
+            for (size_t i = 0U; i < cells.size(); ++i) {
                 auto& cell = cells[i];
                 os << cell;
                 if (!cell.ends_with('\n')) {
@@ -734,6 +736,8 @@ namespace sontag::cli {
   :ir [symbol|@last]
   :diag [symbol|@last]
   :mca [symbol|@last]
+  :graph cfg [symbol|@last]
+  :graph call [symbol|@last]
   :quit
 examples:
   :decl #include <cstdint>
@@ -746,6 +750,8 @@ examples:
   :mark baseline
   :asm
   :dump
+  :graph cfg
+  :graph call
 )";
             os << help_text;
         }
@@ -759,7 +765,7 @@ examples:
             return c == ' ' || c == '\t' || c == '\n' || c == '\r';
         }
 
-        static bool matches_command(std::string_view cmd, std::string_view name) {
+        static constexpr bool matches_command(std::string_view cmd, std::string_view name) {
             if (!cmd.starts_with(name)) {
                 return false;
             }
@@ -770,7 +776,7 @@ examples:
             return is_command_separator(next);
         }
 
-        static std::optional<std::string_view> command_argument(std::string_view cmd, std::string_view name) {
+        static constexpr std::optional<std::string_view> command_argument(std::string_view cmd, std::string_view name) {
             if (!matches_command(cmd, name)) {
                 return std::nullopt;
             }
@@ -794,6 +800,8 @@ examples:
             request.asm_syntax = cfg.asm_syntax;
             request.mca_cpu = cfg.mca_cpu;
             request.mca_path = cfg.mca_path;
+            request.graph_format = cfg.graph_format;
+            request.dot_path = cfg.dot_path;
             request.verbose = cfg.verbose;
             return request;
         }
@@ -870,8 +878,9 @@ examples:
                 return;
             }
 
-            if (result.kind == analysis_kind::mca || result.kind == analysis_kind::dump) {
-                os << "{}: {}\n"_format(to_string(result.kind), result.success ? "success"sv : "failed"sv);
+            if (result.kind == analysis_kind::mca || result.kind == analysis_kind::dump ||
+                result.kind == analysis_kind::graph_cfg || result.kind == analysis_kind::graph_call) {
+                os << "{}: {}\n"_format(result.kind, result.success ? "success"sv : "failed"sv);
             }
 
             if (!result.success && !result.diagnostics_text.empty()) {
@@ -905,7 +914,7 @@ examples:
                    "  source: {}\n"
                    "  artifact: {}\n"
                    "  stderr: {}\n"_format(
-                           to_string(result.kind),
+                           result.kind,
                            result.success ? "true"sv : "false"sv,
                            result.exit_code,
                            result.source_path.string(),
@@ -945,7 +954,7 @@ examples:
 
         static void render_analysis_result_json(const analysis_result& result, std::ostream& os) {
             analysis_output_record payload{};
-            payload.command = std::string(to_string(result.kind));
+            payload.command = "{}"_format(result.kind);
             payload.success = result.success;
             payload.exit_code = result.exit_code;
             payload.source_path = result.source_path.string();
@@ -1129,6 +1138,14 @@ examples:
             if (process_analysis_command(cmd, ":mca"sv, analysis_kind::mca, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
+            if (process_analysis_command(
+                        cmd, ":graph cfg"sv, analysis_kind::graph_cfg, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
+            if (process_analysis_command(
+                        cmd, ":graph call"sv, analysis_kind::graph_call, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
             if (cmd.starts_with(":"sv)) {
                 std::cerr << "unknown command: " << cmd << '\n';
                 return true;
@@ -1142,6 +1159,21 @@ examples:
                 return std::nullopt;
             }
             return std::string(trimmed);
+        }
+
+        static bool try_parse_bool(std::string_view value, bool& out) {
+            auto trimmed = trim_view(value);
+            if (utils::str_case_eq(trimmed, "true"sv) || utils::str_case_eq(trimmed, "1"sv) ||
+                utils::str_case_eq(trimmed, "yes"sv) || utils::str_case_eq(trimmed, "on"sv)) {
+                out = true;
+                return true;
+            }
+            if (utils::str_case_eq(trimmed, "false"sv) || utils::str_case_eq(trimmed, "0"sv) ||
+                utils::str_case_eq(trimmed, "no"sv) || utils::str_case_eq(trimmed, "off"sv)) {
+                out = false;
+                return true;
+            }
+            return false;
         }
 
     }  // namespace detail
@@ -1164,7 +1196,9 @@ examples:
         detail::code_balance_state balance{};
         bool should_quit = false;
 
-        std::cout << banner << '\n';
+        if (cfg.banner_enabled) {
+            std::cout << banner << '\n';
+        }
         if (resumed_session) {
             std::cout << "resumed session from: " << *resumed_session << '\n';
         }
@@ -1217,10 +1251,10 @@ examples:
         CLI::App app{"sontag"};
 
         bool show_version = false;
-        std::string std_arg{std::string{to_string(cfg.language_standard)}};
-        std::string opt_arg{std::string{to_string(cfg.opt_level)}};
-        std::string output_arg{std::string{to_string(cfg.output)}};
-        std::string color_arg{std::string{to_string(cfg.color)}};
+        std::string std_arg{"{}"_format(cfg.language_standard)};
+        std::string opt_arg{"{}"_format(cfg.opt_level)};
+        std::string output_arg{"{}"_format(cfg.output)};
+        std::string color_arg{"{}"_format(cfg.color)};
         std::string target_arg{};
         std::string cpu_arg{};
         std::string mca_cpu_arg{};
@@ -1229,7 +1263,9 @@ examples:
         std::string mca_path_arg{cfg.mca_path.string()};
         std::string cache_dir_arg{cfg.cache_dir.string()};
         std::string history_file_arg{cfg.history_file.string()};
+        std::string banner_arg{cfg.banner_enabled ? "true" : "false"};
         bool no_history = false;
+        bool no_banner = false;
 
         app.add_flag("--version", show_version, "Print version and exit");
         app.add_option("--std", std_arg, "C++ standard: c++20|c++23|c++2c");
@@ -1244,6 +1280,8 @@ examples:
         app.add_option("--cache-dir", cache_dir_arg, "Cache/artifact directory");
         app.add_option("--history-file", history_file_arg, "Persistent REPL history path");
         app.add_flag("--no-history", no_history, "Disable persistent REPL history");
+        app.add_option("--banner", banner_arg, "Show startup banner: true|false");
+        app.add_flag("--no-banner", no_banner, "Disable startup banner");
         app.add_option("--output", output_arg, "Output mode: table|json");
         app.add_option("--color", color_arg, "Color mode: auto|always|never");
         app.add_flag("--no-color", "Force color mode to never");
@@ -1278,6 +1316,10 @@ examples:
             std::cerr << "invalid --color value: " << color_arg << " (expected auto|always|never)\n";
             return std::optional<int>{2};
         }
+        if (!detail::try_parse_bool(banner_arg, cfg.banner_enabled)) {
+            std::cerr << "invalid --banner value: " << banner_arg << " (expected true|false)\n";
+            return std::optional<int>{2};
+        }
 
         cfg.target_triple = detail::normalize_optional(target_arg);
         cfg.cpu = detail::normalize_optional(cpu_arg);
@@ -1289,6 +1331,9 @@ examples:
         cfg.history_file = history_file_arg;
         if (no_history) {
             cfg.history_enabled = false;
+        }
+        if (no_banner) {
+            cfg.banner_enabled = false;
         }
 
         if (app.get_option("--no-color")->count() > 0U) {

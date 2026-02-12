@@ -25,21 +25,27 @@ ninja -v
 ### Binary output:
 
 ```bash
-./sontag
+./build/sontag
+```
+
+### Running tests
+
+```bash
+./build/tests/alltests
 ```
 
 ## Quickstart
 
 ```text
-:decl #include <cstdint>
-:decl uint64_t value = 64;
-:decl uint64_t values[2];
-values[0] = value;
-values[1] = value * 2
+:decl int value = 64;
+:decl int values[2];
+values[0] = value * value;
+values[1] = value * 2;
 :show all
 :symbols
-:asm
+:set opt=O0
 :dump
+:asm
 :ir
 :mca
 ```
@@ -55,20 +61,23 @@ values[1] = value * 2
 - LLVM IR output (`:ir`)
 - compiler diagnostics output (`:diag`)
 - microarchitecture analysis via `llvm-mca` (`:mca`)
+- graph generation (`:graph <subcommand>`)
+  - control-flow graphs (`:graph cfg`)
+  - function call graphs (`:graph call`)
 
 ## How Input Works
 
 - `:decl <code>` stores top-level declarations (includes, globals, functions).
-- non-command input stores executable cells in synthesized `__sontag_repl_main()`.
-- press `Shift+Tab` to insert a newline while composing a multi-line cell.
+- non-command input stores executable cells in synthesized `__sontag_main()`.
+- press `Shift+Tab` (or `Ctrl+Enter`) to insert a newline while composing a multi-line cell.
 - use `:show all` to inspect the full generated source in order: declarations first, then executable cells wrapped in the synthesized function.
 
-## Snapshots and `@last`
+## Snapshots and `@last` tag
 
 - a snapshot is a persisted point-in-time code state (all current `:decl` cells + executable cells) identified by cell count.
 - `:mark <name>` records a named snapshot marker at the current state.
 - `:snapshots` lists recorded markers in the session.
-- `@last` in analysis commands means analyze the latest/current snapshot state.
+- `@last` in analysis commands means analyze the latest/current snapshot state; passed by default
 
 ## Analysis Functionalities
 
@@ -79,9 +88,37 @@ values[1] = value * 2
 - `:diag [symbol|@last]` runs compile diagnostics on the current snapshot and prints compiler errors/warnings (optionally filtered by symbol).
 - `:mca [symbol|@last]` compiles to assembly, runs microarchitecture analysis, and prints throughput/latency/resource-pressure analysis text.
 - `:mca` does not operate on data symbols (for example `[D]`/`[B]` entries from `:symbols`).
+- `:graph cfg [symbol|@last]` compiles to LLVM IR, builds a function-scoped control-flow graph, and emits graph summary + DOT artifact (with optional rendered image).
+- `:graph call [symbol|@last]` compiles to LLVM IR, builds a root-scoped function call graph, and emits graph summary + DOT artifact (with optional rendered image).
 
-## Tests
+## `:graph`
 
-```bash
-./build/tests/alltests
+Use `:graph <subcommand>` for graph-oriented analysis outputs.
+
+Supported subcommands:
+- `cfg`: function-scoped control-flow graph.
+- `call`: root-scoped function call graph.
+- Add new `:graph` subcommands to this list as they are implemented.
+
+Examples:
+
+```text
+:graph cfg
+:graph cfg __sontag_main
+:graph call
+:graph call __sontag_main
 ```
+
+Output includes:
+- `cfg`:
+  - `function`: resolved function used to build the CFG
+  - `blocks`: number of CFG blocks
+  - `edges`: number of CFG edges
+  - `dot`: path to the DOT artifact in `artifacts/graphs/cfg`
+  - `rendered`: rendered graph path (or `<none>` if rendering is unavailable)
+- `call`:
+  - `root`: resolved root function used to build the call graph
+  - `nodes`: number of graph nodes
+  - `edges`: number of call edges
+  - `dot`: path to the DOT artifact in `artifacts/graphs/call`
+  - `rendered`: rendered graph path (or `<none>` if rendering is unavailable)

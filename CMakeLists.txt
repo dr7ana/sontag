@@ -58,6 +58,7 @@ add_library(sontag
     src/analysis.cpp
     src/cli.cpp
     src/editor.cpp
+    src/graph.cpp
 )
 
 target_include_directories(sontag PUBLIC include)
