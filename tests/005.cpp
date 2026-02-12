@@ -18,6 +18,20 @@ namespace sontag::test { namespace detail {
         }
     };
 
+    struct scoped_cwd {
+        fs::path original{};
+
+        explicit scoped_cwd(const fs::path& new_cwd) {
+            original = fs::current_path();
+            fs::current_path(new_cwd);
+        }
+
+        ~scoped_cwd() {
+            std::error_code ec{};
+            fs::current_path(original, ec);
+        }
+    };
+
     struct snapshot_record {
         std::string name{};
         size_t cell_count{};
@@ -555,6 +569,191 @@ namespace sontag::test {
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
         CHECK(persisted_cells.decl_cells.empty());
         CHECK(persisted_cells.exec_cells.empty());
+    }
+
+    TEST_CASE("005: file accepts quoted relative path and normalizes resolution", "[005][session][file]") {
+        detail::temp_dir temp{"sontag_file_relative"};
+        auto nested_dir = temp.path / "inputs";
+        detail::fs::create_directories(nested_dir);
+        auto source_path = nested_dir / "program.cpp";
+        detail::write_text_file(
+                source_path,
+                "int seed = 5;\n"
+                "int __sontag_main() {\n"
+                "    int value = seed + 1;\n"
+                "    return value;\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto output = detail::repl_output{};
+        {
+            auto cwd = detail::scoped_cwd{temp.path};
+            output = detail::run_repl_script_capture_output(
+                    cfg,
+                    ":file \"inputs/program.cpp\"\n"
+                    ":quit\n");
+        }
+
+        CHECK(output.out.find("loaded file") != std::string::npos);
+        CHECK(output.out.find(source_path.string()) != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.decl_cells[0].find("int seed = 5;") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("int value = seed + 1;") != std::string::npos);
+    }
+
+    TEST_CASE("005: file loads nested brace-heavy control flow with comments", "[005][session][file]") {
+        detail::temp_dir temp{"sontag_file_nested_braces"};
+        auto source_path = temp.path / "nested.cpp";
+        detail::write_text_file(
+                source_path,
+                R"(#include <array>
+#include <cstdint>
+#include <vector>
+
+struct sample_point {
+    int x{0};
+    int y{0};
+};
+
+struct layout {
+    std::array<int, 4> bins{};
+    int bias{1};
+};
+
+static int accumulate(const std::vector<int>& values);
+static int normalize(sample_point point, int scale);
+
+static int accumulate(const std::vector<int>& values) {
+    int sum = 0;
+    for (int value : values) {
+        sum += value;
+    }
+    return sum;
+}
+
+static int normalize(sample_point point, int scale) {
+    return (point.x + point.y) * scale;
+}
+
+int seed = 7;
+
+int __sontag_main() {
+    // braces in comment: { nested } still comment
+    layout state{};
+    sample_point point{2, 3};
+    std::vector<int> values{1, 2, 3, 4};
+    int total = normalize(point, seed);
+
+    if (seed > 0) {
+        for (int i = 0; i < static_cast<int>(state.bins.size()); ++i) {
+            state.bins[static_cast<size_t>(i)] = i + total;
+        }
+
+        for (int value : values) {
+            if ((value % 2) == 0) {
+                total += value;
+            }
+            else {
+                total -= value;
+            }
+        }
+    }
+
+    total += accumulate(values);
+    return total + state.bins[0];
+}
+)");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":file {}\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+        CHECK(output.out.find("loaded file") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.decl_cells[0].find("#include <array>") != std::string::npos);
+        CHECK(persisted_cells.decl_cells[0].find("struct layout") != std::string::npos);
+        CHECK(persisted_cells.decl_cells[0].find("static int accumulate(const std::vector<int>& values);") !=
+              std::string::npos);
+        CHECK(persisted_cells.decl_cells[0].find("int seed = 7;") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("for (int i = 0; i < static_cast<int>(state.bins.size()); ++i)") !=
+              std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("total += accumulate(values);") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("return total + state.bins[0];") != std::string::npos);
+    }
+
+    TEST_CASE("005: file loads braces in strings and raw strings inside driver body", "[005][session][file]") {
+        detail::temp_dir temp{"sontag_file_string_braces"};
+        auto source_path = temp.path / "string_braces.cpp";
+        detail::write_text_file(
+                source_path,
+                R"(int __sontag_main() {
+    const char* text = "{not a block}";
+    const char* raw = R"json({
+  "payload": "value with } and { braces"
+})json";
+    if (text[0] == '{') { return 1; }
+    return raw[0] == '{' ? 2 : 0;
+}
+)");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":file {}\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+        CHECK(output.out.find("loaded file") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.empty());
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.exec_cells[0].find(R"(const char* text = "{not a block}";)") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find(R"(const char* raw = R"json({)") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("return raw[0] == '{' ? 2 : 0;") != std::string::npos);
+    }
+
+    TEST_CASE("005: file uses main as driver when __sontag_main is absent", "[005][session][file]") {
+        detail::temp_dir temp{"sontag_file_main_driver"};
+        auto source_path = temp.path / "main_driver.cpp";
+        detail::write_text_file(
+                source_path,
+                R"(const char* note = "__sontag_main is not defined in this file";
+int main() {
+    int v = 11;
+    return v;
+}
+)");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":file {}\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+        CHECK(output.out.find("loaded file") != std::string::npos);
+        CHECK(output.err.find("both __sontag_main and main") == std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.decl_cells[0].find("__sontag_main is not defined") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("int v = 11;") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("return v;") != std::string::npos);
     }
 
 }  // namespace sontag::test

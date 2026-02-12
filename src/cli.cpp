@@ -416,7 +416,24 @@ namespace sontag::cli {
                 err << "invalid " << command_name << ", expected non-empty path\n";
                 return std::nullopt;
             }
-            return fs::path{std::string{value}};
+
+            auto path = fs::path{std::string{value}}.lexically_normal();
+            if (path.empty()) {
+                err << "invalid " << command_name << ", expected non-empty path\n";
+                return std::nullopt;
+            }
+
+            if (path.is_relative()) {
+                std::error_code ec{};
+                auto cwd = fs::current_path(ec);
+                if (ec) {
+                    err << "failed to resolve current directory for " << command_name << ": " << ec.message() << '\n';
+                    return std::nullopt;
+                }
+                path = (cwd / path).lexically_normal();
+            }
+
+            return path;
         }
 
         static std::string read_fd_all(int fd) {
