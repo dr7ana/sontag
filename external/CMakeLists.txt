@@ -7,7 +7,6 @@ if(GIT_FOUND)
     check_submodule(CLI11)
     check_submodule(glaze)
     check_submodule(isocline)
-    check_submodule(linenoise)
 endif()
 
 # CLI11
@@ -17,10 +16,5 @@ add_subdirectory(CLI11)
 add_subdirectory(glaze)
 
 # isocline
-set(IC_USE_CXX TRUE CACHE BOOL "" FALSES)
-add_subdirectory(isocline)
-
-# linenoise
-add_library(linenoise STATIC linenoise/linenoise.c)
-target_include_directories(linenoise PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/linenoise)
-add_library(linenoise::linenoise ALIAS linenoise)
+# Pull in only the library target; do not build upstream sample binaries.
+add_subdirectory(isocline EXCLUDE_FROM_ALL)

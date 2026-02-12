@@ -9,11 +9,6 @@
 
 #include <CLI/CLI.hpp>
 
-extern "C" {
-#include <poll.h>
-#include <unistd.h>
-}
-
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -319,18 +314,6 @@ namespace sontag::cli {
         static constexpr bool cell_is_complete(const code_balance_state& state) {
             return state.paren_depth == 0 && state.brace_depth == 0 && state.bracket_depth == 0 &&
                    !state.in_single_quote && !state.in_double_quote && !state.in_block_comment;
-        }
-
-        static bool tty_has_queued_input(int timeout_ms = 25) {
-            if (::isatty(STDIN_FILENO) != 1) {
-                return false;
-            }
-
-            pollfd fd{};
-            fd.fd = STDIN_FILENO;
-            fd.events = POLLIN;
-            auto rc = ::poll(&fd, 1, timeout_ms);
-            return rc > 0 && (fd.revents & POLLIN) != 0;
         }
 
         static persisted_config make_persisted_config(const startup_config& cfg) {
@@ -1204,8 +1187,6 @@ examples:
                 continue;
             }
 
-            editor.record_history(line);
-
             if (pending_cell.empty() && detail::process_command(line, cfg, state, should_quit)) {
                 continue;
             }
@@ -1217,12 +1198,6 @@ examples:
             detail::update_code_balance_state(balance, line);
 
             if (!detail::cell_is_complete(balance)) {
-                continue;
-            }
-
-            // Paste bursts can arrive slightly after the first completed line.
-            // Give stdin a short grace window so multi-line paste gets coalesced.
-            if (detail::tty_has_queued_input()) {
                 continue;
             }
 
