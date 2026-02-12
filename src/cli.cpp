@@ -2,6 +2,8 @@
 
 #include "editor.hpp"
 
+#include "sontag/analysis.hpp"
+
 #include <glaze/glaze.hpp>
 
 #include <CLI/CLI.hpp>
@@ -76,6 +78,17 @@ namespace sontag::cli { namespace detail {
         bool in_block_comment{false};
     };
 
+    struct analysis_output_record {
+        std::string command{};
+        bool success{false};
+        int exit_code{-1};
+        std::string source_path{};
+        std::string artifact_path{};
+        std::string stderr_path{};
+        std::string text{};
+        std::vector<std::string> clang_command{};
+    };
+
 }}  // namespace sontag::cli::detail
 
 namespace glz {
@@ -126,6 +139,28 @@ namespace glz {
     struct meta<sontag::cli::detail::persisted_cells> {
         using T = sontag::cli::detail::persisted_cells;
         static constexpr auto value = object("schema_version", &T::schema_version, "cells", &T::cells);
+    };
+
+    template <>
+    struct meta<sontag::cli::detail::analysis_output_record> {
+        using T = sontag::cli::detail::analysis_output_record;
+        static constexpr auto value =
+                object("command",
+                       &T::command,
+                       "success",
+                       &T::success,
+                       "exit_code",
+                       &T::exit_code,
+                       "source_path",
+                       &T::source_path,
+                       "artifact_path",
+                       &T::artifact_path,
+                       "stderr_path",
+                       &T::stderr_path,
+                       "text",
+                       &T::text,
+                       "clang_command",
+                       &T::clang_command);
     };
 
 }  // namespace glz
@@ -455,7 +490,9 @@ namespace sontag::cli {
             }
 
             if (!session_dir) {
-                throw std::runtime_error("unable to resolve --resume target: " + std::string(resume_id));
+                auto message = std::string{"unable to resolve --resume target: "};
+                message.append(resume_id);
+                throw std::runtime_error(message);
             }
 
             auto state = make_state_paths(*session_dir);
@@ -572,12 +609,149 @@ namespace sontag::cli {
             os << "  :reset\n";
             os << "  :mark <name>\n";
             os << "  :snapshots\n";
+            os << "  :asm [symbol|@last]\n";
+            os << "  :ir [symbol|@last]\n";
+            os << "  :diag [symbol|@last]\n";
             os << "  :quit\n";
             os << "examples:\n";
             os << "  :set std=c++23\n";
             os << "  :set opt=O3\n";
             os << "  :set output=json\n";
             os << "  :mark baseline\n";
+            os << "  :asm\n";
+        }
+
+        static bool matches_command(std::string_view cmd, std::string_view name) {
+            if (!cmd.starts_with(name)) {
+                return false;
+            }
+            if (cmd.size() == name.size()) {
+                return true;
+            }
+            auto next = cmd[name.size()];
+            return next == ' ' || next == '\t';
+        }
+
+        static std::optional<std::string_view> command_argument(std::string_view cmd, std::string_view name) {
+            if (!matches_command(cmd, name)) {
+                return std::nullopt;
+            }
+            auto tail = trim_view(cmd.substr(name.size()));
+            if (tail.empty()) {
+                return std::optional<std::string_view>{std::string_view{}};
+            }
+            return std::optional<std::string_view>{tail};
+        }
+
+        static analysis_request make_analysis_request(const startup_config& cfg, const repl_state& state) {
+            analysis_request request{};
+            request.clang_path = cfg.clang_path;
+            request.session_dir = state.session_dir;
+            request.cells = state.cells;
+            request.language_standard = cfg.language_standard;
+            request.opt_level = cfg.opt_level;
+            request.target_triple = cfg.target_triple;
+            request.cpu = cfg.cpu;
+            request.asm_syntax = cfg.asm_syntax;
+            return request;
+        }
+
+        static void render_analysis_result_table(const analysis_result& result, std::ostream& os) {
+            os << to_string(result.kind) << " result:\n";
+            os << "  success: " << (result.success ? "true" : "false") << '\n';
+            os << "  exit_code: " << result.exit_code << '\n';
+            os << "  source: " << result.source_path.string() << '\n';
+            os << "  artifact: " << result.artifact_path.string() << '\n';
+            os << "  stderr: " << result.stderr_path.string() << '\n';
+
+            if (result.kind != analysis_kind::diag && !result.diagnostics_text.empty()) {
+                os << "diagnostics:\n";
+                os << result.diagnostics_text;
+                if (result.diagnostics_text.back() != '\n') {
+                    os << '\n';
+                }
+            }
+
+            if (result.kind == analysis_kind::diag) {
+                if (result.artifact_text.empty()) {
+                    os << "no diagnostics\n";
+                    return;
+                }
+                os << result.artifact_text;
+                if (result.artifact_text.back() != '\n') {
+                    os << '\n';
+                }
+                return;
+            }
+
+            if (result.artifact_text.empty()) {
+                os << "artifact is empty\n";
+                return;
+            }
+
+            os << result.artifact_text;
+            if (result.artifact_text.back() != '\n') {
+                os << '\n';
+            }
+        }
+
+        static void render_analysis_result_json(const analysis_result& result, std::ostream& os) {
+            analysis_output_record payload{};
+            payload.command = std::string(to_string(result.kind));
+            payload.success = result.success;
+            payload.exit_code = result.exit_code;
+            payload.source_path = result.source_path.string();
+            payload.artifact_path = result.artifact_path.string();
+            payload.stderr_path = result.stderr_path.string();
+            payload.text = result.artifact_text;
+            payload.clang_command = result.command;
+
+            std::string json{};
+            auto ec = glz::write_json(payload, json);
+            if (ec) {
+                throw std::runtime_error("failed to serialize analysis output");
+            }
+            os << json << '\n';
+        }
+
+        static void render_analysis_result(const analysis_result& result, output_mode mode, std::ostream& os) {
+            if (mode == output_mode::json) {
+                render_analysis_result_json(result, os);
+                return;
+            }
+            render_analysis_result_table(result, os);
+        }
+
+        static bool process_analysis_command(
+                std::string_view cmd,
+                std::string_view command_name,
+                analysis_kind kind,
+                startup_config& cfg,
+                repl_state& state,
+                std::ostream& out,
+                std::ostream& err) {
+            auto arg = command_argument(cmd, command_name);
+            if (!arg) {
+                return false;
+            }
+
+            if (state.cells.empty()) {
+                err << "no stored cells available for analysis\n";
+                return true;
+            }
+
+            try {
+                auto request = make_analysis_request(cfg, state);
+                if (!arg->empty() && *arg != "@last"sv) {
+                    request.symbol = std::string(*arg);
+                }
+                auto result = run_analysis(request, kind);
+                render_analysis_result(result, cfg.output, out);
+            } catch (const std::exception& e) {
+                err << "analysis error: " << e.what() << '\n';
+            }
+
+            return true;
         }
 
         static bool process_command(
@@ -624,6 +798,15 @@ namespace sontag::cli {
                 }
                 return true;
             }
+            if (process_analysis_command(cmd, ":asm"sv, analysis_kind::asm_text, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
+            if (process_analysis_command(cmd, ":ir"sv, analysis_kind::ir, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
+            if (process_analysis_command(cmd, ":diag"sv, analysis_kind::diag, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
             if (cmd.starts_with(":"sv)) {
                 std::cerr << "unknown command: " << cmd << '\n';
                 return true;
@@ -641,6 +824,17 @@ namespace sontag::cli {
 
     }  // namespace detail
 
+    static constexpr auto banner = R"(
+ (`-').->          <-. (`-')_ (`-')     (`-')  _            
+ ( OO)_      .->      \( OO) )( OO).->  (OO ).-/     .->    
+(_)--\_)(`-')----. ,--./ ,--/ /    '._  / ,---.   ,---(`-') 
+/    _ /( OO).-.  '|   \ |  | |'--...__)| \ /`.\ '  .-(OO ) 
+\_..`--.( _) | |  ||  . '|  |)`--.  .--''-'|_.' ||  | .-, \ 
+.-._)   \\|  |)|  ||  |\    |    |  |  (|  .-.  ||  | '.(_/ 
+\       / '  '-'  '|  | \   |    |  |   |  | |  ||  '-'  |  
+ `-----'   `-----' `--'  `--'    `--'   `--' `--' `-----'   
+)";
+
     void run_repl(startup_config& cfg) {
         auto resumed_session = cfg.resume_session;
         auto state = detail::start_session(cfg);
@@ -650,7 +844,7 @@ namespace sontag::cli {
         detail::code_balance_state balance{};
         bool should_quit = false;
 
-        std::cout << "sontag m0 repl\n";
+        std::cout << banner << '\n';
         if (resumed_session) {
             std::cout << "resumed session from: " << *resumed_session << '\n';
         }

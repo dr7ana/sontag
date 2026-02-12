@@ -42,6 +42,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(sontag
+    src/analysis.cpp
     src/cli.cpp
     src/editor.cpp
     src/interpreter.cpp

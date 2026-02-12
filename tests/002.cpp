@@ -1,9 +1,5 @@
 #include "utils.hpp"
 
-#include "sontag/cli.hpp"
-
-#include <vector>
-
 namespace sontag::test {
 
     namespace detail {
