@@ -64,7 +64,7 @@ namespace sontag::test {
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
-        request.cells = {"int foo(int x) { return x + 1; }"};
+        request.decl_cells = {"int foo(int x) { return x + 1; }"};
         request.symbol = "foo";
 
         auto result = run_analysis(request, analysis_kind::asm_text);
@@ -105,7 +105,7 @@ namespace sontag::test {
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
-        request.cells = {"int foo(int x) { return x + 1; }"};
+        request.decl_cells = {"int foo(int x) { return x + 1; }"};
         request.symbol = "does_not_exist";
 
         try {
@@ -126,7 +126,7 @@ namespace sontag::test {
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
-        request.cells = {"namespace ns { int foo(int x) { return x + 1; } }"};
+        request.decl_cells = {"namespace ns { int foo(int x) { return x + 1; } }"};
         request.symbol = "ns::foo";
 
         auto result = run_analysis(request, analysis_kind::asm_text);
@@ -143,7 +143,7 @@ namespace sontag::test {
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
-        request.cells = {
+        request.decl_cells = {
                 "int foo(int x) {\n"
                 "  return x + missing_foo;\n"
                 "}\n"

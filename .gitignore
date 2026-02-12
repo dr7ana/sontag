@@ -1,5 +1,6 @@
 /build*
 .cache/
+.sontag/
 .vscode/
 .DS_Store
 .gdb_history

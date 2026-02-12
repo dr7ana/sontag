@@ -36,6 +36,7 @@ endif()
 #option(BUILD_STATIC_DEPS "Build and link against static dependencies" OFF)
 option(WARNINGS_AS_ERRORS "Treat all warnings as errors. turn off for development, on for release" OFF)
 option(SONTAG_BUILD_TESTS "Build sontag test suite" ${SONTAG_IS_TOPLEVEL_PROJECT})
+option(SONTAG_SMOKE "Build sontag smoke tests" OFF)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,7 +46,6 @@ add_library(sontag
     src/analysis.cpp
     src/cli.cpp
     src/editor.cpp
-    src/interpreter.cpp
 )
 
 target_include_directories(sontag PUBLIC include)
@@ -61,10 +61,11 @@ target_link_libraries(sontag
 )
 
 add_executable(
-    sontag_cli
+    sontag_bin
     app/sontag.cpp
 )
-target_link_libraries(sontag_cli PRIVATE sontag)
+target_link_libraries(sontag_bin PRIVATE sontag)
+set_target_properties(sontag_bin PROPERTIES OUTPUT_NAME sontag)
 
 set(warning_flags -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-function -Werror=vla -Wno-deprecated-declaration)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")

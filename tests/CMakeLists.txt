@@ -23,3 +23,14 @@ add_executable(
 )
 
 target_link_libraries(alltests PRIVATE tests_common Catch2::Catch2WithMain)
+
+if(SONTAG_SMOKE)
+    add_executable(
+        smoketests
+
+        007.cpp
+    )
+
+    target_link_libraries(smoketests PRIVATE tests_common Catch2::Catch2WithMain)
+    target_compile_definitions(smoketests PRIVATE SONTAG_CLI_PATH=\"$<TARGET_FILE:sontag_bin>\")
+endif()

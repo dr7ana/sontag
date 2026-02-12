@@ -5,18 +5,29 @@
 #include <catch2/catch_test_macros.hpp>
 #include <glaze/glaze.hpp>
 
+extern "C" {
+#include <fcntl.h>
+#include <poll.h>
+#include <pty.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
+}
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <optional>
+#include <ranges>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 namespace sontag {

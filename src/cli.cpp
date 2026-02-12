@@ -3,11 +3,15 @@
 #include "editor.hpp"
 
 #include "sontag/analysis.hpp"
+#include "sontag/format.hpp"
 
 #include <glaze/glaze.hpp>
 
 #include <CLI/CLI.hpp>
+
+extern "C" {
 #include <unistd.h>
+}
 
 #include <algorithm>
 #include <chrono>
@@ -23,6 +27,8 @@
 #include <system_error>
 #include <vector>
 
+using namespace sontag::literals;
+
 namespace sontag::cli { namespace detail {
 
     using namespace std::string_view_literals;
@@ -35,6 +41,8 @@ namespace sontag::cli { namespace detail {
         std::string opt_level{};
         std::optional<std::string> target{};
         std::optional<std::string> cpu{};
+        std::optional<std::string> mca_cpu{};
+        std::string mca_path{"llvm-mca"};
         std::string cache_dir{};
         std::string output{};
         std::string color{};
@@ -53,11 +61,13 @@ namespace sontag::cli { namespace detail {
 
     struct persisted_cells {
         int schema_version{1};
-        std::vector<std::string> cells{};
+        std::vector<std::string> decl_cells{};
+        std::vector<std::string> exec_cells{};
     };
 
     struct repl_state {
-        std::vector<std::string> cells{};
+        std::vector<std::string> decl_cells{};
+        std::vector<std::string> exec_cells{};
         persisted_snapshots snapshot_data{};
         fs::path session_dir{};
         fs::path config_path{};
@@ -109,6 +119,10 @@ namespace glz {
                        &T::target,
                        "cpu",
                        &T::cpu,
+                       "mca_cpu",
+                       &T::mca_cpu,
+                       "mca_path",
+                       &T::mca_path,
                        "cache_dir",
                        &T::cache_dir,
                        "output",
@@ -138,7 +152,8 @@ namespace glz {
     template <>
     struct meta<sontag::cli::detail::persisted_cells> {
         using T = sontag::cli::detail::persisted_cells;
-        static constexpr auto value = object("schema_version", &T::schema_version, "cells", &T::cells);
+        static constexpr auto value = object(
+                "schema_version", &T::schema_version, "decl_cells", &T::decl_cells, "exec_cells", &T::exec_cells);
     };
 
     template <>
@@ -169,6 +184,15 @@ namespace sontag::cli {
 
     namespace detail {
 
+        static constexpr auto default_value = "<default>"sv;
+
+        static std::string_view optional_or_default(const std::optional<std::string>& value) {
+            if (value) {
+                return *value;
+            }
+            return default_value;
+        }
+
         static constexpr std::string_view trim_view(std::string_view value) {
             auto first = value.find_first_not_of(" \t\r\n");
             if (first == std::string_view::npos) {
@@ -178,14 +202,14 @@ namespace sontag::cli {
             return value.substr(first, (last - first) + 1U);
         }
 
-        static void update_depth(int& depth, int delta) {
+        static constexpr void update_depth(int& depth, int delta) {
             depth += delta;
             if (depth < 0) {
                 depth = 0;
             }
         }
 
-        static void update_code_balance_state(code_balance_state& state, std::string_view line) {
+        static constexpr void update_code_balance_state(code_balance_state& state, std::string_view line) {
             std::size_t i = 0U;
             while (i < line.size()) {
                 auto c = line[i];
@@ -291,7 +315,7 @@ namespace sontag::cli {
             state.in_line_comment = false;
         }
 
-        static bool cell_is_complete(const code_balance_state& state) {
+        static constexpr bool cell_is_complete(const code_balance_state& state) {
             return state.paren_depth == 0 && state.brace_depth == 0 && state.bracket_depth == 0 &&
                    !state.in_single_quote && !state.in_double_quote && !state.in_block_comment;
         }
@@ -303,6 +327,8 @@ namespace sontag::cli {
             data.opt_level = std::string(to_string(cfg.opt_level));
             data.target = cfg.target_triple;
             data.cpu = cfg.cpu;
+            data.mca_cpu = cfg.mca_cpu;
+            data.mca_path = cfg.mca_path.string();
             data.cache_dir = cfg.cache_dir.string();
             data.output = std::string(to_string(cfg.output));
             data.color = std::string(to_string(cfg.color));
@@ -327,6 +353,13 @@ namespace sontag::cli {
 
             cfg.target_triple = data.target;
             cfg.cpu = data.cpu;
+            cfg.mca_cpu = data.mca_cpu;
+            if (data.mca_path.empty()) {
+                cfg.mca_path = "llvm-mca";
+            }
+            else {
+                cfg.mca_path = data.mca_path;
+            }
             cfg.cache_dir = data.cache_dir;
         }
 
@@ -348,16 +381,16 @@ namespace sontag::cli {
             std::string json{};
             auto ec = glz::write_json(value, json);
             if (ec) {
-                throw std::runtime_error("failed to serialize json for " + path.string());
+                throw std::runtime_error("failed to serialize json for {}"_format(path.string()));
             }
 
             std::ofstream out{path};
             if (!out) {
-                throw std::runtime_error("failed to open " + path.string());
+                throw std::runtime_error("failed to open {}"_format(path.string()));
             }
             out << json << '\n';
             if (!out) {
-                throw std::runtime_error("failed to write " + path.string());
+                throw std::runtime_error("failed to write {}"_format(path.string()));
             }
         }
 
@@ -368,13 +401,13 @@ namespace sontag::cli {
             if (allow_unknown_keys) {
                 auto ec = glz::read<glz::opts{.error_on_unknown_keys = false}>(value, json);
                 if (ec) {
-                    throw std::runtime_error("failed to parse json file " + path.string());
+                    throw std::runtime_error("failed to parse json file {}"_format(path.string()));
                 }
             }
             else {
                 auto ec = glz::read_json(value, json);
                 if (ec) {
-                    throw std::runtime_error("failed to parse json file " + path.string());
+                    throw std::runtime_error("failed to parse json file {}"_format(path.string()));
                 }
             }
             return value;
@@ -383,13 +416,9 @@ namespace sontag::cli {
         static void validate_supported_schema_version(int schema_version, const fs::path& path) {
             constexpr int supported_schema_version = 1;
             if (schema_version > supported_schema_version) {
-                auto message = std::string{"unsupported schema_version in "};
-                message.append(path.string());
-                message.append(": ");
-                message.append(std::to_string(schema_version));
-                message.append(" > ");
-                message.append(std::to_string(supported_schema_version));
-                throw std::runtime_error(message);
+                throw std::runtime_error(
+                        "unsupported schema_version in {}: {} > {}"_format(
+                                path.string(), schema_version, supported_schema_version));
             }
         }
 
@@ -424,14 +453,19 @@ namespace sontag::cli {
             write_json_file(state.snapshot_data, state.snapshots_path);
         }
 
+        static std::size_t total_cell_count(const repl_state& state) {
+            return state.decl_cells.size() + state.exec_cells.size();
+        }
+
         static void persist_cells(const repl_state& state) {
             persisted_cells data{};
-            data.cells = state.cells;
+            data.decl_cells = state.decl_cells;
+            data.exec_cells = state.exec_cells;
             write_json_file(data, state.cells_path);
         }
 
         static void persist_current_snapshot(repl_state& state) {
-            upsert_snapshot(state.snapshot_data, "current"sv, state.cells.size());
+            upsert_snapshot(state.snapshot_data, "current"sv, total_cell_count(state));
             persist_snapshots(state);
         }
 
@@ -458,7 +492,7 @@ namespace sontag::cli {
             std::optional<fs::path> latest{};
             for (const auto& entry : fs::directory_iterator(sessions_root, ec)) {
                 if (ec) {
-                    throw std::runtime_error("failed to enumerate " + sessions_root.string());
+                    throw std::runtime_error("failed to enumerate {}"_format(sessions_root.string()));
                 }
                 if (!entry.is_directory()) {
                     continue;
@@ -475,7 +509,7 @@ namespace sontag::cli {
             std::error_code ec{};
             fs::create_directories(sessions_root, ec);
             if (ec) {
-                throw std::runtime_error("failed to create sessions root: " + sessions_root.string());
+                throw std::runtime_error("failed to create sessions root: {}"_format(sessions_root.string()));
             }
 
             auto session_id = make_session_id();
@@ -483,7 +517,7 @@ namespace sontag::cli {
 
             fs::create_directories(session_dir, ec);
             if (ec) {
-                throw std::runtime_error("failed to create session dir: " + session_dir.string());
+                throw std::runtime_error("failed to create session dir: {}"_format(session_dir.string()));
             }
 
             auto state = make_state_paths(session_dir);
@@ -511,9 +545,7 @@ namespace sontag::cli {
             }
 
             if (!session_dir) {
-                auto message = std::string{"unable to resolve --resume target: "};
-                message.append(resume_id);
-                throw std::runtime_error(message);
+                throw std::runtime_error("unable to resolve --resume target: {}"_format(resume_id));
             }
 
             auto state = make_state_paths(*session_dir);
@@ -529,7 +561,8 @@ namespace sontag::cli {
             if (fs::exists(state.cells_path)) {
                 auto cell_data = read_json_file<persisted_cells>(state.cells_path, true);
                 validate_supported_schema_version(cell_data.schema_version, state.cells_path);
-                state.cells = std::move(cell_data.cells);
+                state.decl_cells = std::move(cell_data.decl_cells);
+                state.exec_cells = std::move(cell_data.exec_cells);
             }
 
             persist_current_snapshot(state);
@@ -545,14 +578,26 @@ namespace sontag::cli {
         }
 
         static void print_config(const startup_config& cfg, std::ostream& os) {
-            os << "language_standard=" << to_string(cfg.language_standard) << '\n';
-            os << "opt_level=" << to_string(cfg.opt_level) << '\n';
-            os << "target=" << (cfg.target_triple ? *cfg.target_triple : "<default>") << '\n';
-            os << "cpu=" << (cfg.cpu ? *cfg.cpu : "<default>") << '\n';
-            os << "clang=" << cfg.clang_path.string() << '\n';
-            os << "cache_dir=" << cfg.cache_dir.string() << '\n';
-            os << "output=" << to_string(cfg.output) << '\n';
-            os << "color=" << to_string(cfg.color) << '\n';
+            os << ("  language_standard={}\n"
+                   "  opt_level={}\n"
+                   "  target={}\n"
+                   "  cpu={}\n"
+                   "  clang={}\n"
+                   "  mca_cpu={}\n"
+                   "  mca_path={}\n"
+                   "  cache_dir={}\n"
+                   "  output={}\n"
+                   "  color={}\n"_format(
+                           to_string(cfg.language_standard),
+                           to_string(cfg.opt_level),
+                           optional_or_default(cfg.target_triple),
+                           optional_or_default(cfg.cpu),
+                           cfg.clang_path.string(),
+                           optional_or_default(cfg.mca_cpu),
+                           cfg.mca_path.string(),
+                           cfg.cache_dir.string(),
+                           to_string(cfg.output),
+                           to_string(cfg.color)));
         }
 
         static void print_snapshots(const repl_state& state, std::ostream& os) {
@@ -561,6 +606,56 @@ namespace sontag::cli {
                 os << "  " << entry.name << " (cells=" << entry.cell_count << ")";
                 if (entry.name == "current") {
                     os << " [current]";
+                }
+                os << '\n';
+            }
+        }
+
+        static void print_cells(
+                const std::vector<std::string>& cells, std::ostream& os, std::string_view empty_message) {
+            if (cells.empty()) {
+                os << empty_message << '\n';
+                return;
+            }
+
+            for (auto i = std::size_t{0}; i < cells.size(); ++i) {
+                auto& cell = cells[i];
+                os << cell;
+                if (!cell.ends_with('\n')) {
+                    os << '\n';
+                }
+                if (i + 1U < cells.size()) {
+                    os << '\n';
+                }
+            }
+        }
+
+        static void print_decl_cells(const repl_state& state, std::ostream& os) {
+            print_cells(state.decl_cells, os, "no declarative cells");
+        }
+
+        static void print_exec_cells(const repl_state& state, std::ostream& os) {
+            print_cells(state.exec_cells, os, "no executable cells");
+        }
+
+        static void print_all_cells(const repl_state& state, std::ostream& os) {
+            analysis_request request{};
+            request.decl_cells = state.decl_cells;
+            request.exec_cells = state.exec_cells;
+            os << synthesize_source(request);
+        }
+
+        static void print_symbols(const std::vector<analysis_symbol>& symbols, bool verbose, std::ostream& os) {
+            if (symbols.empty()) {
+                os << "no symbols found\n";
+                return;
+            }
+
+            os << "symbols:\n";
+            for (const auto& symbol : symbols) {
+                os << "  [" << symbol.kind << "] " << symbol.demangled;
+                if (verbose && symbol.demangled != symbol.mangled) {
+                    os << " <" << symbol.mangled << '>';
                 }
                 os << '\n';
             }
@@ -627,23 +722,39 @@ namespace sontag::cli {
         }
 
         static void print_help(std::ostream& os) {
-            os << "commands:\n";
-            os << "  :help\n";
-            os << "  :show config\n";
-            os << "  :set <key>=<value>\n";
-            os << "  :reset\n";
-            os << "  :mark <name>\n";
-            os << "  :snapshots\n";
-            os << "  :asm [symbol|@last]\n";
-            os << "  :ir [symbol|@last]\n";
-            os << "  :diag [symbol|@last]\n";
-            os << "  :quit\n";
-            os << "examples:\n";
-            os << "  :set std=c++23\n";
-            os << "  :set opt=O3\n";
-            os << "  :set output=json\n";
-            os << "  :mark baseline\n";
-            os << "  :asm\n";
+            static constexpr auto help_text = R"(commands:
+  :help
+  :clear
+  :clear last
+  :show <config|decl|exec|all>
+  :symbols
+  :decl <code>
+  :set <key>=<value>
+  :reset
+  :mark <name>
+  :snapshots
+  :asm [symbol|@last]
+  :ir [symbol|@last]
+  :diag [symbol|@last]
+  :mca [symbol|@last]
+  :quit
+examples:
+  :decl #include <cstdint>
+  :decl struct point { int x; int y; };
+  :set std=c++23
+  :set opt=O3
+  :set output=json
+  :show all
+  :symbols
+  :mark baseline
+  :asm
+)";
+            os << help_text;
+        }
+
+        static void clear_terminal(std::ostream& os) {
+            os << "\x1b[2J\x1b[H";
+            os.flush();
         }
 
         static bool matches_command(std::string_view cmd, std::string_view name) {
@@ -672,27 +783,119 @@ namespace sontag::cli {
             analysis_request request{};
             request.clang_path = cfg.clang_path;
             request.session_dir = state.session_dir;
-            request.cells = state.cells;
+            request.decl_cells = state.decl_cells;
+            request.exec_cells = state.exec_cells;
             request.language_standard = cfg.language_standard;
             request.opt_level = cfg.opt_level;
             request.target_triple = cfg.target_triple;
             request.cpu = cfg.cpu;
             request.asm_syntax = cfg.asm_syntax;
+            request.mca_cpu = cfg.mca_cpu;
+            request.mca_path = cfg.mca_path;
+            request.verbose = cfg.verbose;
             return request;
         }
 
-        static void render_analysis_result_table(const analysis_result& result, std::ostream& os) {
-            os << to_string(result.kind) << " result:\n";
-            os << "  success: " << (result.success ? "true" : "false") << '\n';
-            os << "  exit_code: " << result.exit_code << '\n';
-            os << "  source: " << result.source_path.string() << '\n';
-            os << "  artifact: " << result.artifact_path.string() << '\n';
-            os << "  stderr: " << result.stderr_path.string() << '\n';
+        struct validation_result {
+            bool success{true};
+            std::string diagnostics{};
+        };
+
+        static validation_result validate_candidate_state(
+                const startup_config& cfg, const repl_state& state, std::string_view candidate_cell, bool declarative) {
+            auto request = make_analysis_request(cfg, state);
+            request.symbol = std::nullopt;
+            if (declarative) {
+                request.decl_cells.emplace_back(candidate_cell);
+            }
+            else {
+                request.exec_cells.emplace_back(candidate_cell);
+            }
+
+            auto diag = run_analysis(request, analysis_kind::diag);
+            return validation_result{.success = diag.success, .diagnostics = std::move(diag.artifact_text)};
+        }
+
+        static bool append_validated_cell(
+                startup_config& cfg,
+                repl_state& state,
+                std::string_view cell,
+                bool declarative,
+                std::ostream& out,
+                std::ostream& err) {
+            try {
+                auto validation = validate_candidate_state(cfg, state, cell, declarative);
+                if (!validation.success && !validation.diagnostics.empty()) {
+                    err << validation.diagnostics;
+                    if (!validation.diagnostics.ends_with('\n')) {
+                        err << '\n';
+                    }
+                }
+                if (!validation.success) {
+                    err << "cell rejected, state unchanged\n";
+                    return false;
+                }
+            } catch (const std::exception& e) {
+                err << "state validation error: " << e.what() << '\n';
+                return false;
+            }
+
+            if (declarative) {
+                state.decl_cells.emplace_back(cell);
+                persist_cells(state);
+                persist_current_snapshot(state);
+                out << "stored decl #" << state.decl_cells.size() << " (state: valid)\n";
+                return true;
+            }
+
+            state.exec_cells.emplace_back(cell);
+            persist_cells(state);
+            persist_current_snapshot(state);
+            out << "stored cell #" << state.exec_cells.size() << " (state: valid)\n";
+            return true;
+        }
+
+        static void render_analysis_result_table(const analysis_result& result, bool verbose, std::ostream& os) {
+            if (result.kind == analysis_kind::mca && !verbose) {
+                os << "mca: " << (result.success ? "success"sv : "failed"sv) << '\n';
+
+                if (!result.success && !result.diagnostics_text.empty()) {
+                    os << result.diagnostics_text;
+                    if (!result.diagnostics_text.ends_with('\n')) {
+                        os << '\n';
+                    }
+                    return;
+                }
+
+                if (result.artifact_text.empty()) {
+                    os << "artifact is empty\n";
+                    return;
+                }
+
+                os << result.artifact_text;
+                if (!result.artifact_text.ends_with('\n')) {
+                    os << '\n';
+                }
+                return;
+            }
+
+            os << ("{} result:\n"
+                   "  success: {}\n"
+                   "  exit_code: {}\n"
+                   "  source: {}\n"
+                   "  artifact: {}\n"
+                   "  stderr: {}\n"_format(
+                           to_string(result.kind),
+                           result.success ? "true"sv : "false"sv,
+                           result.exit_code,
+                           result.source_path.string(),
+                           result.artifact_path.string(),
+                           result.stderr_path.string()));
 
             if (result.kind != analysis_kind::diag && !result.diagnostics_text.empty()) {
                 os << "diagnostics:\n";
                 os << result.diagnostics_text;
-                if (result.diagnostics_text.back() != '\n') {
+                if (!result.diagnostics_text.ends_with('\n')) {
                     os << '\n';
                 }
             }
@@ -703,7 +906,7 @@ namespace sontag::cli {
                     return;
                 }
                 os << result.artifact_text;
-                if (result.artifact_text.back() != '\n') {
+                if (!result.artifact_text.ends_with('\n')) {
                     os << '\n';
                 }
                 return;
@@ -715,7 +918,7 @@ namespace sontag::cli {
             }
 
             os << result.artifact_text;
-            if (result.artifact_text.back() != '\n') {
+            if (!result.artifact_text.ends_with('\n')) {
                 os << '\n';
             }
         }
@@ -739,12 +942,13 @@ namespace sontag::cli {
             os << json << '\n';
         }
 
-        static void render_analysis_result(const analysis_result& result, output_mode mode, std::ostream& os) {
+        static void render_analysis_result(
+                const analysis_result& result, output_mode mode, bool verbose, std::ostream& os) {
             if (mode == output_mode::json) {
                 render_analysis_result_json(result, os);
                 return;
             }
-            render_analysis_result_table(result, os);
+            render_analysis_result_table(result, verbose, os);
         }
 
         static bool process_analysis_command(
@@ -760,7 +964,7 @@ namespace sontag::cli {
                 return false;
             }
 
-            if (state.cells.empty()) {
+            if (state.decl_cells.empty() && state.exec_cells.empty()) {
                 err << "no stored cells available for analysis\n";
                 return true;
             }
@@ -771,7 +975,7 @@ namespace sontag::cli {
                     request.symbol = std::string(*arg);
                 }
                 auto result = run_analysis(request, kind);
-                render_analysis_result(result, cfg.output, out);
+                render_analysis_result(result, cfg.output, cfg.verbose, out);
             } catch (const std::exception& e) {
                 err << "analysis error: " << e.what() << '\n';
             }
@@ -790,12 +994,64 @@ namespace sontag::cli {
                 print_help(std::cout);
                 return true;
             }
-            if (cmd == ":show config"sv) {
-                print_config(cfg, std::cout);
+            if (cmd == ":clear last"sv) {
+                if (state.exec_cells.empty()) {
+                    std::cout << "no executable cells to clear\n";
+                    return true;
+                }
+                state.exec_cells.pop_back();
+                persist_cells(state);
+                persist_current_snapshot(state);
+                std::cout << "cleared last executable cell\n";
+                return true;
+            }
+            if (cmd == ":clear"sv) {
+                clear_terminal(std::cout);
+                return true;
+            }
+            if (auto show_arg = command_argument(cmd, ":show"sv)) {
+                if (show_arg->empty()) {
+                    std::cerr << "invalid :show, expected config|decl|exec|all\n";
+                    return true;
+                }
+
+                if (*show_arg == "config"sv) {
+                    print_config(cfg, std::cout);
+                    return true;
+                }
+
+                if (*show_arg == "decl"sv) {
+                    print_decl_cells(state, std::cout);
+                    std::cout << '\n';
+                    return true;
+                }
+
+                if (*show_arg == "exec"sv) {
+                    print_exec_cells(state, std::cout);
+                    std::cout << '\n';
+                    return true;
+                }
+
+                if (*show_arg == "all"sv || *show_arg == "code"sv || *show_arg == "cells"sv) {
+                    print_all_cells(state, std::cout);
+                    std::cout << '\n';
+                    return true;
+                }
+
+                std::cerr << "unknown :show value: " << *show_arg << " (expected config|decl|exec|all)\n";
+                return true;
+            }
+            if (auto decl_arg = command_argument(cmd, ":decl"sv)) {
+                if (decl_arg->empty()) {
+                    std::cerr << "invalid :decl, expected code after command\n";
+                    return true;
+                }
+                (void)append_validated_cell(cfg, state, *decl_arg, true, std::cout, std::cerr);
                 return true;
             }
             if (cmd == ":reset"sv) {
-                state.cells.clear();
+                state.decl_cells.clear();
+                state.exec_cells.clear();
                 persist_cells(state);
                 persist_current_snapshot(state);
                 std::cout << "session reset\n";
@@ -805,15 +1061,30 @@ namespace sontag::cli {
                 print_snapshots(state, std::cout);
                 return true;
             }
+            if (cmd == ":symbols"sv) {
+                if (state.decl_cells.empty() && state.exec_cells.empty()) {
+                    std::cerr << "no stored cells available for symbol listing\n";
+                    return true;
+                }
+
+                try {
+                    auto request = make_analysis_request(cfg, state);
+                    auto symbols = list_symbols(request);
+                    print_symbols(symbols, cfg.verbose, std::cout);
+                } catch (const std::exception& e) {
+                    std::cerr << "symbol listing error: " << e.what() << '\n';
+                }
+                return true;
+            }
             if (cmd.starts_with(":mark "sv)) {
                 auto name = trim_view(cmd.substr(6U));
                 if (name.empty()) {
                     std::cerr << "invalid :mark, expected a snapshot name\n";
                     return true;
                 }
-                upsert_snapshot(state.snapshot_data, name, state.cells.size());
+                upsert_snapshot(state.snapshot_data, name, total_cell_count(state));
                 persist_snapshots(state);
-                std::cout << "marked snapshot '" << name << "' at cell_count=" << state.cells.size() << '\n';
+                std::cout << "marked snapshot '" << name << "' at cell_count=" << total_cell_count(state) << '\n';
                 return true;
             }
             if (cmd.starts_with(":set "sv)) {
@@ -830,6 +1101,9 @@ namespace sontag::cli {
                 return true;
             }
             if (process_analysis_command(cmd, ":diag"sv, analysis_kind::diag, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
+            if (process_analysis_command(cmd, ":mca"sv, analysis_kind::mca, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
             if (cmd.starts_with(":"sv)) {
@@ -850,14 +1124,12 @@ namespace sontag::cli {
     }  // namespace detail
 
     static constexpr auto banner = R"(
- (`-').->          <-. (`-')_ (`-')     (`-')  _            
- ( OO)_      .->      \( OO) )( OO).->  (OO ).-/     .->    
-(_)--\_)(`-')----. ,--./ ,--/ /    '._  / ,---.   ,---(`-') 
-/    _ /( OO).-.  '|   \ |  | |'--...__)| \ /`.\ '  .-(OO ) 
-\_..`--.( _) | |  ||  . '|  |)`--.  .--''-'|_.' ||  | .-, \ 
-.-._)   \\|  |)|  ||  |\    |    |  |  (|  .-.  ||  | '.(_/ 
-\       / '  '-'  '|  | \   |    |  |   |  | |  ||  '-'  |  
- `-----'   `-----' `--'  `--'    `--'   `--' `--' `-----'   
+███████╗ ██████╗ ███╗   ██╗████████╗ █████╗  ██████╗ 
+██╔════╝██╔═══██╗████╗  ██║╚══██╔══╝██╔══██╗██╔════╝ 
+███████╗██║   ██║██╔██╗ ██║   ██║   ███████║██║  ███╗
+╚════██║██║   ██║██║╚██╗██║   ██║   ██╔══██║██║   ██║
+███████║╚██████╔╝██║ ╚████║   ██║   ██║  ██║╚██████╔╝
+╚══════╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ 
 )";
 
     void run_repl(startup_config& cfg) {
@@ -912,10 +1184,7 @@ namespace sontag::cli {
                 continue;
             }
 
-            state.cells.push_back(pending_cell);
-            detail::persist_cells(state);
-            detail::persist_current_snapshot(state);
-            std::cout << "stored cell #" << state.cells.size() << '\n';
+            (void)detail::append_validated_cell(cfg, state, pending_cell, false, std::cout, std::cerr);
             pending_cell.clear();
             balance = detail::code_balance_state{};
         }
@@ -933,8 +1202,10 @@ namespace sontag::cli {
         std::string color_arg{std::string{to_string(cfg.color)}};
         std::string target_arg{};
         std::string cpu_arg{};
+        std::string mca_cpu_arg{};
         std::string resume_arg{};
         std::string clang_arg{cfg.clang_path.string()};
+        std::string mca_path_arg{cfg.mca_path.string()};
         std::string cache_dir_arg{cfg.cache_dir.string()};
         std::string history_file_arg{cfg.history_file.string()};
         bool no_history = false;
@@ -944,6 +1215,9 @@ namespace sontag::cli {
         app.add_option("-O,--opt", opt_arg, "Optimization level: O0|O1|O2|O3|Ofast|Oz");
         app.add_option("--target", target_arg, "LLVM target triple");
         app.add_option("--cpu", cpu_arg, "Target CPU");
+        app.add_option("--mca-cpu", mca_cpu_arg, "CPU model override for llvm-mca");
+        app.add_option("--mca-path", mca_path_arg, "llvm-mca executable path");
+        app.add_flag("--mca", cfg.mca_enabled, "Enable llvm-mca command support");
         app.add_option("--resume", resume_arg, "Resume session id or latest");
         app.add_option("--clang", clang_arg, "clang++ executable path");
         app.add_option("--cache-dir", cache_dir_arg, "Cache/artifact directory");
@@ -986,8 +1260,10 @@ namespace sontag::cli {
 
         cfg.target_triple = detail::normalize_optional(target_arg);
         cfg.cpu = detail::normalize_optional(cpu_arg);
+        cfg.mca_cpu = detail::normalize_optional(mca_cpu_arg);
         cfg.resume_session = detail::normalize_optional(resume_arg);
         cfg.clang_path = clang_arg;
+        cfg.mca_path = mca_path_arg;
         cfg.cache_dir = cache_dir_arg;
         cfg.history_file = history_file_arg;
         if (no_history) {

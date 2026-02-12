@@ -25,6 +25,8 @@ namespace sontag::test { namespace detail {
         std::string opt_level{};
         std::optional<std::string> target{};
         std::optional<std::string> cpu{};
+        std::optional<std::string> mca_cpu{};
+        std::string mca_path{};
         std::string cache_dir{};
         std::string output{};
         std::string color{};
@@ -38,7 +40,8 @@ namespace sontag::test { namespace detail {
 
     struct persisted_cells {
         int schema_version{1};
-        std::vector<std::string> cells{};
+        std::vector<std::string> decl_cells{};
+        std::vector<std::string> exec_cells{};
     };
 
     static void write_text_file(const fs::path& path, const std::string& text) {
@@ -63,6 +66,8 @@ namespace sontag::test { namespace detail {
         json << "\"opt_level\":\"O2\",";
         json << "\"target\":null,";
         json << "\"cpu\":null,";
+        json << "\"mca_cpu\":null,";
+        json << "\"mca_path\":\"llvm-mca\",";
         json << "\"cache_dir\":\"" << path.parent_path().parent_path().parent_path().string() << "\",";
         json << "\"output\":\"table\",";
         json << "\"color\":\"auto\"";
@@ -90,7 +95,8 @@ namespace sontag::test { namespace detail {
         std::ostringstream json{};
         json << "{";
         json << "\"schema_version\":" << schema_version << ",";
-        json << "\"cells\":[]";
+        json << "\"decl_cells\":[],";
+        json << "\"exec_cells\":[]";
         if (with_unknown_key) {
             json << ",\"new_cells_field\":\"ok\"";
         }
@@ -148,6 +154,10 @@ namespace glz {
                        &T::target,
                        "cpu",
                        &T::cpu,
+                       "mca_cpu",
+                       &T::mca_cpu,
+                       "mca_path",
+                       &T::mca_path,
                        "cache_dir",
                        &T::cache_dir,
                        "output",
@@ -171,7 +181,8 @@ namespace glz {
     template <>
     struct meta<sontag::test::detail::persisted_cells> {
         using T = sontag::test::detail::persisted_cells;
-        static constexpr auto value = object("schema_version", &T::schema_version, "cells", &T::cells);
+        static constexpr auto value = object(
+                "schema_version", &T::schema_version, "decl_cells", &T::decl_cells, "exec_cells", &T::exec_cells);
     };
 }  // namespace glz
 

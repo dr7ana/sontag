@@ -63,6 +63,7 @@ namespace sontag {
      * - asm_syntax: Disassembly syntax flavor (intel or att).
      * - mca_enabled: Enable llvm-mca checks/commands by default.
      * - mca_cpu: Optional CPU override specifically for llvm-mca.
+     * - mca_path: llvm-mca executable path override.
      *
      * A/B runtime defaults
      * - ab_iters: Default measured iteration count.
@@ -268,6 +269,7 @@ namespace sontag {
         std::string asm_syntax{"intel"};
         bool mca_enabled{false};
         std::optional<std::string> mca_cpu{};
+        std::filesystem::path mca_path{"llvm-mca"};
 
         int ab_iters{1'000};
         int ab_warmup{100};

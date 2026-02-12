@@ -31,7 +31,8 @@ namespace sontag::test { namespace detail {
 
     struct persisted_cells {
         int schema_version{1};
-        std::vector<std::string> cells{};
+        std::vector<std::string> decl_cells{};
+        std::vector<std::string> exec_cells{};
     };
 
     struct persisted_config {
@@ -41,6 +42,8 @@ namespace sontag::test { namespace detail {
         std::string opt_level{};
         std::optional<std::string> target{};
         std::optional<std::string> cpu{};
+        std::optional<std::string> mca_cpu{};
+        std::string mca_path{};
         std::string cache_dir{};
         std::string output{};
         std::string color{};
@@ -122,6 +125,52 @@ namespace sontag::test { namespace detail {
         REQUIRE(::dup2(saved_stdin, STDIN_FILENO) >= 0);
         REQUIRE(::close(saved_stdin) == 0);
     }
+
+    struct repl_output {
+        std::string out{};
+        std::string err{};
+    };
+
+    static repl_output run_repl_script_capture_output(startup_config& cfg, std::string_view script) {
+        int pipe_fds[2]{-1, -1};
+        REQUIRE(::pipe(pipe_fds) == 0);
+
+        auto read_fd = pipe_fds[0];
+        auto write_fd = pipe_fds[1];
+
+        write_all(write_fd, script);
+        REQUIRE(::close(write_fd) == 0);
+
+        auto saved_stdin = ::dup(STDIN_FILENO);
+        REQUIRE(saved_stdin >= 0);
+        REQUIRE(::dup2(read_fd, STDIN_FILENO) >= 0);
+        REQUIRE(::close(read_fd) == 0);
+
+        std::ostringstream captured_out{};
+        std::ostringstream captured_err{};
+        auto* saved_out_buf = std::cout.rdbuf(captured_out.rdbuf());
+        auto* saved_err_buf = std::cerr.rdbuf(captured_err.rdbuf());
+
+        try {
+            cli::run_repl(cfg);
+        } catch (...) {
+            std::cout.rdbuf(saved_out_buf);
+            std::cerr.rdbuf(saved_err_buf);
+            (void)::dup2(saved_stdin, STDIN_FILENO);
+            (void)::close(saved_stdin);
+            throw;
+        }
+
+        std::cout.flush();
+        std::cerr.flush();
+
+        std::cout.rdbuf(saved_out_buf);
+        std::cerr.rdbuf(saved_err_buf);
+        REQUIRE(::dup2(saved_stdin, STDIN_FILENO) >= 0);
+        REQUIRE(::close(saved_stdin) == 0);
+
+        return repl_output{.out = captured_out.str(), .err = captured_err.str()};
+    }
 }}  // namespace sontag::test::detail
 
 namespace glz {
@@ -146,7 +195,8 @@ namespace glz {
     template <>
     struct meta<sontag::test::detail::persisted_cells> {
         using T = sontag::test::detail::persisted_cells;
-        static constexpr auto value = object("schema_version", &T::schema_version, "cells", &T::cells);
+        static constexpr auto value = object(
+                "schema_version", &T::schema_version, "decl_cells", &T::decl_cells, "exec_cells", &T::exec_cells);
     };
 
     template <>
@@ -165,6 +215,10 @@ namespace glz {
                        &T::target,
                        "cpu",
                        &T::cpu,
+                       "mca_cpu",
+                       &T::mca_cpu,
+                       "mca_path",
+                       &T::mca_path,
                        "cache_dir",
                        &T::cache_dir,
                        "output",
@@ -189,9 +243,9 @@ namespace sontag::test {
 
         detail::run_repl_script(
                 cfg,
-                "int seed = 42;\n"
+                ":decl int seed = 42;\n"
                 ":mark baseline\n"
-                "int inc(int x) { return x + seed; }\n"
+                ":decl int inc(int x) { return x + seed; }\n"
                 ":quit\n");
 
         auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
@@ -200,14 +254,17 @@ namespace sontag::test {
         CHECK(persisted_cfg.schema_version == 1);
         CHECK(persisted_cfg.cxx_standard == "c++20");
         CHECK(persisted_cfg.opt_level == "O1");
+        CHECK_FALSE(persisted_cfg.mca_cpu.has_value());
+        CHECK(persisted_cfg.mca_path == "llvm-mca");
         CHECK(persisted_cfg.cache_dir == cfg.cache_dir.string());
         CHECK(persisted_cfg.output == "json");
         CHECK(persisted_cfg.color == "never");
 
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
-        REQUIRE(persisted_cells.cells.size() == 2U);
-        CHECK(persisted_cells.cells[0].find("seed") != std::string::npos);
-        CHECK(persisted_cells.cells[1].find("inc(") != std::string::npos);
+        REQUIRE(persisted_cells.decl_cells.size() == 2U);
+        CHECK(persisted_cells.decl_cells[0].find("seed") != std::string::npos);
+        CHECK(persisted_cells.decl_cells[1].find("inc(") != std::string::npos);
+        CHECK(persisted_cells.exec_cells.empty());
 
         auto snapshots = detail::read_json_file<detail::persisted_snapshots>(session_dir / "snapshots.json");
         auto baseline_count = detail::snapshot_cell_count(snapshots, "baseline");
@@ -232,8 +289,8 @@ namespace sontag::test {
 
         detail::run_repl_script(
                 initial_cfg,
-                "int value = 7;\n"
-                "int twice(int x) { return x * 2; }\n"
+                ":decl int value = 7;\n"
+                ":decl int twice(int x) { return x * 2; }\n"
                 ":mark baseline\n"
                 ":quit\n");
 
@@ -263,7 +320,8 @@ namespace sontag::test {
         CHECK(resumed_cfg.color == initial_cfg.color);
 
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
-        CHECK(persisted_cells.cells.empty());
+        CHECK(persisted_cells.decl_cells.empty());
+        CHECK(persisted_cells.exec_cells.empty());
 
         auto snapshots = detail::read_json_file<detail::persisted_snapshots>(session_dir / "snapshots.json");
 
@@ -278,6 +336,109 @@ namespace sontag::test {
         auto current_count = detail::snapshot_cell_count(snapshots, "current");
         REQUIRE(current_count);
         CHECK(*current_count == 0U);
+    }
+
+    TEST_CASE("005: show all prints declarative and executable regions", "[005][session][show]") {
+        detail::temp_dir temp{"sontag_show_code"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl #include <cstdint>\n"
+                "uint64_t first = 1;\n"
+                "uint64_t second = first + 1;\n"
+                ":show all\n"
+                ":quit\n");
+
+        auto decl_pos = output.out.find("#include <cstdint>");
+        auto main_pos = output.out.find("int __sontag_repl_main() {");
+        auto first_pos = output.out.find("uint64_t first = 1;");
+        auto second_pos = output.out.find("uint64_t second = first + 1;");
+        REQUIRE(decl_pos != std::string::npos);
+        REQUIRE(main_pos != std::string::npos);
+        REQUIRE(first_pos != std::string::npos);
+        REQUIRE(second_pos != std::string::npos);
+        CHECK(decl_pos < main_pos);
+        CHECK(main_pos < first_pos);
+        CHECK(first_pos < second_pos);
+    }
+
+    TEST_CASE("005: symbols command lists current snapshot symbols", "[005][session][symbols]") {
+        detail::temp_dir temp{"sontag_symbols"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int foo(int x) { return x + 1; }\n"
+                ":symbols\n"
+                ":quit\n");
+
+        CHECK(output.out.find("symbols:") != std::string::npos);
+        CHECK(output.out.find("__sontag_repl_main") != std::string::npos);
+        CHECK(output.out.find("foo(") != std::string::npos);
+    }
+
+    TEST_CASE("005: invalid cell is rejected and state remains unchanged", "[005][session][validation]") {
+        detail::temp_dir temp{"sontag_state_validation"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl #include <cstdint>\n"
+                "uint64_t value{64};\n"
+                "value = ;\n"
+                ":quit\n");
+
+        CHECK(output.out.find("stored decl #1 (state: valid)") != std::string::npos);
+        CHECK(output.out.find("stored cell #1 (state: valid)") != std::string::npos);
+        CHECK(output.err.find("cell rejected, state unchanged") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.decl_cells[0] == "#include <cstdint>");
+        CHECK(persisted_cells.exec_cells[0] == "uint64_t value{64};");
+    }
+
+    TEST_CASE("005: clear last removes only most recent executable cell", "[005][session][clear_last]") {
+        detail::temp_dir temp{"sontag_clear_last"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int base = 5;\n"
+                "int x = base;\n"
+                "int y = x + 1;\n"
+                ":clear last\n"
+                ":show exec\n"
+                ":quit\n");
+
+        CHECK(output.out.find("stored decl #1 (state: valid)") != std::string::npos);
+        CHECK(output.out.find("stored cell #1 (state: valid)") != std::string::npos);
+        CHECK(output.out.find("stored cell #2 (state: valid)") != std::string::npos);
+        CHECK(output.out.find("cleared last executable cell") != std::string::npos);
+        CHECK(output.out.find("int x = base;") != std::string::npos);
+        CHECK(output.out.find("int y = x + 1;") == std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.decl_cells[0] == "int base = 5;");
+        CHECK(persisted_cells.exec_cells[0] == "int x = base;");
     }
 
 }  // namespace sontag::test

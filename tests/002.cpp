@@ -4,12 +4,7 @@ namespace sontag::test {
 
     namespace detail {
         std::vector<char*> to_argv(std::vector<std::string>& args) {
-            std::vector<char*> argv{};
-            argv.reserve(args.size());
-            for (auto& arg : args) {
-                argv.push_back(arg.data());
-            }
-            return argv;
+            return args | std::views::transform([](auto& arg) { return arg.data(); }) | std::ranges::to<std::vector>();
         }
     }  // namespace detail
 
@@ -25,6 +20,11 @@ namespace sontag::test {
                 "x86_64-pc-linux-gnu",
                 "--cpu",
                 "znver4",
+                "--mca-cpu",
+                "znver4",
+                "--mca-path",
+                "/usr/bin/llvm-mca",
+                "--mca",
                 "--resume",
                 "latest",
                 "--cache-dir",
@@ -45,6 +45,10 @@ namespace sontag::test {
         CHECK(*cfg.target_triple == "x86_64-pc-linux-gnu");
         REQUIRE(cfg.cpu);
         CHECK(*cfg.cpu == "znver4");
+        REQUIRE(cfg.mca_cpu);
+        CHECK(*cfg.mca_cpu == "znver4");
+        CHECK(cfg.mca_path == "/usr/bin/llvm-mca");
+        CHECK(cfg.mca_enabled);
         REQUIRE(cfg.resume_session);
         CHECK(*cfg.resume_session == "latest");
         CHECK(cfg.cache_dir == "/tmp/sontag_tests");

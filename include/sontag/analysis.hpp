@@ -10,7 +10,7 @@
 
 namespace sontag {
 
-    enum class analysis_kind { asm_text, ir, diag };
+    enum class analysis_kind { asm_text, ir, diag, mca };
 
     inline constexpr std::string_view to_string(analysis_kind kind) {
         switch (kind) {
@@ -20,6 +20,8 @@ namespace sontag {
                 return "ir";
             case analysis_kind::diag:
                 return "diag";
+            case analysis_kind::mca:
+                return "mca";
         }
         return "diag";
     }
@@ -27,13 +29,17 @@ namespace sontag {
     struct analysis_request {
         std::filesystem::path clang_path{"clang++"};
         std::filesystem::path session_dir{};
-        std::vector<std::string> cells{};
+        std::vector<std::string> decl_cells{};
+        std::vector<std::string> exec_cells{};
         cxx_standard language_standard{cxx_standard::cxx23};
         optimization_level opt_level{optimization_level::o2};
         std::optional<std::string> target_triple{};
         std::optional<std::string> cpu{};
         std::string asm_syntax{"intel"};
         std::optional<std::string> symbol{};
+        std::optional<std::string> mca_cpu{};
+        std::filesystem::path mca_path{"llvm-mca"};
+        bool verbose{false};
     };
 
     struct analysis_result {
@@ -49,6 +55,14 @@ namespace sontag {
         std::vector<std::string> command{};
     };
 
+    struct analysis_symbol {
+        char kind{'?'};
+        std::string mangled{};
+        std::string demangled{};
+    };
+
+    std::string synthesize_source(const analysis_request& request);
     analysis_result run_analysis(const analysis_request& request, analysis_kind kind);
+    std::vector<analysis_symbol> list_symbols(const analysis_request& request);
 
 }  // namespace sontag

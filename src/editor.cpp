@@ -1,6 +1,8 @@
 #include "editor.hpp"
 
+extern "C" {
 #include <linenoise.h>
+}
 
 #include <filesystem>
 
