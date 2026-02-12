@@ -734,6 +734,7 @@ namespace sontag::cli {
   :mark <name>
   :snapshots
   :asm [symbol|@last]
+  :dump [symbol|@last]
   :ir [symbol|@last]
   :diag [symbol|@last]
   :mca [symbol|@last]
@@ -748,6 +749,7 @@ examples:
   :symbols
   :mark baseline
   :asm
+  :dump
 )";
             os << help_text;
         }
@@ -855,27 +857,45 @@ examples:
             return true;
         }
 
-        static void render_analysis_result_table(const analysis_result& result, bool verbose, std::ostream& os) {
-            if (result.kind == analysis_kind::mca && !verbose) {
-                os << "mca: " << (result.success ? "success"sv : "failed"sv) << '\n';
-
-                if (!result.success && !result.diagnostics_text.empty()) {
-                    os << result.diagnostics_text;
-                    if (!result.diagnostics_text.ends_with('\n')) {
-                        os << '\n';
-                    }
-                    return;
-                }
-
+        static void render_analysis_result_compact(const analysis_result& result, std::ostream& os) {
+            if (result.kind == analysis_kind::diag) {
                 if (result.artifact_text.empty()) {
-                    os << "artifact is empty\n";
+                    os << "no diagnostics\n";
                     return;
                 }
-
                 os << result.artifact_text;
                 if (!result.artifact_text.ends_with('\n')) {
                     os << '\n';
                 }
+                return;
+            }
+
+            if (result.kind == analysis_kind::mca || result.kind == analysis_kind::dump) {
+                os << "{}: {}\n"_format(to_string(result.kind), result.success ? "success"sv : "failed"sv);
+            }
+
+            if (!result.success && !result.diagnostics_text.empty()) {
+                os << result.diagnostics_text;
+                if (!result.diagnostics_text.ends_with('\n')) {
+                    os << '\n';
+                }
+                return;
+            }
+
+            if (result.artifact_text.empty()) {
+                os << "artifact is empty\n";
+                return;
+            }
+
+            os << result.artifact_text;
+            if (!result.artifact_text.ends_with('\n')) {
+                os << '\n';
+            }
+        }
+
+        static void render_analysis_result_table(const analysis_result& result, bool verbose, std::ostream& os) {
+            if (!verbose) {
+                render_analysis_result_compact(result, os);
                 return;
             }
 
@@ -1095,6 +1115,9 @@ examples:
                 return true;
             }
             if (process_analysis_command(cmd, ":asm"sv, analysis_kind::asm_text, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
+            if (process_analysis_command(cmd, ":dump"sv, analysis_kind::dump, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
             if (process_analysis_command(cmd, ":ir"sv, analysis_kind::ir, cfg, state, std::cout, std::cerr)) {

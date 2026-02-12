@@ -176,8 +176,10 @@ namespace sontag {
             static constexpr auto cpu_prefix = "-mcpu="sv;
             static constexpr auto mtriple_prefix = "-mtriple="sv;
             static constexpr auto llvm_mca_version_prefix = "llvm-mca-"sv;
+            static constexpr auto llvm_objdump_version_prefix = "llvm-objdump-"sv;
 
             static constexpr auto compile_to_text = "-S"sv;
+            static constexpr auto compile_to_object = "-c"sv;
             static constexpr auto verbose_asm = "-fverbose-asm"sv;
             static constexpr auto intel_syntax = "-masm=intel"sv;
             static constexpr auto output_path = "-o"sv;
@@ -194,6 +196,16 @@ namespace sontag {
             static constexpr auto show_encoding = "--show-encoding"sv;
             static constexpr auto register_file_stats = "--register-file-stats"sv;
             static constexpr auto all_views = "--all-views"sv;
+
+            static constexpr auto objdump_disassemble = "--disassemble"sv;
+            static constexpr auto objdump_demangle = "--demangle"sv;
+            static constexpr auto objdump_x86_intel_syntax = "--x86-asm-syntax=intel"sv;
+            static constexpr auto objdump_x86_att_syntax = "--x86-asm-syntax=att"sv;
+            static constexpr auto objdump_symbolize_operands = "--symbolize-operands"sv;
+            static constexpr auto objdump_show_all_symbols = "--show-all-symbols"sv;
+            static constexpr auto objdump_disassemble_symbols_prefix = "--disassemble-symbols="sv;
+            static constexpr auto objdump_line_numbers = "--line-numbers"sv;
+            static constexpr auto objdump_source = "--source"sv;
         }  // namespace arg_tokens
 
         static void append_prefixed_arg(
@@ -259,6 +271,12 @@ namespace sontag {
                     break;
                 case analysis_kind::mca:
                     break;
+                case analysis_kind::dump:
+                    base_args.emplace_back(arg_tokens::compile_to_object);
+                    base_args.push_back(source_path.string());
+                    base_args.emplace_back(arg_tokens::output_path);
+                    base_args.push_back(artifact_path.string());
+                    break;
             }
             return base_args;
         }
@@ -266,7 +284,7 @@ namespace sontag {
         static std::vector<std::string> build_mca_command(
                 const analysis_request& request, const fs::path& asm_path, std::string_view mca_executable) {
             std::vector<std::string> base_args{};
-            base_args.push_back(std::string{mca_executable});
+            base_args.emplace_back(mca_executable);
 
             append_optional_prefixed_arg(base_args, arg_tokens::mtriple_prefix, request.target_triple);
 
@@ -283,6 +301,39 @@ namespace sontag {
                 base_args.emplace_back(arg_tokens::all_views);
             }
             base_args.push_back(asm_path.string());
+            return base_args;
+        }
+
+        static std::vector<std::string> build_objdump_command(
+                const analysis_request& request,
+                const fs::path& object_path,
+                std::string_view objdump_executable,
+                const std::optional<std::string>& symbol) {
+            std::vector<std::string> base_args{};
+            base_args.emplace_back(objdump_executable);
+            base_args.emplace_back(arg_tokens::objdump_disassemble);
+            base_args.emplace_back(arg_tokens::objdump_demangle);
+            if (request.asm_syntax == "intel"sv) {
+                base_args.emplace_back(arg_tokens::objdump_x86_intel_syntax);
+            }
+            else {
+                base_args.emplace_back(arg_tokens::objdump_x86_att_syntax);
+            }
+            base_args.emplace_back(arg_tokens::objdump_symbolize_operands);
+
+            if (symbol) {
+                append_prefixed_arg(base_args, arg_tokens::objdump_disassemble_symbols_prefix, *symbol);
+            }
+            else {
+                base_args.emplace_back(arg_tokens::objdump_show_all_symbols);
+            }
+
+            if (request.verbose) {
+                base_args.emplace_back(arg_tokens::objdump_line_numbers);
+                base_args.emplace_back(arg_tokens::objdump_source);
+            }
+
+            base_args.push_back(object_path.string());
             return base_args;
         }
 
@@ -399,11 +450,15 @@ namespace sontag {
             return parse_clang_version_token(version_text);
         }
 
-        static std::vector<std::string> build_mca_executable_candidates(
-                const analysis_request& request, const fs::path& temp_dir, std::string_view artifact_id) {
+        static std::vector<std::string> build_tool_executable_candidates(
+                const analysis_request& request,
+                const fs::path& configured_tool_path,
+                std::string_view versioned_prefix,
+                const fs::path& temp_dir,
+                std::string_view artifact_id) {
             auto candidates = std::vector<std::string>{};
-            append_unique(candidates, request.mca_path.string());
-            if (request.mca_path.has_parent_path()) {
+            append_unique(candidates, configured_tool_path.string());
+            if (configured_tool_path.has_parent_path()) {
                 return candidates;
             }
 
@@ -424,20 +479,32 @@ namespace sontag {
             }
 
             auto clang_dir = request.clang_path.parent_path();
-            auto configured_dir = request.mca_path.parent_path();
+            auto configured_dir = configured_tool_path.parent_path();
             for (const auto& suffix : suffixes_with_major) {
-                auto mca_name = std::string{arg_tokens::llvm_mca_version_prefix};
-                mca_name.append(suffix);
-                append_unique(candidates, mca_name);
+                auto tool_name = std::string{versioned_prefix};
+                tool_name.append(suffix);
+                append_unique(candidates, tool_name);
                 if (!clang_dir.empty()) {
-                    append_unique(candidates, (clang_dir / mca_name).string());
+                    append_unique(candidates, (clang_dir / tool_name).string());
                 }
                 if (!configured_dir.empty()) {
-                    append_unique(candidates, (configured_dir / mca_name).string());
+                    append_unique(candidates, (configured_dir / tool_name).string());
                 }
             }
 
             return candidates;
+        }
+
+        static std::vector<std::string> build_mca_executable_candidates(
+                const analysis_request& request, const fs::path& temp_dir, std::string_view artifact_id) {
+            return build_tool_executable_candidates(
+                    request, request.mca_path, arg_tokens::llvm_mca_version_prefix, temp_dir, artifact_id);
+        }
+
+        static std::vector<std::string> build_objdump_executable_candidates(
+                const analysis_request& request, const fs::path& temp_dir, std::string_view artifact_id) {
+            return build_tool_executable_candidates(
+                    request, request.objdump_path, arg_tokens::llvm_objdump_version_prefix, temp_dir, artifact_id);
         }
 
         static bool starts_with(std::string_view value, std::string_view prefix) {
@@ -820,6 +887,7 @@ namespace sontag {
                 break;
             case analysis_kind::diag:
             case analysis_kind::mca:
+            case analysis_kind::dump:
                 extension = ".txt";
                 break;
         }
@@ -920,6 +988,77 @@ namespace sontag {
             result.exit_code = mca_exit;
             result.success = (mca_exit == 0);
             result.command = std::move(mca_command);
+            result.artifact_text = std::move(stdout_text);
+            result.diagnostics_text = std::move(stderr_text);
+            return result;
+        }
+
+        if (kind == analysis_kind::dump) {
+            auto object_path = kind_dir / (id + ".input.o");
+            auto compile_stdout_path = kind_dir / (id + ".compile.stdout.txt");
+            auto compile_stderr_path = kind_dir / (id + ".compile.stderr.txt");
+
+            auto compile_command = detail::build_command(request, analysis_kind::dump, source_path, object_path);
+            auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
+            if (compile_exit != 0) {
+                auto compile_stdout = detail::read_text_file(compile_stdout_path);
+                auto compile_stderr = detail::read_text_file(compile_stderr_path);
+
+                detail::write_text_file(stdout_path, compile_stdout);
+                detail::write_text_file(stderr_path, compile_stderr);
+                detail::write_text_file(artifact_path, compile_stdout);
+
+                result.exit_code = compile_exit;
+                result.success = false;
+                result.command = std::move(compile_command);
+                result.artifact_text = std::move(compile_stdout);
+                result.diagnostics_text = std::move(compile_stderr);
+                return result;
+            }
+
+            auto resolved_symbol = std::optional<std::string>{};
+            if (request.symbol) {
+                resolved_symbol = detail::resolve_symbol_name(request, *request.symbol);
+                if (!resolved_symbol) {
+                    throw std::runtime_error("unable to resolve symbol: {}"_format(*request.symbol));
+                }
+            }
+
+            auto objdump_exit = 127;
+            auto stdout_text = std::string{};
+            auto stderr_text = std::string{};
+            auto objdump_command = std::vector<std::string>{};
+            auto attempted = std::vector<std::string>{};
+            auto objdump_candidates = detail::build_objdump_executable_candidates(request, kind_dir, id);
+
+            for (const auto& candidate : objdump_candidates) {
+                objdump_command = detail::build_objdump_command(request, object_path, candidate, resolved_symbol);
+                objdump_exit = detail::run_process(objdump_command, stdout_path, stderr_path);
+                stdout_text = detail::read_text_file(stdout_path);
+                stderr_text = detail::read_text_file(stderr_path);
+                attempted.push_back(candidate);
+                auto tool_missing = objdump_exit == 127 && stdout_text.empty() && stderr_text.empty();
+                if (!tool_missing) {
+                    break;
+                }
+            }
+
+            if (objdump_exit == 127 && stdout_text.empty() && stderr_text.empty()) {
+                if (attempted.empty()) {
+                    stderr_text = "failed to execute llvm-objdump tool: {}\n"_format(request.objdump_path.string());
+                }
+                else {
+                    stderr_text = "failed to execute llvm-objdump tool: {}\ntried: {}\n"_format(
+                            request.objdump_path.string(), detail::join_with_separator(attempted, ", "sv));
+                }
+                detail::write_text_file(stderr_path, stderr_text);
+            }
+
+            detail::write_text_file(artifact_path, stdout_text);
+
+            result.exit_code = objdump_exit;
+            result.success = (objdump_exit == 0);
+            result.command = std::move(objdump_command);
             result.artifact_text = std::move(stdout_text);
             result.diagnostics_text = std::move(stderr_text);
             return result;

@@ -10,7 +10,7 @@
 
 namespace sontag {
 
-    enum class analysis_kind { asm_text, ir, diag, mca };
+    enum class analysis_kind { asm_text, ir, diag, mca, dump };
 
     inline constexpr std::string_view to_string(analysis_kind kind) {
         switch (kind) {
@@ -22,6 +22,8 @@ namespace sontag {
                 return "diag";
             case analysis_kind::mca:
                 return "mca";
+            case analysis_kind::dump:
+                return "dump";
         }
         return "diag";
     }
@@ -39,6 +41,7 @@ namespace sontag {
         std::optional<std::string> symbol{};
         std::optional<std::string> mca_cpu{};
         std::filesystem::path mca_path{"llvm-mca"};
+        std::filesystem::path objdump_path{"llvm-objdump"};
         bool verbose{false};
     };
 

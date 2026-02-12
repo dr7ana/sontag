@@ -25,6 +25,18 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "sontag supports Linux only")
 endif()
 
+if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR "sontag requires clang >= 20")
+endif()
+
+if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 20.0)
+    message(FATAL_ERROR
+        "sontag requires clang >= 20, found ${CMAKE_CXX_COMPILER_VERSION}")
+endif()
+
+message(STATUS
+    "Using ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} at ${CMAKE_CXX_COMPILER}")
+
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     set(SONTAG_IS_TOPLEVEL_PROJECT TRUE)
 else()

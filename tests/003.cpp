@@ -18,6 +18,56 @@ namespace sontag::test {
                 fs::remove_all(path, ec);
             }
         };
+
+        static void write_text_file(const fs::path& path, std::string_view text) {
+            std::ofstream out{path};
+            REQUIRE(out.good());
+            out << text;
+            REQUIRE(out.good());
+        }
+
+        static void make_executable_file(const fs::path& path, std::string_view content) {
+            auto parent = path.parent_path();
+            if (!parent.empty()) {
+                fs::create_directories(parent);
+            }
+
+            write_text_file(path, content);
+            fs::permissions(
+                    path,
+                    fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec | fs::perms::group_read |
+                            fs::perms::group_exec | fs::perms::others_read | fs::perms::others_exec,
+                    fs::perm_options::replace);
+        }
+
+        static std::vector<std::string> read_lines(const fs::path& path) {
+            std::ifstream in{path};
+            REQUIRE(in.good());
+
+            std::vector<std::string> lines{};
+            std::string line{};
+            while (std::getline(in, line)) {
+                lines.push_back(line);
+            }
+            return lines;
+        }
+
+        static bool has_exact_arg(const std::vector<std::string>& args, std::string_view token) {
+            return std::find(args.begin(), args.end(), token) != args.end();
+        }
+
+        static bool has_prefixed_arg(const std::vector<std::string>& args, std::string_view prefix) {
+            return std::ranges::any_of(args, [prefix](const std::string& arg) { return arg.starts_with(prefix); });
+        }
+
+        static std::string make_objdump_wrapper_script(const fs::path& args_path) {
+            std::ostringstream script{};
+            script << "#!/usr/bin/env bash\n";
+            script << "set -eu\n";
+            script << "printf '%s\\n' \"$@\" > \"" << args_path.string() << "\"\n";
+            script << "echo objdump-ok\n";
+            return script.str();
+        }
     }  // namespace detail
 
     TEST_CASE("003: analysis pipeline emits asm ir and diagnostics", "[003][analysis]") {
@@ -142,6 +192,73 @@ namespace sontag::test {
         auto asm_result = run_analysis(request, analysis_kind::asm_text);
         CHECK(asm_result.success);
         CHECK(std::find(asm_result.command.begin(), asm_result.command.end(), "-v") != asm_result.command.end());
+    }
+
+    TEST_CASE("003: dump analysis uses show-all-symbols without symbol filter", "[003][analysis][dump]") {
+        detail::temp_dir temp{"sontag_m1_dump_all"};
+
+        auto args_path = temp.path / "objdump.args.txt";
+        auto wrapper_path = temp.path / "tools" / "llvm-objdump";
+        auto wrapper_script = detail::make_objdump_wrapper_script(args_path);
+        detail::make_executable_file(wrapper_path, wrapper_script);
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.objdump_path = wrapper_path;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+
+        auto dump_result = run_analysis(request, analysis_kind::dump);
+        CHECK(dump_result.success);
+        CHECK(dump_result.exit_code == 0);
+        CHECK(dump_result.command.size() > 1U);
+        CHECK(dump_result.command[0] == wrapper_path.string());
+        CHECK(dump_result.artifact_text.find("objdump-ok") != std::string::npos);
+
+        auto args = detail::read_lines(args_path);
+        CHECK(detail::has_exact_arg(args, "--disassemble"));
+        CHECK(detail::has_exact_arg(args, "--demangle"));
+        CHECK(detail::has_exact_arg(args, "--x86-asm-syntax=intel"));
+        CHECK(detail::has_exact_arg(args, "--symbolize-operands"));
+        CHECK(detail::has_exact_arg(args, "--show-all-symbols"));
+        CHECK_FALSE(detail::has_prefixed_arg(args, "--disassemble-symbols="));
+
+        REQUIRE_FALSE(args.empty());
+        CHECK(args.back().ends_with(".o"));
+    }
+
+    TEST_CASE("003: dump analysis uses disassemble-symbols when symbol is provided", "[003][analysis][dump]") {
+        detail::temp_dir temp{"sontag_m1_dump_symbol"};
+
+        auto args_path = temp.path / "objdump.args.txt";
+        auto wrapper_path = temp.path / "tools" / "llvm-objdump";
+        auto wrapper_script = detail::make_objdump_wrapper_script(args_path);
+        detail::make_executable_file(wrapper_path, wrapper_script);
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.objdump_path = wrapper_path;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        request.symbol = "add";
+
+        auto dump_result = run_analysis(request, analysis_kind::dump);
+        CHECK(dump_result.success);
+        CHECK(dump_result.exit_code == 0);
+        CHECK(dump_result.command.size() > 1U);
+        CHECK(dump_result.command[0] == wrapper_path.string());
+
+        auto args = detail::read_lines(args_path);
+        CHECK(detail::has_exact_arg(args, "--disassemble"));
+        CHECK(detail::has_exact_arg(args, "--demangle"));
+        CHECK(detail::has_exact_arg(args, "--x86-asm-syntax=intel"));
+        CHECK(detail::has_exact_arg(args, "--symbolize-operands"));
+        CHECK_FALSE(detail::has_exact_arg(args, "--show-all-symbols"));
+        CHECK(detail::has_prefixed_arg(args, "--disassemble-symbols="));
     }
 
     TEST_CASE("003: symbol listing returns current snapshot symbols", "[003][analysis][symbols]") {

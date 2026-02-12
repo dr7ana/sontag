@@ -279,7 +279,7 @@ namespace sontag {
         std::optional<std::uint64_t> ab_seed{};
         int ab_input_size{1'024};
 
-        std::string graph_format{"svg"};
+        std::string graph_format{"png"};
         std::optional<std::filesystem::path> dot_path{};
         int graph_max_nodes{250};
         int graph_depth{3};
