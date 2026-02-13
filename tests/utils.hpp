@@ -5,6 +5,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <glaze/glaze.hpp>
 
+#include "../src/opcode.hpp"
+
 extern "C" {
 #include <fcntl.h>
 #include <poll.h>
