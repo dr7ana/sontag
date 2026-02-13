@@ -460,8 +460,11 @@ namespace sontag::test {
         CHECK(output.out.find("target: O2") != std::string::npos);
         CHECK(output.out.find("opcode table entries: ") != std::string::npos);
         CHECK(output.out.find("levels:") != std::string::npos);
+        CHECK(output.out.find("success=true | operations=") != std::string::npos);
+        CHECK(output.out.find("| opcodes: ") != std::string::npos);
         CHECK(output.out.find("diff (O0 -> O2, full side-by-side):") != std::string::npos);
         CHECK(output.out.find("alignment anchor: ") != std::string::npos);
+        CHECK(output.out.find("metrics:") != std::string::npos);
         CHECK(output.err.empty());
     }
 
@@ -483,10 +486,13 @@ namespace sontag::test {
         CHECK(output.out.find("mode: spectrum") != std::string::npos);
         CHECK(output.out.find("baseline: O0") != std::string::npos);
         CHECK(output.out.find("target: O3") != std::string::npos);
-        CHECK(output.out.find("spectrum (O0 -> O3, full side-by-side):") != std::string::npos);
-        CHECK(output.out.find("O1 lines") != std::string::npos);
-        CHECK(output.out.find("O2 lines") != std::string::npos);
-        CHECK(output.out.find("O3 lines") != std::string::npos);
+        CHECK(output.out.find("spectrum (O0 -> O3):") != std::string::npos);
+        CHECK(output.out.find("alignment anchors: O0[") != std::string::npos);
+        CHECK(output.out.find("<-> O1[") != std::string::npos);
+        CHECK(output.out.find("<-> O2[") != std::string::npos);
+        CHECK(output.out.find("<-> O3[") != std::string::npos);
+        CHECK(output.out.find("metrics:") != std::string::npos);
+        CHECK(output.out.find("size.symbol_text_bytes (bytes)") != std::string::npos);
         CHECK(output.err.empty());
     }
 

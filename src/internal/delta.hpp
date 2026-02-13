@@ -66,12 +66,21 @@ namespace sontag {
         std::string opcode{};
     };
 
+    struct delta_metric_entry {
+        std::string name{};
+        double value{};
+        std::string unit{};
+        metric_status status{metric_status::na};
+        std::vector<std::string> quality_flags{};
+    };
+
     struct delta_level_record {
         optimization_level level{optimization_level::o0};
         bool success{false};
         int exit_code{-1};
         std::filesystem::path artifact_path{};
         std::vector<delta_operation> operations{};
+        std::vector<delta_metric_entry> metrics{};
         std::string diagnostics_text{};
         std::vector<delta_quality_flag> quality_flags{};
     };

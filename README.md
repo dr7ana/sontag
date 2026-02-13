@@ -214,15 +214,13 @@ target: O2
 changes: unchanged=3 modified=7 inserted=0 removed=3 moved=0
 opcode table entries: 8
 levels:
-  O0 success=true exit_code=0 operations=13
-    opcodes: push(1) mov(9) sub(1) shl(1) call(1)
-  O1 success=true exit_code=0 operations=9
-    opcodes: push(1) mov(5) lea(2) call(1)
-  O2 success=true exit_code=0 operations=10
-    opcodes: mov(5) lea(3) xor(1) ret(1)
-spectrum (O0 -> O2, full side-by-side):
-        alignment anchors: O0[3] <-> O1[1] O0[3] <-> O2[0]
-          O0 lines                          | O1 lines                        | O2 lines                       
+  O0 success=true | operations=13 | opcodes: push(1) mov(9) sub(1) shl(1) call(1)
+  O1 success=true | operations=9 | opcodes: push(1) mov(5) lea(2) call(1)
+  O2 success=true | operations=10 | opcodes: mov(5) lea(3) xor(1) ret(1)
+spectrum (O0 -> O2):
+        alignment anchors: O0[3] <-> O1[1] <-> O2[0]
+          O0                                | O1                              | O2                             
+        ------------------------------------+---------------------------------+--------------------------------
         - [0] 1:push rbp                    | -                               | -                              
         - [1] 2:mov rbp, rsp                | -                               | -                              
         - [2] 3:sub rsp, 0x10               | * [0] 1:push rax                | -                              
@@ -235,7 +233,24 @@ spectrum (O0 -> O2, full side-by-side):
         * [9] 2:mov dword, eax              | = [7] 2:mov edx, 0x3            | * [6] 6:lea eax, [rax + 4*rax] 
         * [10] 2:mov edi, dword             | * [8] 5:call <l0>               | = [7] 2:mov dword, eax         
         - [11] 2:mov esi, dword             | -                               | * [8] 7:xor eax, eax           
-        - [12] 5:call <l0>                  | -                               | * [9] 8:ret 
+        - [12] 5:call <l0>                  | -                               | * [9] 8:ret                    
+metrics:
+          metric                                       | O0         | O1         | O2        
+        -----------------------------------------------+------------+------------+-----------
+          size.symbol_text_bytes (bytes)               | 57         | 41         | 42        
+          asm.insn_total (count)                       | 13         | 9          | 10        
+          asm.mem_ops_ratio (ratio)                    | 0.6154     | 0.6667     | 0.8000    
+          asm.call_count (count)                       | 1          | 1          | 0         
+          asm.branch_density (ratio)                   | 0.0000     | 0.0000     | 0.1000    
+          asm.bb_count (count)                         | 1          | 1          | 1         
+          asm.stack_frame_bytes (bytes)                | 16         | 0          | 0         
+          asm.spill_fill_count (count)                 | 2          | 0          | 0         
+          build.compile_time_ms (ms)                   | 45.038     | 46.196     | 45.477    
+          mca.block_rthroughput (cycles_per_iteration) | 7.0000     | 5.0000     | 4.0000    
+          mca.ipc (inst_per_cycle)                     | 1.9100     | 1.5000     | 2.4500    
+          mca.total_uops (count)                       | 2300       | 1400       | 1200      
+          mca.rf_integer_max_mappings (count)          | 155        | 90         | 64        
+          mca.rf_fp_max_mappings (count)               | 0          | 0          | 0 
 ```
 
 ## `:graph`

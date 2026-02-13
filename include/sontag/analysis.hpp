@@ -53,6 +53,24 @@ namespace sontag {
         return "diag"sv;
     }
 
+    enum class metric_status {
+        ok,
+        na,
+        error,
+    };
+
+    inline constexpr std::string_view to_string(metric_status status) {
+        switch (status) {
+            case metric_status::ok:
+                return "ok"sv;
+            case metric_status::na:
+                return "na"sv;
+            case metric_status::error:
+                return "error"sv;
+        }
+        return "na"sv;
+    }
+
     struct analysis_request {
         std::filesystem::path clang_path{"clang++"};
         std::filesystem::path session_dir{};
@@ -84,6 +102,14 @@ namespace sontag {
         std::string stream{};
     };
 
+    struct analysis_metric_entry {
+        std::string name{};
+        double value{};
+        std::string unit{};
+        metric_status status{metric_status::na};
+        std::vector<std::string> quality_flags{};
+    };
+
     struct analysis_result {
         analysis_kind kind{analysis_kind::diag};
         bool success{false};
@@ -97,6 +123,7 @@ namespace sontag {
         std::vector<std::string> command{};
         std::vector<analysis_opcode_entry> opcode_table{};
         std::vector<analysis_operation_entry> operations{};
+        std::vector<analysis_metric_entry> metrics{};
     };
 
     struct analysis_symbol {
@@ -116,6 +143,14 @@ namespace std {
     struct formatter<sontag::analysis_kind, char> : formatter<std::string_view> {
         template <typename FormatContext>
         auto format(const sontag::analysis_kind& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+
+    template <>
+    struct formatter<sontag::metric_status, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::metric_status& val, FormatContext& ctx) const {
             return formatter<std::string_view>::format(sontag::to_string(val), ctx);
         }
     };

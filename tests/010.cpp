@@ -32,6 +32,17 @@ namespace sontag::test { namespace detail {
     static bool contains_quality_flag(const std::vector<delta_quality_flag>& quality_flags, delta_quality_flag wanted) {
         return std::find(quality_flags.begin(), quality_flags.end(), wanted) != quality_flags.end();
     }
+
+    static std::optional<std::reference_wrapper<const delta_metric_entry>> find_metric(
+            const std::vector<delta_metric_entry>& metrics, std::string_view name) {
+        auto it = std::find_if(metrics.begin(), metrics.end(), [name](const delta_metric_entry& metric) {
+            return metric.name == name;
+        });
+        if (it == metrics.end()) {
+            return std::nullopt;
+        }
+        return std::cref(*it);
+    }
 }}  // namespace sontag::test::detail
 
 namespace sontag::test {
@@ -172,6 +183,57 @@ namespace sontag::test {
         }
 
         CHECK_FALSE(found_opcode_sidecar);
+    }
+
+    TEST_CASE("010: delta collects canonical per-level optimization metrics", "[010][delta][metrics]") {
+        detail::temp_dir temp{"sontag_delta_metrics"};
+
+        auto request = detail::make_request(
+                temp.path / "session",
+                "volatile int value = 64;\n"
+                "volatile int out[4] = {};\n",
+                "auto d = value * 2;\n"
+                "out[0] = value;\n"
+                "out[1] = d;\n"
+                "out[2] = out[0] + out[1];\n"
+                "out[3] = out[2] - value;\n");
+
+        auto report = collect_delta_report(
+                request, delta_request{.mode = delta_mode::spectrum, .target = optimization_level::o2});
+        REQUIRE(report.levels.size() == 3U);
+
+        static constexpr auto expected_metric_names = std::array{
+                "size.symbol_text_bytes"sv,
+                "asm.insn_total"sv,
+                "asm.mem_ops_ratio"sv,
+                "asm.call_count"sv,
+                "asm.branch_density"sv,
+                "asm.bb_count"sv,
+                "asm.stack_frame_bytes"sv,
+                "asm.spill_fill_count"sv,
+                "build.compile_time_ms"sv,
+                "mca.block_rthroughput"sv,
+                "mca.ipc"sv,
+                "mca.total_uops"sv,
+                "mca.rf_integer_max_mappings"sv,
+                "mca.rf_fp_max_mappings"sv};
+
+        for (const auto& level : report.levels) {
+            REQUIRE(level.metrics.size() == expected_metric_names.size());
+            for (size_t i = 0U; i < expected_metric_names.size(); ++i) {
+                CHECK(level.metrics[i].name == expected_metric_names[i]);
+            }
+
+            auto compile_metric = detail::find_metric(level.metrics, "build.compile_time_ms"sv);
+            REQUIRE(compile_metric.has_value());
+            CHECK(compile_metric->get().status == metric_status::ok);
+            CHECK(compile_metric->get().value >= 0.0);
+
+            auto instruction_metric = detail::find_metric(level.metrics, "asm.insn_total"sv);
+            REQUIRE(instruction_metric.has_value());
+            CHECK(instruction_metric->get().status == metric_status::ok);
+            CHECK(instruction_metric->get().value > 0.0);
+        }
     }
 
 }  // namespace sontag::test

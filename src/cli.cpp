@@ -110,6 +110,14 @@ namespace sontag::cli { namespace detail {
         bool in_block_comment{false};
     };
 
+    struct metric_output_record {
+        std::string name{};
+        double value{};
+        std::string unit{};
+        std::string status{};
+        std::vector<std::string> quality_flags{};
+    };
+
     struct analysis_output_record {
         std::string command{};
         bool success{false};
@@ -121,6 +129,7 @@ namespace sontag::cli { namespace detail {
         std::vector<std::string> clang_command{};
         std::vector<analysis_opcode_entry> opcode_table{};
         std::vector<analysis_operation_entry> operations{};
+        std::vector<metric_output_record> metrics{};
     };
 
     struct delta_operation_output_record {
@@ -136,6 +145,7 @@ namespace sontag::cli { namespace detail {
         int exit_code{-1};
         std::string artifact_path{};
         std::vector<delta_operation_output_record> operations{};
+        std::vector<metric_output_record> metrics{};
         std::string diagnostics_text{};
         std::vector<std::string> quality_flags{};
     };
@@ -205,6 +215,22 @@ namespace glz {
     };
 
     template <>
+    struct meta<sontag::cli::detail::metric_output_record> {
+        using T = sontag::cli::detail::metric_output_record;
+        static constexpr auto value =
+                object("name",
+                       &T::name,
+                       "value",
+                       &T::value,
+                       "unit",
+                       &T::unit,
+                       "status",
+                       &T::status,
+                       "quality_flags",
+                       &T::quality_flags);
+    };
+
+    template <>
     struct meta<sontag::delta_opcode_entry> {
         using T = sontag::delta_opcode_entry;
         static constexpr auto value = object("opcode_uid", &T::opcode_uid, "opcode", &T::opcode);
@@ -247,6 +273,8 @@ namespace glz {
                        &T::artifact_path,
                        "operations",
                        &T::operations,
+                       "metrics",
+                       &T::metrics,
                        "diagnostics_text",
                        &T::diagnostics_text,
                        "quality_flags",
@@ -374,7 +402,9 @@ namespace glz {
                        "opcode_table",
                        &T::opcode_table,
                        "operations",
-                       &T::operations);
+                       &T::operations,
+                       "metrics",
+                       &T::metrics);
     };
 
 }  // namespace glz
@@ -1771,6 +1801,24 @@ examples:
             return values;
         }
 
+        static metric_output_record make_metric_output_record(const analysis_metric_entry& metric) {
+            return metric_output_record{
+                    .name = metric.name,
+                    .value = metric.value,
+                    .unit = metric.unit,
+                    .status = "{}"_format(metric.status),
+                    .quality_flags = metric.quality_flags};
+        }
+
+        static metric_output_record make_metric_output_record(const delta_metric_entry& metric) {
+            return metric_output_record{
+                    .name = metric.name,
+                    .value = metric.value,
+                    .unit = metric.unit,
+                    .status = "{}"_format(metric.status),
+                    .quality_flags = metric.quality_flags};
+        }
+
         static delta_output_record make_delta_output_record(const delta_report& report) {
             auto payload = delta_output_record{};
             payload.mode = "{}"_format(report.mode);
@@ -1800,6 +1848,10 @@ examples:
                                     .opcode_uid = operation.opcode_uid,
                                     .opcode = operation.opcode,
                                     .triplet = operation.triplet});
+                }
+                level_payload.metrics.reserve(level.metrics.size());
+                for (const auto& metric : level.metrics) {
+                    level_payload.metrics.push_back(make_metric_output_record(metric));
                 }
                 payload.levels.push_back(std::move(level_payload));
             }
@@ -1859,6 +1911,35 @@ examples:
                 }
             }
             return counts;
+        }
+
+        static std::string summarize_opcode_counts_inline(
+                std::span<const std::pair<std::string, size_t>> opcode_counts) {
+            if (opcode_counts.empty()) {
+                return "opcodes: <none>";
+            }
+
+            std::string summary{"opcodes:"};
+            auto preview_count = std::min<size_t>(opcode_counts.size(), 8U);
+            for (size_t i = 0U; i < preview_count; ++i) {
+                summary.append(" {}({})"_format(opcode_counts[i].first, opcode_counts[i].second));
+            }
+            if (opcode_counts.size() > preview_count) {
+                summary.append(" ...");
+            }
+            return summary;
+        }
+
+        static std::string format_delta_level_summary_line(const delta_level_record& level) {
+            auto line = "  {} success={}"_format(level.level, level.success ? "true"sv : "false"sv);
+            if (!level.success) {
+                line.append(" | exit_code={}"_format(level.exit_code));
+            }
+            line.append(" | operations={}"_format(level.operations.size()));
+            auto opcode_counts = summarize_level_opcodes(level.operations);
+            line.append(" | ");
+            line.append(summarize_opcode_counts_inline(opcode_counts));
+            return line;
         }
 
         static constexpr char delta_row_marker(delta_row_kind kind) {
@@ -2397,8 +2478,48 @@ examples:
             }
 
             os << "{}alignment anchors:"_format(diff_indent);
-            auto printed = false;
+            auto anchored_count = 0U;
+            std::optional<size_t> shared_baseline_index{};
+            auto shared_baseline = true;
+            for (size_t i = 1U; i < columns.size(); ++i) {
+                auto& column = columns[i];
+                if (!column.alignment.anchored) {
+                    continue;
+                }
+                ++anchored_count;
+                if (!shared_baseline_index) {
+                    shared_baseline_index = column.alignment.baseline_index;
+                }
+                else if (*shared_baseline_index != column.alignment.baseline_index) {
+                    shared_baseline = false;
+                }
+            }
+
+            if (anchored_count == 0U) {
+                os << " none (ordinal alignment)";
+                os << '\n';
+                return;
+            }
+
             auto baseline_label = "{}"_format(report.baseline);
+            if (shared_baseline && shared_baseline_index.has_value()) {
+                os << " {}[{}]"_format(baseline_label, *shared_baseline_index);
+                for (size_t i = 1U; i < columns.size(); ++i) {
+                    auto& column = columns[i];
+                    os << " <-> {}["_format(column.header);
+                    if (column.alignment.anchored) {
+                        os << column.alignment.target_index;
+                    }
+                    else {
+                        os << "none";
+                    }
+                    os << "]";
+                }
+                os << '\n';
+                return;
+            }
+
+            // Fallback when per-level anchors exist but do not share one baseline index.
             for (size_t i = 1U; i < columns.size(); ++i) {
                 auto& column = columns[i];
                 if (!column.alignment.anchored) {
@@ -2406,19 +2527,126 @@ examples:
                 }
                 os << " {}[{}] <-> {}[{}]"_format(
                         baseline_label, column.alignment.baseline_index, column.header, column.alignment.target_index);
-                printed = true;
-            }
-            if (!printed) {
-                os << " none (ordinal alignment)";
             }
             os << '\n';
         }
 
         static std::string diff_heading(const delta_report& report) {
             if (report.mode == delta_mode::spectrum) {
-                return "spectrum ({} -> {}, full side-by-side):"_format(report.baseline, report.target);
+                return "spectrum ({} -> {}):"_format(report.baseline, report.target);
             }
             return "diff ({} -> {}, full side-by-side):"_format(report.baseline, report.target);
+        }
+
+        struct metric_descriptor {
+            std::string name{};
+            std::string unit{};
+        };
+
+        static const delta_metric_entry* find_metric_entry(const delta_level_record& level, std::string_view name) {
+            for (const auto& metric : level.metrics) {
+                if (metric.name == name) {
+                    return &metric;
+                }
+            }
+            return nullptr;
+        }
+
+        static std::vector<metric_descriptor> collect_metric_descriptors(std::span<const delta_render_column> columns) {
+            std::vector<metric_descriptor> descriptors{};
+            for (const auto& column : columns) {
+                if (column.level == nullptr) {
+                    continue;
+                }
+                for (const auto& metric : column.level->metrics) {
+                    auto it = std::find_if(
+                            descriptors.begin(), descriptors.end(), [&](const metric_descriptor& descriptor) {
+                                return descriptor.name == metric.name;
+                            });
+                    if (it == descriptors.end()) {
+                        descriptors.push_back(metric_descriptor{.name = metric.name, .unit = metric.unit});
+                    }
+                    else if (it->unit.empty() && !metric.unit.empty()) {
+                        it->unit = metric.unit;
+                    }
+                }
+            }
+            return descriptors;
+        }
+
+        static std::string format_metric_cell_value(const delta_metric_entry& metric) {
+            if (metric.status != metric_status::ok) {
+                return "{}"_format(metric.status);
+            }
+
+            if (metric.unit == "count"sv || metric.unit == "bytes"sv) {
+                return "{:.0f}"_format(metric.value);
+            }
+            if (metric.unit == "ms"sv) {
+                return "{:.3f}"_format(metric.value);
+            }
+            return "{:.4f}"_format(metric.value);
+        }
+
+        static std::string format_metric_label(const metric_descriptor& metric) {
+            if (metric.unit.empty()) {
+                return metric.name;
+            }
+            return "{} ({})"_format(metric.name, metric.unit);
+        }
+
+        static void render_delta_metrics_table(std::span<const delta_render_column> columns, std::ostream& os) {
+            auto descriptors = collect_metric_descriptors(columns);
+            if (columns.empty() || descriptors.empty()) {
+                return;
+            }
+
+            constexpr auto diff_indent = "\t"sv;
+            auto metric_width = std::string_view{"  metric"}.size();
+            auto value_width = std::string_view{"status"}.size();
+
+            for (const auto& descriptor : descriptors) {
+                metric_width = std::max(metric_width, format_metric_label(descriptor).size() + 2U);
+            }
+
+            for (const auto& column : columns) {
+                value_width = std::max(value_width, column.header.size());
+                if (column.level == nullptr) {
+                    continue;
+                }
+                for (const auto& descriptor : descriptors) {
+                    auto metric = find_metric_entry(*column.level, descriptor.name);
+                    auto cell = metric != nullptr ? format_metric_cell_value(*metric) : std::string{"na"};
+                    value_width = std::max(value_width, cell.size());
+                }
+            }
+            value_width = std::max(value_width, static_cast<size_t>(10U));
+
+            os << "metrics:\n";
+            os << diff_indent << padded_column("  metric", metric_width);
+            for (const auto& column : columns) {
+                os << " | " << padded_column(column.header, value_width);
+            }
+            os << '\n';
+            os << diff_indent << std::string(metric_width, '-');
+            for (size_t i = 0U; i < columns.size(); ++i) {
+                os << "-+-" << std::string(value_width, '-');
+            }
+            os << '\n';
+
+            for (const auto& descriptor : descriptors) {
+                os << diff_indent << padded_column("  {}"_format(format_metric_label(descriptor)), metric_width);
+                for (const auto& column : columns) {
+                    auto cell = std::string{"na"};
+                    if (column.level != nullptr) {
+                        if (auto metric = find_metric_entry(*column.level, descriptor.name); metric != nullptr) {
+                            cell = format_metric_cell_value(*metric);
+                        }
+                    }
+                    os << " | " << padded_column(cell, value_width);
+                }
+                os << '\n';
+            }
         }
 
         static void render_delta_side_by_side(
@@ -2439,10 +2667,14 @@ examples:
             os << diff_heading(report) << '\n';
             render_delta_alignment_anchors(report, columns, diff_indent, os);
 
-            os << diff_indent
-               << padded_column("  {} lines"_format(columns[0].header), columns[0].width + row_lead_width);
+            os << diff_indent << padded_column("  {}"_format(columns[0].header), columns[0].width + row_lead_width);
             for (size_t i = 1U; i < columns.size(); ++i) {
-                os << " | " << padded_column("{} lines"_format(columns[i].header), columns[i].width + row_lead_width);
+                os << " | " << padded_column(columns[i].header, columns[i].width + row_lead_width);
+            }
+            os << '\n';
+            os << diff_indent << std::string(columns[0].width + row_lead_width, '-');
+            for (size_t i = 1U; i < columns.size(); ++i) {
+                os << "-+-" << std::string(columns[i].width + row_lead_width, '-');
             }
             os << '\n';
 
@@ -2540,21 +2772,7 @@ examples:
 
             os << "levels:\n";
             for (const auto& level : report.levels) {
-                os << ("  {} success={} exit_code={} operations={}\n"_format(
-                        level.level, level.success ? "true"sv : "false"sv, level.exit_code, level.operations.size()));
-
-                auto opcode_counts = summarize_level_opcodes(level.operations);
-                if (!opcode_counts.empty()) {
-                    os << "    opcodes:";
-                    auto preview_count = std::min<size_t>(opcode_counts.size(), 8U);
-                    for (size_t i = 0U; i < preview_count; ++i) {
-                        os << " {}({})"_format(opcode_counts[i].first, opcode_counts[i].second);
-                    }
-                    if (opcode_counts.size() > preview_count) {
-                        os << " ...";
-                    }
-                    os << '\n';
-                }
+                os << "{}\n"_format(format_delta_level_summary_line(level));
 
                 if (!level.quality_flags.empty()) {
                     for (auto flag : level.quality_flags) {
@@ -2567,6 +2785,7 @@ examples:
             auto render_columns = build_delta_render_columns(levels);
             auto show_color = should_use_color(color_mode_value);
             render_delta_side_by_side(report, render_columns, show_color, delta_color_scheme_value, os);
+            render_delta_metrics_table(render_columns, os);
 
             if (!verbose) {
                 return;
@@ -2797,6 +3016,10 @@ examples:
             payload.clang_command = result.command;
             payload.opcode_table = result.opcode_table;
             payload.operations = result.operations;
+            payload.metrics.reserve(result.metrics.size());
+            for (const auto& metric : result.metrics) {
+                payload.metrics.push_back(make_metric_output_record(metric));
+            }
 
             std::string json{};
             auto ec = glz::write_json(payload, json);
