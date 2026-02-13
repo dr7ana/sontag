@@ -2,6 +2,7 @@
 
 #include "config.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -71,6 +72,18 @@ namespace sontag {
         bool verbose{false};
     };
 
+    struct analysis_opcode_entry {
+        uint64_t opcode_uid{};
+        std::string opcode{};
+    };
+
+    struct analysis_operation_entry {
+        uint64_t ordinal{};
+        uint64_t opcode_uid{};
+        std::string opcode{};
+        std::string stream{};
+    };
+
     struct analysis_result {
         analysis_kind kind{analysis_kind::diag};
         bool success{false};
@@ -82,6 +95,8 @@ namespace sontag {
         std::string artifact_text{};
         std::string diagnostics_text{};
         std::vector<std::string> command{};
+        std::vector<analysis_opcode_entry> opcode_table{};
+        std::vector<analysis_operation_entry> operations{};
     };
 
     struct analysis_symbol {

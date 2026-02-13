@@ -30,6 +30,7 @@ namespace sontag::test { namespace detail {
         std::string cache_dir{};
         std::string output{};
         std::string color{};
+        std::string color_scheme{"classic"};
     };
 
     struct persisted_snapshots {
@@ -70,7 +71,8 @@ namespace sontag::test { namespace detail {
         json << "\"mca_path\":\"llvm-mca\",";
         json << "\"cache_dir\":\"" << path.parent_path().parent_path().parent_path().string() << "\",";
         json << "\"output\":\"table\",";
-        json << "\"color\":\"auto\"";
+        json << "\"color\":\"auto\",";
+        json << "\"color_scheme\":\"vaporwave\"";
         if (with_unknown_key) {
             json << ",\"new_field_from_future\":42";
         }
@@ -163,7 +165,9 @@ namespace glz {
                        "output",
                        &T::output,
                        "color",
-                       &T::color);
+                       &T::color,
+                       "color_scheme",
+                       &T::color_scheme);
     };
 
     template <>
@@ -192,7 +196,7 @@ namespace sontag::test {
     TEST_CASE("006: strict vs permissive parser behavior for unknown keys", "[006][json][policy]") {
         detail::persisted_config parsed{};
         auto json =
-                R"({"schema_version":1,"clang":"clang++","cxx_standard":"c++23","opt_level":"O2","target":null,"cpu":null,"cache_dir":".sontag","output":"table","color":"auto","future_key":123})";
+                R"({"schema_version":1,"clang":"clang++","cxx_standard":"c++23","opt_level":"O2","target":null,"cpu":null,"cache_dir":".sontag","output":"table","color":"auto","color_scheme":"classic","future_key":123})";
 
         auto strict_ec = glz::read_json(parsed, json);
         CHECK(static_cast<bool>(strict_ec));

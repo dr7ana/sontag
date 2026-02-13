@@ -22,6 +22,7 @@ namespace sontag::test {
     TEST_CASE("001: mode and optimization parsing", "[001][config]") {
         output_mode out_mode = output_mode::table;
         color_mode clr_mode = color_mode::automatic;
+        color_scheme scheme = color_scheme::vaporwave;
         optimization_level opt = optimization_level::o2;
 
         REQUIRE(try_parse_output_mode("JSON"sv, out_mode));
@@ -35,6 +36,12 @@ namespace sontag::test {
         REQUIRE(try_parse_color_mode("NEVER"sv, clr_mode));
         CHECK(clr_mode == color_mode::never);
         CHECK_FALSE(try_parse_color_mode("sometimes"sv, clr_mode));
+
+        REQUIRE(try_parse_color_scheme("classic"sv, scheme));
+        CHECK(scheme == color_scheme::classic);
+        REQUIRE(try_parse_color_scheme("VAPOR"sv, scheme));
+        CHECK(scheme == color_scheme::vaporwave);
+        CHECK_FALSE(try_parse_color_scheme("synthwave"sv, scheme));
 
         REQUIRE(try_parse_optimization_level("o3"sv, opt));
         CHECK(opt == optimization_level::o3);
@@ -58,6 +65,9 @@ namespace sontag::test {
         CHECK(to_string(color_mode::automatic) == "auto"sv);
         CHECK(to_string(color_mode::always) == "always"sv);
         CHECK(to_string(color_mode::never) == "never"sv);
+
+        CHECK(to_string(color_scheme::classic) == "classic"sv);
+        CHECK(to_string(color_scheme::vaporwave) == "vaporwave"sv);
 
         CHECK(to_string(optimization_level::o0) == "O0"sv);
         CHECK(to_string(optimization_level::o1) == "O1"sv);

@@ -11,18 +11,20 @@ namespace sontag::cli { namespace detail {
 
     using namespace std::string_view_literals;
 
-    static const char* command_completions[] = {":help", ":clear", ":show",  ":symbols", ":decl",      ":declfile",
-                                                ":file", ":set",   ":reset", ":mark",    ":snapshots", ":asm",
-                                                ":dump", ":ir",    ":diag",  ":mca",     ":inspect",   ":graph",
-                                                ":quit", ":q",     nullptr};
+    static const char* command_completions[] = {":help",  ":clear", ":show",  ":symbols", ":decl",      ":declfile",
+                                                ":file",  ":set",   ":reset", ":mark",    ":snapshots", ":asm",
+                                                ":dump",  ":ir",    ":diag",  ":mca",     ":delta",     ":inspect",
+                                                ":graph", ":quit",  ":q",     nullptr};
 
     static const char* clear_completions[] = {"last", nullptr};
     static const char* show_completions[] = {"config", "decl", "exec", "all", nullptr};
-    static const char* set_completions[] = {"std", "opt", "output", "color", nullptr};
+    static const char* set_completions[] = {"std", "opt", "output", "color", "color_scheme", nullptr};
     static const char* graph_completions[] = {"cfg", "call", "defuse", nullptr};
     static const char* inspect_completions[] = {"asm", "mca", nullptr};
     static const char* inspect_mca_completions[] = {"summary", "heatmap", nullptr};
     static const char* analysis_target_completions[] = {"@last", "__sontag_main", nullptr};
+    static const char* delta_completions[] = {
+            "spectrum", "O0", "O1", "O2", "O3", "Ofast", "Oz", "@last", "__sontag_main", nullptr};
 
     static constexpr std::string_view trim_left(std::string_view value) {
         auto start = value.find_first_not_of(" \t\r\n");
@@ -81,6 +83,10 @@ namespace sontag::cli { namespace detail {
 
     static void complete_analysis_args(ic_completion_env_t* cenv, const char* prefix) {
         complete_from(cenv, prefix, analysis_target_completions);
+    }
+
+    static void complete_delta_args(ic_completion_env_t* cenv, const char* prefix) {
+        complete_from(cenv, prefix, delta_completions);
     }
 
     static void complete_repl(ic_completion_env_t* cenv, const char* prefix) {
@@ -162,6 +168,10 @@ namespace sontag::cli { namespace detail {
         if (command == ":asm"sv || command == ":dump"sv || command == ":ir"sv || command == ":diag"sv ||
             command == ":mca"sv) {
             ic_complete_word(cenv, prefix, complete_analysis_args, nullptr);
+            return;
+        }
+        if (command == ":delta"sv) {
+            ic_complete_word(cenv, prefix, complete_delta_args, nullptr);
             return;
         }
     }

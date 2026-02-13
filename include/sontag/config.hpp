@@ -23,6 +23,7 @@ namespace sontag {
      * - history_enabled: Enable/disable persistent history writes.
      * - banner_enabled: Show/hide the startup ASCII banner in REPL sessions.
      * - color_mode: ANSI color behavior for terminal output.
+     * - color_scheme: ANSI palette scheme for colorized analysis output.
      * - pager_enabled: Pipe long outputs (asm/ir/diag) through a pager.
      * - output_mode: Default machine/human output shape ("table" or "json").
      * - quiet/verbose: Coarse output verbosity knobs for app logs.
@@ -80,6 +81,7 @@ namespace sontag {
 
     enum class output_mode { table, json };
     enum class color_mode { automatic, always, never };
+    enum class color_scheme { classic, vaporwave };
     enum class debug_info_level { none, line, full };
     enum class cxx_standard { cxx20, cxx23, cxx2c };
     enum class optimization_level { o0, o1, o2, o3, ofast, oz };
@@ -104,6 +106,16 @@ namespace sontag {
                 return "never"sv;
         }
         return "auto"sv;
+    }
+
+    inline constexpr std::string_view to_string(color_scheme scheme) {
+        switch (scheme) {
+            case color_scheme::classic:
+                return "classic"sv;
+            case color_scheme::vaporwave:
+                return "vaporwave"sv;
+        }
+        return "classic"sv;
     }
 
     inline constexpr std::string_view to_string(optimization_level level) {
@@ -228,6 +240,18 @@ namespace sontag {
         return false;
     }
 
+    inline constexpr bool try_parse_color_scheme(std::string_view text, color_scheme& out) {
+        if (utils::str_case_eq(text, "classic"sv)) {
+            out = color_scheme::classic;
+            return true;
+        }
+        if (utils::str_case_eq(text, "vaporwave"sv) || utils::str_case_eq(text, "vapor"sv)) {
+            out = color_scheme::vaporwave;
+            return true;
+        }
+        return false;
+    }
+
     struct startup_config {
         std::optional<std::string> session_name{};
         std::optional<std::string> resume_session{};
@@ -236,6 +260,7 @@ namespace sontag {
         bool history_enabled{true};
         bool banner_enabled{true};
         color_mode color{color_mode::automatic};
+        color_scheme delta_color_scheme{color_scheme::classic};
         bool pager_enabled{false};
         output_mode output{output_mode::table};
         bool quiet{false};
@@ -263,8 +288,8 @@ namespace sontag {
 
         int compile_timeout_ms{30'000};
         int run_timeout_ms{30'000};
-        size_t max_cell_bytes{1U << 20U};
-        size_t max_artifact_mb{64U};
+        size_t max_cell_bytes{1U << 20U};  // 1 MiB
+        size_t max_artifact_mb{64U};       // 64 MiB
         unsigned jobs{1U};
 
         std::optional<std::string> default_symbol{};
@@ -302,6 +327,14 @@ namespace std {
     struct formatter<sontag::color_mode, char> : formatter<std::string_view> {
         template <typename FormatContext>
         auto format(const sontag::color_mode& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+
+    template <>
+    struct formatter<sontag::color_scheme, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::color_scheme& val, FormatContext& ctx) const {
             return formatter<std::string_view>::format(sontag::to_string(val), ctx);
         }
     };

@@ -61,6 +61,7 @@ namespace sontag::test { namespace detail {
         std::string cache_dir{};
         std::string output{};
         std::string color{};
+        std::string color_scheme{"classic"};
     };
 
     template <typename T>
@@ -245,7 +246,9 @@ namespace glz {
                        "output",
                        &T::output,
                        "color",
-                       &T::color);
+                       &T::color,
+                       "color_scheme",
+                       &T::color_scheme);
     };
 }  // namespace glz
 
@@ -262,6 +265,7 @@ namespace sontag::test {
         cfg.opt_level = optimization_level::o1;
         cfg.output = output_mode::json;
         cfg.color = color_mode::never;
+        cfg.delta_color_scheme = color_scheme::classic;
 
         detail::run_repl_script(
                 cfg,
@@ -281,6 +285,7 @@ namespace sontag::test {
         CHECK(persisted_cfg.cache_dir == cfg.cache_dir.string());
         CHECK(persisted_cfg.output == "json");
         CHECK(persisted_cfg.color == "never");
+        CHECK(persisted_cfg.color_scheme == "classic");
 
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
         REQUIRE(persisted_cells.decl_cells.size() == 2U);
@@ -308,6 +313,7 @@ namespace sontag::test {
         initial_cfg.opt_level = optimization_level::o3;
         initial_cfg.output = output_mode::json;
         initial_cfg.color = color_mode::never;
+        initial_cfg.delta_color_scheme = color_scheme::classic;
 
         detail::run_repl_script(
                 initial_cfg,
@@ -326,6 +332,7 @@ namespace sontag::test {
         resumed_cfg.opt_level = optimization_level::oz;
         resumed_cfg.output = output_mode::table;
         resumed_cfg.color = color_mode::always;
+        resumed_cfg.delta_color_scheme = color_scheme::vaporwave;
 
         detail::run_repl_script(
                 resumed_cfg,
@@ -340,6 +347,7 @@ namespace sontag::test {
         CHECK(resumed_cfg.opt_level == initial_cfg.opt_level);
         CHECK(resumed_cfg.output == initial_cfg.output);
         CHECK(resumed_cfg.color == initial_cfg.color);
+        CHECK(resumed_cfg.delta_color_scheme == initial_cfg.delta_color_scheme);
 
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
         CHECK(persisted_cells.decl_cells.empty());
@@ -404,6 +412,109 @@ namespace sontag::test {
         CHECK(output.out.find("symbols:") != std::string::npos);
         CHECK(output.out.find("__sontag_main") != std::string::npos);
         CHECK(output.out.find("foo(") != std::string::npos);
+    }
+
+    TEST_CASE("005: delta command renders pairwise summary and opcode table info", "[005][session][delta]") {
+        detail::temp_dir temp{"sontag_delta_command_table"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl volatile int sink = 0;\n"
+                "sink = 7 + 11;\n"
+                ":delta\n"
+                ":quit\n");
+
+        CHECK(output.out.find("delta: ") != std::string::npos);
+        CHECK(output.out.find("mode: pairwise") != std::string::npos);
+        CHECK(output.out.find("baseline: O0") != std::string::npos);
+        CHECK(output.out.find("target: O2") != std::string::npos);
+        CHECK(output.out.find("opcode table entries: ") != std::string::npos);
+        CHECK(output.out.find("levels:") != std::string::npos);
+        CHECK(output.out.find("diff (O0 -> O2, full side-by-side):") != std::string::npos);
+        CHECK(output.out.find("alignment anchor: ") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: delta spectrum renders multi-level side-by-side output", "[005][session][delta][spectrum]") {
+        detail::temp_dir temp{"sontag_delta_command_spectrum"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl volatile int sink = 0;\n"
+                "sink = 5 * 13;\n"
+                ":delta spectrum O3\n"
+                ":quit\n");
+
+        CHECK(output.out.find("mode: spectrum") != std::string::npos);
+        CHECK(output.out.find("baseline: O0") != std::string::npos);
+        CHECK(output.out.find("target: O3") != std::string::npos);
+        CHECK(output.out.find("spectrum (O0 -> O3, full side-by-side):") != std::string::npos);
+        CHECK(output.out.find("O1 lines") != std::string::npos);
+        CHECK(output.out.find("O2 lines") != std::string::npos);
+        CHECK(output.out.find("O3 lines") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: delta command emits typed json payload including opcode mapping", "[005][session][delta][json]") {
+        detail::temp_dir temp{"sontag_delta_command_json"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.output = output_mode::json;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl volatile int sink = 0;\n"
+                "sink = 3 * 9;\n"
+                ":delta O3\n"
+                ":quit\n");
+
+        CHECK(output.out.find("\"command\":\"delta\"") != std::string::npos);
+        CHECK(output.out.find("\"mode\":\"pairwise\"") != std::string::npos);
+        CHECK(output.out.find("\"opcode_table\"") != std::string::npos);
+        CHECK(output.out.find("\"levels\"") != std::string::npos);
+        CHECK(output.out.find("\"baseline\":\"O0\"") != std::string::npos);
+        CHECK(output.out.find("\"target\":\"O3\"") != std::string::npos);
+        CHECK(output.out.find("\"triplet\"") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: delta spectrum emits typed json payload with intermediate levels", "[005][session][delta][json]") {
+        detail::temp_dir temp{"sontag_delta_command_spectrum_json"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.output = output_mode::json;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl volatile int sink = 0;\n"
+                "sink = 2 * 17;\n"
+                ":delta spectrum O3\n"
+                ":quit\n");
+
+        CHECK(output.out.find("\"command\":\"delta\"") != std::string::npos);
+        CHECK(output.out.find("\"mode\":\"spectrum\"") != std::string::npos);
+        CHECK(output.out.find("\"baseline\":\"O0\"") != std::string::npos);
+        CHECK(output.out.find("\"target\":\"O3\"") != std::string::npos);
+        CHECK(output.out.find("\"level\":\"O1\"") != std::string::npos);
+        CHECK(output.out.find("\"level\":\"O2\"") != std::string::npos);
+        CHECK(output.out.find("\"level\":\"O3\"") != std::string::npos);
+        CHECK(output.err.empty());
     }
 
     TEST_CASE("005: invalid cell is rejected and state remains unchanged", "[005][session][validation]") {

@@ -221,6 +221,22 @@ ret
         CHECK(interner.mnemonic_for(3U).value_or(""sv) == "ret");
     }
 
+    TEST_CASE("009: opcode triplet normalization ignores ptr token", "[009][opcode]") {
+        auto disassembly = R"(0000000000000000 <foo>:
+   0:   8b 05 00 00 00 00       mov     eax, dword ptr [rip + 0x0]
+   6:   89 45 f8                mov     dword ptr [rbp - 0x8], eax
+)";
+
+        opcode::opcode_interner interner{};
+        auto operations = opcode::parse_operations(disassembly, interner);
+
+        REQUIRE(operations.size() == 2U);
+        CHECK(operations[0].mnemonic == "mov");
+        CHECK(operations[1].mnemonic == "mov");
+        CHECK(operations[0].signature == "mov eax, dword [rip + 0x0]");
+        CHECK(operations[1].signature == "mov dword [rbp - 0x8], eax");
+    }
+
     TEST_CASE("009: opcode uid assignment is deterministic for identical input", "[009][opcode]") {
         auto disassembly = R"(0000000000000000 <foo>:
    0:   31 c0                   xor    eax, eax
@@ -249,6 +265,42 @@ ret
             CHECK(ops_a[i].mnemonic == ops_b[i].mnemonic);
         }
         CHECK(intern_a.opcode_entries().size() == intern_b.opcode_entries().size());
+    }
+
+    TEST_CASE("009: opcode mapper shares uid table across streams in scan order", "[009][opcode]") {
+        auto baseline = R"(0000000000000000 <foo>:
+   0:   31 c0                   xor    eax, eax
+   2:   c3                      ret
+)";
+        auto target = R"(0000000000000000 <foo>:
+   0:   31 c0                   xor    eax, eax
+   2:   83 c0 01                add    eax, 1
+   5:   c3                      ret
+)";
+
+        std::vector<opcode::operation_stream_input> streams{};
+        streams.push_back(opcode::operation_stream_input{.name = "baseline", .disassembly = baseline});
+        streams.push_back(opcode::operation_stream_input{.name = "target", .disassembly = target});
+
+        auto mapped = opcode::map_operation_streams(streams);
+        REQUIRE(mapped.streams.size() == 2U);
+        REQUIRE(mapped.opcode_table.size() == 3U);
+
+        CHECK(mapped.opcode_table[0].mnemonic == "xor");
+        CHECK(mapped.opcode_table[0].uid == 1U);
+        CHECK(mapped.opcode_table[1].mnemonic == "ret");
+        CHECK(mapped.opcode_table[1].uid == 2U);
+        CHECK(mapped.opcode_table[2].mnemonic == "add");
+        CHECK(mapped.opcode_table[2].uid == 3U);
+
+        REQUIRE(mapped.streams[0].operations.size() == 2U);
+        CHECK(mapped.streams[0].operations[0].opcode == 1U);
+        CHECK(mapped.streams[0].operations[1].opcode == 2U);
+
+        REQUIRE(mapped.streams[1].operations.size() == 3U);
+        CHECK(mapped.streams[1].operations[0].opcode == 1U);
+        CHECK(mapped.streams[1].operations[1].opcode == 3U);
+        CHECK(mapped.streams[1].operations[2].opcode == 2U);
     }
 
 }  // namespace sontag::test

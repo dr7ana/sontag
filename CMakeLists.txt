@@ -57,7 +57,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(sontag
     src/analysis.cpp
     src/cli.cpp
-    src/editor.cpp
+    src/internal/editor.cpp
     src/graph.cpp
 )
 

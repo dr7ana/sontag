@@ -1,7 +1,5 @@
 #include "sontag/cli.hpp"
 
-#include "editor.hpp"
-
 #include "sontag/analysis.hpp"
 #include "sontag/format.hpp"
 
@@ -9,20 +7,26 @@
 
 #include <CLI/CLI.hpp>
 
+#include "internal/delta.hpp"
+#include "internal/editor.hpp"
+
 extern "C" {
 #include <sys/wait.h>
 #include <unistd.h>
 }
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -49,6 +53,7 @@ namespace sontag::cli { namespace detail {
         std::string cache_dir{};
         std::string output{};
         std::string color{};
+        std::string color_scheme{"classic"};
     };
 
     struct snapshot_record {
@@ -100,6 +105,39 @@ namespace sontag::cli { namespace detail {
         std::string stderr_path{};
         std::string text{};
         std::vector<std::string> clang_command{};
+        std::vector<analysis_opcode_entry> opcode_table{};
+        std::vector<analysis_operation_entry> operations{};
+    };
+
+    struct delta_operation_output_record {
+        uint64_t ordinal{};
+        uint64_t opcode_uid{};
+        std::string opcode{};
+        std::string triplet{};
+    };
+
+    struct delta_level_output_record {
+        std::string level{};
+        bool success{false};
+        int exit_code{-1};
+        std::string artifact_path{};
+        std::vector<delta_operation_output_record> operations{};
+        std::string diagnostics_text{};
+        std::vector<std::string> quality_flags{};
+    };
+
+    struct delta_output_record {
+        std::string command{"delta"};
+        std::string mode{};
+        bool success{false};
+        std::string symbol{};
+        std::string symbol_display{};
+        std::string baseline{};
+        std::string target{};
+        std::vector<delta_opcode_entry> opcode_table{};
+        std::vector<delta_level_output_record> levels{};
+        delta_change_counters counters{};
+        std::vector<std::string> quality_flags{};
     };
 
     struct source_location {
@@ -140,6 +178,96 @@ namespace sontag::cli { namespace detail {
 namespace glz {
 
     template <>
+    struct meta<sontag::analysis_opcode_entry> {
+        using T = sontag::analysis_opcode_entry;
+        static constexpr auto value = object("opcode_uid", &T::opcode_uid, "opcode", &T::opcode);
+    };
+
+    template <>
+    struct meta<sontag::analysis_operation_entry> {
+        using T = sontag::analysis_operation_entry;
+        static constexpr auto value = object(
+                "ordinal", &T::ordinal, "opcode_uid", &T::opcode_uid, "opcode", &T::opcode, "stream", &T::stream);
+    };
+
+    template <>
+    struct meta<sontag::delta_opcode_entry> {
+        using T = sontag::delta_opcode_entry;
+        static constexpr auto value = object("opcode_uid", &T::opcode_uid, "opcode", &T::opcode);
+    };
+
+    template <>
+    struct meta<sontag::delta_change_counters> {
+        using T = sontag::delta_change_counters;
+        static constexpr auto value =
+                object("unchanged_count",
+                       &T::unchanged_count,
+                       "modified_count",
+                       &T::modified_count,
+                       "inserted_count",
+                       &T::inserted_count,
+                       "removed_count",
+                       &T::removed_count,
+                       "moved_count",
+                       &T::moved_count);
+    };
+
+    template <>
+    struct meta<sontag::cli::detail::delta_operation_output_record> {
+        using T = sontag::cli::detail::delta_operation_output_record;
+        static constexpr auto value = object(
+                "ordinal", &T::ordinal, "opcode_uid", &T::opcode_uid, "opcode", &T::opcode, "triplet", &T::triplet);
+    };
+
+    template <>
+    struct meta<sontag::cli::detail::delta_level_output_record> {
+        using T = sontag::cli::detail::delta_level_output_record;
+        static constexpr auto value =
+                object("level",
+                       &T::level,
+                       "success",
+                       &T::success,
+                       "exit_code",
+                       &T::exit_code,
+                       "artifact_path",
+                       &T::artifact_path,
+                       "operations",
+                       &T::operations,
+                       "diagnostics_text",
+                       &T::diagnostics_text,
+                       "quality_flags",
+                       &T::quality_flags);
+    };
+
+    template <>
+    struct meta<sontag::cli::detail::delta_output_record> {
+        using T = sontag::cli::detail::delta_output_record;
+        static constexpr auto value =
+                object("command",
+                       &T::command,
+                       "mode",
+                       &T::mode,
+                       "success",
+                       &T::success,
+                       "symbol",
+                       &T::symbol,
+                       "symbol_display",
+                       &T::symbol_display,
+                       "baseline",
+                       &T::baseline,
+                       "target",
+                       &T::target,
+                       "opcode_table",
+                       &T::opcode_table,
+                       "levels",
+                       &T::levels,
+                       "counters",
+                       &T::counters,
+                       "quality_flags",
+                       &T::quality_flags);
+    };
+
+    template <>
     struct meta<sontag::cli::detail::persisted_config> {
         using T = sontag::cli::detail::persisted_config;
         static constexpr auto value =
@@ -164,7 +292,9 @@ namespace glz {
                        "output",
                        &T::output,
                        "color",
-                       &T::color);
+                       &T::color,
+                       "color_scheme",
+                       &T::color_scheme);
     };
 
     template <>
@@ -211,7 +341,11 @@ namespace glz {
                        "text",
                        &T::text,
                        "clang_command",
-                       &T::clang_command);
+                       &T::clang_command,
+                       "opcode_table",
+                       &T::opcode_table,
+                       "operations",
+                       &T::operations);
     };
 
 }  // namespace glz
@@ -831,6 +965,7 @@ namespace sontag::cli {
             data.cache_dir = cfg.cache_dir.string();
             data.output = "{}"_format(cfg.output);
             data.color = "{}"_format(cfg.color);
+            data.color_scheme = "{}"_format(cfg.delta_color_scheme);
             return data;
         }
 
@@ -848,6 +983,9 @@ namespace sontag::cli {
             }
             if (!try_parse_color_mode(data.color, cfg.color)) {
                 throw std::runtime_error("invalid color in persisted config: " + data.color);
+            }
+            if (!try_parse_color_scheme(data.color_scheme, cfg.delta_color_scheme)) {
+                throw std::runtime_error("invalid color_scheme in persisted config: " + data.color_scheme);
             }
 
             cfg.target_triple = data.target;
@@ -1087,7 +1225,8 @@ namespace sontag::cli {
                    "  cache_dir={}\n"
                    "  output={}\n"
                    "  banner={}\n"
-                   "  color={}\n"_format(
+                   "  color={}\n"
+                   "  color_scheme={}\n"_format(
                            cfg.language_standard,
                            cfg.opt_level,
                            optional_or_default(cfg.target_triple),
@@ -1098,7 +1237,8 @@ namespace sontag::cli {
                            cfg.cache_dir.string(),
                            cfg.output,
                            cfg.banner_enabled,
-                           cfg.color));
+                           cfg.color,
+                           cfg.delta_color_scheme));
         }
 
         static void print_snapshots(const repl_state& state, std::ostream& os) {
@@ -1218,6 +1358,14 @@ namespace sontag::cli {
                 return true;
             }
 
+            if (key == "color_scheme"sv || key == "delta.color_scheme"sv) {
+                if (!try_parse_color_scheme(value, cfg.delta_color_scheme)) {
+                    err << "invalid color_scheme: " << value << " (expected classic|vaporwave)\n";
+                    return false;
+                }
+                return true;
+            }
+
             err << "unknown :set key: " << key << '\n';
             return false;
         }
@@ -1241,6 +1389,7 @@ namespace sontag::cli {
   :ir [symbol|@last]
   :diag [symbol|@last]
   :mca [symbol|@last]
+  :delta [spectrum] [target_opt] [symbol|@last]
   :inspect asm [symbol|@last]
   :inspect mca [summary|heatmap] [symbol|@last]
   :graph cfg [symbol|@last]
@@ -1255,11 +1404,17 @@ examples:
   :set std=c++23
   :set opt=O3
   :set output=json
+  :set color_scheme=classic
   :show all
   :symbols
   :mark baseline
   :asm
   :dump
+  :delta
+  :delta spectrum
+  :delta O3
+  :delta spectrum O3
+  :delta add
   :inspect asm
   :inspect mca
   :graph cfg
@@ -1486,6 +1641,719 @@ examples:
             return true;
         }
 
+        static std::vector<std::string> delta_quality_flag_strings(const std::vector<delta_quality_flag>& flags) {
+            std::vector<std::string> values{};
+            values.reserve(flags.size());
+            for (auto flag : flags) {
+                values.emplace_back("{}"_format(flag));
+            }
+            return values;
+        }
+
+        static delta_output_record make_delta_output_record(const delta_report& report) {
+            auto payload = delta_output_record{};
+            payload.mode = "{}"_format(report.mode);
+            payload.success = report.success;
+            payload.symbol = report.symbol;
+            payload.symbol_display = report.symbol_display;
+            payload.baseline = "{}"_format(report.baseline);
+            payload.target = "{}"_format(report.target);
+            payload.opcode_table = report.opcode_table;
+            payload.counters = report.counters;
+            payload.quality_flags = delta_quality_flag_strings(report.quality_flags);
+            payload.levels.reserve(report.levels.size());
+
+            for (const auto& level : report.levels) {
+                auto level_payload = delta_level_output_record{
+                        .level = "{}"_format(level.level),
+                        .success = level.success,
+                        .exit_code = level.exit_code,
+                        .artifact_path = level.artifact_path.string(),
+                        .diagnostics_text = level.diagnostics_text,
+                        .quality_flags = delta_quality_flag_strings(level.quality_flags)};
+                level_payload.operations.reserve(level.operations.size());
+                for (const auto& operation : level.operations) {
+                    level_payload.operations.push_back(
+                            delta_operation_output_record{
+                                    .ordinal = static_cast<uint64_t>(operation.ordinal),
+                                    .opcode_uid = operation.opcode_uid,
+                                    .opcode = operation.opcode,
+                                    .triplet = operation.triplet});
+                }
+                payload.levels.push_back(std::move(level_payload));
+            }
+
+            return payload;
+        }
+
+        struct delta_color_palette {
+            std::string_view unchanged{};
+            std::string_view modified{};
+            std::string_view removed{};
+            std::string_view inserted{};
+        };
+
+        enum class delta_row_kind { unchanged, modified, removed, inserted };
+
+        static constexpr auto classic_color_scheme = delta_color_palette{
+                .unchanged = "\x1b[38;5;22m"sv,
+                .modified = "\x1b[33m"sv,
+                .removed = "\x1b[31m"sv,
+                .inserted = "\x1b[38;5;117m"sv};
+        static constexpr auto vaporwave_color_scheme = delta_color_palette{
+                .unchanged = "\x1b[38;5;117m"sv,
+                .modified = "\x1b[38;5;141m"sv,
+                .removed = "\x1b[38;5;204m"sv,
+                .inserted = "\x1b[38;5;51m"sv};
+
+        static constexpr delta_color_palette resolve_delta_color_palette(color_scheme scheme) {
+            switch (scheme) {
+                case color_scheme::classic:
+                    return classic_color_scheme;
+                case color_scheme::vaporwave:
+                    return vaporwave_color_scheme;
+            }
+            return classic_color_scheme;
+        }
+
+        struct delta_alignment {
+            bool anchored{false};
+            size_t baseline_index{0U};
+            size_t target_index{0U};
+            long long shift{0LL};
+        };
+
+        static std::vector<std::pair<std::string, size_t>> summarize_level_opcodes(
+                const std::vector<delta_operation>& operations) {
+            std::vector<std::pair<std::string, size_t>> counts{};
+            for (const auto& operation : operations) {
+                auto it = std::find_if(counts.begin(), counts.end(), [&](const std::pair<std::string, size_t>& entry) {
+                    return entry.first == operation.opcode;
+                });
+                if (it == counts.end()) {
+                    counts.push_back({operation.opcode, 1U});
+                }
+                else {
+                    ++it->second;
+                }
+            }
+            return counts;
+        }
+
+        static constexpr char delta_row_marker(delta_row_kind kind) {
+            switch (kind) {
+                case delta_row_kind::unchanged:
+                    return '=';
+                case delta_row_kind::modified:
+                    return '*';
+                case delta_row_kind::removed:
+                    return '-';
+                case delta_row_kind::inserted:
+                    return '+';
+            }
+            return '?';
+        }
+
+        static std::string truncate_ellipsis(std::string_view text, size_t max_width) {
+            if (max_width == 0U) {
+                return std::string{};
+            }
+            if (text.size() <= max_width) {
+                return std::string{text};
+            }
+            if (max_width <= 3U) {
+                return std::string{text.substr(0U, max_width)};
+            }
+            std::string out{text.substr(0U, max_width - 3U)};
+            out.append("...");
+            return out;
+        }
+
+        static std::string padded_column(std::string_view text, size_t width) {
+            auto col = truncate_ellipsis(text, width);
+            if (col.size() < width) {
+                col.append(width - col.size(), ' ');
+            }
+            return col;
+        }
+
+        static std::string summarize_operation(const delta_operation& operation) {
+            auto body = operation.triplet.empty() ? operation.opcode : operation.triplet;
+            return "[{}] {}:{}"_format(operation.ordinal, operation.opcode_uid, body);
+        }
+
+        static delta_alignment find_alignment(
+                const std::vector<delta_operation>& baseline, const std::vector<delta_operation>& target) {
+            auto alignment = delta_alignment{};
+            for (size_t i = 0U; i < baseline.size(); ++i) {
+                if (baseline[i].triplet.empty()) {
+                    continue;
+                }
+                for (size_t j = 0U; j < target.size(); ++j) {
+                    if (target[j].triplet.empty()) {
+                        continue;
+                    }
+                    if (baseline[i].triplet != target[j].triplet) {
+                        continue;
+                    }
+                    alignment.anchored = true;
+                    alignment.baseline_index = i;
+                    alignment.target_index = j;
+                    alignment.shift = static_cast<long long>(j) - static_cast<long long>(i);
+                    return alignment;
+                }
+            }
+            return alignment;
+        }
+
+        static std::optional<size_t> find_first_triplet_match(
+                const std::vector<delta_operation>& operations, std::string_view wanted_triplet) {
+            for (size_t i = 0U; i < operations.size(); ++i) {
+                if (operations[i].triplet.empty()) {
+                    continue;
+                }
+                if (operations[i].triplet == wanted_triplet) {
+                    return i;
+                }
+            }
+            return std::nullopt;
+        }
+
+        struct delta_common_anchor {
+            size_t baseline_index{};
+            std::vector<size_t> target_indices{};
+            uint64_t target_index_score{};
+        };
+
+        static std::optional<delta_common_anchor> find_common_spectrum_anchor(
+                std::span<const delta_level_record* const> levels) {
+            if (levels.size() < 3U || levels.front() == nullptr) {
+                return std::nullopt;
+            }
+
+            auto* baseline = levels.front();
+            std::optional<delta_common_anchor> best{};
+            for (size_t i = 0U; i < baseline->operations.size(); ++i) {
+                auto triplet = baseline->operations[i].triplet;
+                if (triplet.empty()) {
+                    continue;
+                }
+
+                delta_common_anchor candidate{};
+                candidate.baseline_index = i;
+                candidate.target_indices.reserve(levels.size() - 1U);
+                candidate.target_index_score = 0U;
+
+                auto valid = true;
+                for (size_t j = 1U; j < levels.size(); ++j) {
+                    if (levels[j] == nullptr) {
+                        valid = false;
+                        break;
+                    }
+
+                    auto target_index = find_first_triplet_match(levels[j]->operations, triplet);
+                    if (!target_index) {
+                        valid = false;
+                        break;
+                    }
+                    candidate.target_indices.push_back(*target_index);
+                    candidate.target_index_score += static_cast<uint64_t>(*target_index);
+                }
+
+                if (!valid) {
+                    continue;
+                }
+                if (!best || candidate.target_index_score < best->target_index_score ||
+                    (candidate.target_index_score == best->target_index_score &&
+                     candidate.baseline_index < best->baseline_index)) {
+                    best = std::move(candidate);
+                }
+            }
+
+            return best;
+        }
+
+        static bool should_use_color(color_mode mode) {
+            switch (mode) {
+                case color_mode::automatic:
+                    return ::isatty(STDOUT_FILENO) == 1;
+                case color_mode::always:
+                    return true;
+                case color_mode::never:
+                    return false;
+            }
+            return false;
+        }
+
+        struct delta_render_column {
+            const delta_level_record* level{nullptr};
+            std::string header{};
+            delta_alignment alignment{};
+            long long shift{0LL};
+            size_t width{0U};
+        };
+
+        static const delta_level_record* lookup_delta_level(const delta_report& report, optimization_level level) {
+            for (const auto& record : report.levels) {
+                if (record.level == level) {
+                    return &record;
+                }
+            }
+            return nullptr;
+        }
+
+        static std::vector<const delta_level_record*> select_delta_side_by_side_levels(const delta_report& report) {
+            std::vector<const delta_level_record*> levels{};
+            if (report.mode == delta_mode::pairwise) {
+                auto* baseline = lookup_delta_level(report, report.baseline);
+                auto* target = lookup_delta_level(report, report.target);
+                if (baseline != nullptr) {
+                    levels.push_back(baseline);
+                }
+                if (target != nullptr && target != baseline) {
+                    levels.push_back(target);
+                }
+                return levels;
+            }
+
+            levels.reserve(report.levels.size());
+            for (const auto& level : report.levels) {
+                levels.push_back(&level);
+            }
+            return levels;
+        }
+
+        static bool all_delta_levels_successful(std::span<const delta_render_column> columns) {
+            for (const auto& column : columns) {
+                if (column.level == nullptr || !column.level->success) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static delta_row_kind classify_delta_row_kind(
+                bool baseline_has, bool current_has, uint64_t baseline_uid, uint64_t current_uid) {
+            if (baseline_has && current_has) {
+                return baseline_uid == current_uid ? delta_row_kind::unchanged : delta_row_kind::modified;
+            }
+            if (baseline_has) {
+                return delta_row_kind::removed;
+            }
+            if (current_has) {
+                return delta_row_kind::inserted;
+            }
+            return delta_row_kind::unchanged;
+        }
+
+        static std::string marker_prefixed(std::string_view text, char marker) {
+            std::string out{};
+            out.reserve(text.size() + 2U);
+            out.push_back(marker);
+            out.push_back(' ');
+            out.append(text);
+            return out;
+        }
+
+        static std::vector<delta_render_column> build_delta_render_columns(
+                std::span<const delta_level_record* const> levels) {
+            std::vector<delta_render_column> columns{};
+            if (levels.empty()) {
+                return columns;
+            }
+
+            columns.reserve(levels.size());
+            auto* baseline = levels.front();
+            auto min_width = levels.size() >= 3U ? static_cast<size_t>(24U) : static_cast<size_t>(34U);
+            auto max_width = levels.size() >= 3U ? static_cast<size_t>(34U) : static_cast<size_t>(40U);
+            auto common_anchor = find_common_spectrum_anchor(levels);
+
+            for (size_t i = 0U; i < levels.size(); ++i) {
+                auto* level = levels[i];
+                auto alignment = delta_alignment{};
+                if (i == 0U) {
+                    alignment.anchored = true;
+                    alignment.baseline_index = common_anchor ? common_anchor->baseline_index : 0U;
+                    alignment.target_index = alignment.baseline_index;
+                    alignment.shift = 0LL;
+                }
+                else if (common_anchor) {
+                    auto target_index = common_anchor->target_indices[i - 1U];
+                    alignment.anchored = true;
+                    alignment.baseline_index = common_anchor->baseline_index;
+                    alignment.target_index = target_index;
+                    alignment.shift =
+                            static_cast<long long>(target_index) - static_cast<long long>(alignment.baseline_index);
+                }
+                else {
+                    alignment = find_alignment(baseline->operations, level->operations);
+                }
+
+                auto column = delta_render_column{
+                        .level = level,
+                        .header = "{}"_format(level->level),
+                        .alignment = alignment,
+                        .shift = alignment.shift};
+
+                size_t max_data_width = 0U;
+                for (const auto& operation : level->operations) {
+                    max_data_width = std::max(max_data_width, summarize_operation(operation).size());
+                }
+                column.width =
+                        std::clamp(std::max(column.header.size() + 6U, max_data_width + 1U), min_width, max_width);
+                columns.push_back(std::move(column));
+            }
+
+            return columns;
+        }
+
+        static delta_row_kind aggregate_baseline_kind(std::span<const delta_row_kind> compared_kinds) {
+            if (compared_kinds.empty()) {
+                return delta_row_kind::unchanged;
+            }
+
+            auto all_unchanged = true;
+            auto any_removed = false;
+            auto any_modified = false;
+            for (auto kind : compared_kinds) {
+                all_unchanged = all_unchanged && (kind == delta_row_kind::unchanged);
+                any_removed = any_removed || (kind == delta_row_kind::removed);
+                any_modified = any_modified || (kind == delta_row_kind::modified || kind == delta_row_kind::inserted);
+            }
+
+            if (all_unchanged) {
+                return delta_row_kind::unchanged;
+            }
+            if (any_removed) {
+                return delta_row_kind::removed;
+            }
+            if (any_modified) {
+                return delta_row_kind::modified;
+            }
+            return delta_row_kind::unchanged;
+        }
+
+        static void render_delta_alignment_anchors(
+                const delta_report& report,
+                std::span<const delta_render_column> columns,
+                std::string_view diff_indent,
+                std::ostream& os) {
+            if (report.mode == delta_mode::pairwise && columns.size() == 2U) {
+                auto& target = columns[1];
+                if (target.alignment.anchored) {
+                    os << ("{}alignment anchor: {}[{}] <-> {}[{}]\n"_format(
+                            diff_indent,
+                            report.baseline,
+                            target.alignment.baseline_index,
+                            report.target,
+                            target.alignment.target_index));
+                }
+                else {
+                    os << "{}alignment anchor: none (ordinal alignment)\n"_format(diff_indent);
+                }
+                return;
+            }
+
+            os << "{}alignment anchors:"_format(diff_indent);
+            auto printed = false;
+            auto baseline_label = "{}"_format(report.baseline);
+            for (size_t i = 1U; i < columns.size(); ++i) {
+                auto& column = columns[i];
+                if (!column.alignment.anchored) {
+                    continue;
+                }
+                os << " {}[{}] <-> {}[{}]"_format(
+                        baseline_label, column.alignment.baseline_index, column.header, column.alignment.target_index);
+                printed = true;
+            }
+            if (!printed) {
+                os << " none (ordinal alignment)";
+            }
+            os << '\n';
+        }
+
+        static std::string diff_heading(const delta_report& report) {
+            if (report.mode == delta_mode::spectrum) {
+                return "spectrum ({} -> {}, full side-by-side):"_format(report.baseline, report.target);
+            }
+            return "diff ({} -> {}, full side-by-side):"_format(report.baseline, report.target);
+        }
+
+        static void render_delta_side_by_side(
+                const delta_report& report,
+                std::span<const delta_render_column> columns,
+                bool show_color,
+                color_scheme delta_color_scheme_value,
+                std::ostream& os) {
+            if (columns.size() < 2U || !all_delta_levels_successful(columns)) {
+                return;
+            }
+
+            auto palette = resolve_delta_color_palette(delta_color_scheme_value);
+            auto row_colors = std::array{palette.unchanged, palette.modified, palette.removed, palette.inserted};
+            constexpr auto diff_indent = "\t"sv;
+            constexpr size_t row_lead_width = 2U;
+
+            os << diff_heading(report) << '\n';
+            render_delta_alignment_anchors(report, columns, diff_indent, os);
+
+            os << diff_indent
+               << padded_column("  {} lines"_format(columns[0].header), columns[0].width + row_lead_width);
+            for (size_t i = 1U; i < columns.size(); ++i) {
+                os << " | " << padded_column("{} lines"_format(columns[i].header), columns[i].width + row_lead_width);
+            }
+            os << '\n';
+
+            auto baseline_size = static_cast<long long>(columns[0].level->operations.size());
+            auto row_start = 0LL;
+            auto row_end = baseline_size - 1LL;
+
+            for (const auto& column : columns) {
+                auto size = static_cast<long long>(column.level->operations.size());
+                row_start = std::min(row_start, -column.shift);
+                row_end = std::max(row_end, size - 1LL - column.shift);
+            }
+
+            for (auto row = row_start; row <= row_end; ++row) {
+                auto baseline_index = row;
+                auto baseline_has = baseline_index >= 0LL && baseline_index < baseline_size;
+                uint64_t baseline_uid{};
+                if (baseline_has) {
+                    baseline_uid = columns[0].level->operations[static_cast<size_t>(baseline_index)].opcode_uid;
+                }
+
+                std::vector<delta_row_kind> row_kinds(columns.size(), delta_row_kind::unchanged);
+                for (size_t i = 1U; i < columns.size(); ++i) {
+                    auto& column = columns[i];
+                    auto level_size = static_cast<long long>(column.level->operations.size());
+                    auto level_index = row + column.shift;
+                    auto level_has = level_index >= 0LL && level_index < level_size;
+                    uint64_t level_uid{};
+                    if (level_has) {
+                        auto& operation = column.level->operations[static_cast<size_t>(level_index)];
+                        level_uid = operation.opcode_uid;
+                    }
+                    row_kinds[i] = classify_delta_row_kind(baseline_has, level_has, baseline_uid, level_uid);
+                }
+                row_kinds[0] = baseline_has
+                                     ? aggregate_baseline_kind(std::span<const delta_row_kind>{row_kinds}.subspan(1U))
+                                     : delta_row_kind::unchanged;
+
+                os << diff_indent;
+                for (size_t i = 0U; i < columns.size(); ++i) {
+                    if (i > 0U) {
+                        os << " | ";
+                    }
+
+                    auto& column = columns[i];
+                    auto level_size = static_cast<long long>(column.level->operations.size());
+                    auto level_index = row + column.shift;
+                    auto level_has = level_index >= 0LL && level_index < level_size;
+                    std::string summary{};
+                    if (level_has) {
+                        auto& operation = column.level->operations[static_cast<size_t>(level_index)];
+                        summary = summarize_operation(operation);
+                    }
+
+                    auto kind = row_kinds[i];
+                    auto marker = level_has ? delta_row_marker(kind) : '-';
+                    auto text = padded_column(marker_prefixed(summary, marker), column.width + row_lead_width);
+
+                    if (show_color && level_has) {
+                        os << row_colors[static_cast<size_t>(kind)] << text << "\x1b[0m";
+                    }
+                    else {
+                        os << text;
+                    }
+                }
+                os << '\n';
+            }
+        }
+
+        static void render_delta_report_table(
+                const delta_report& report,
+                bool verbose,
+                color_mode color_mode_value,
+                color_scheme delta_color_scheme_value,
+                std::ostream& os) {
+            os << "delta: {}\n"_format(report.success ? "success"sv : "failed"sv);
+            os << "mode: {}\n"_format(report.mode);
+            os << "symbol: {}\n"_format(report.symbol_display);
+            os << "baseline: {}\n"_format(report.baseline);
+            os << "target: {}\n"_format(report.target);
+            os << ("changes: unchanged={} modified={} inserted={} removed={} moved={}\n"_format(
+                    report.counters.unchanged_count,
+                    report.counters.modified_count,
+                    report.counters.inserted_count,
+                    report.counters.removed_count,
+                    report.counters.moved_count));
+            os << "opcode table entries: {}\n"_format(report.opcode_table.size());
+
+            if (!report.quality_flags.empty()) {
+                os << "quality flags:\n";
+                for (auto flag : report.quality_flags) {
+                    os << "  - {}\n"_format(flag);
+                }
+            }
+
+            os << "levels:\n";
+            for (const auto& level : report.levels) {
+                os << ("  {} success={} exit_code={} operations={}\n"_format(
+                        level.level, level.success ? "true"sv : "false"sv, level.exit_code, level.operations.size()));
+
+                auto opcode_counts = summarize_level_opcodes(level.operations);
+                if (!opcode_counts.empty()) {
+                    os << "    opcodes:";
+                    auto preview_count = std::min<size_t>(opcode_counts.size(), 8U);
+                    for (size_t i = 0U; i < preview_count; ++i) {
+                        os << " {}({})"_format(opcode_counts[i].first, opcode_counts[i].second);
+                    }
+                    if (opcode_counts.size() > preview_count) {
+                        os << " ...";
+                    }
+                    os << '\n';
+                }
+
+                if (!level.quality_flags.empty()) {
+                    for (auto flag : level.quality_flags) {
+                        os << "    quality: {}\n"_format(flag);
+                    }
+                }
+            }
+
+            auto levels = select_delta_side_by_side_levels(report);
+            auto render_columns = build_delta_render_columns(levels);
+            auto show_color = should_use_color(color_mode_value);
+            render_delta_side_by_side(report, render_columns, show_color, delta_color_scheme_value, os);
+
+            if (!verbose) {
+                return;
+            }
+
+            if (!report.opcode_table.empty()) {
+                os << "opcode table:\n";
+                for (const auto& entry : report.opcode_table) {
+                    os << "  [{}] {}\n"_format(entry.opcode_uid, entry.opcode);
+                }
+            }
+
+            for (const auto& level : report.levels) {
+                os << "{} operations:\n"_format(level.level);
+                if (level.operations.empty()) {
+                    os << "  <none>\n";
+                }
+                for (const auto& op : level.operations) {
+                    os << ("  {}: uid={} opcode={} triplet={}\n"_format(
+                            op.ordinal, op.opcode_uid, op.opcode, op.triplet));
+                }
+                if (!level.diagnostics_text.empty()) {
+                    os << "diagnostics:\n";
+                    os << level.diagnostics_text;
+                    if (!level.diagnostics_text.ends_with('\n')) {
+                        os << '\n';
+                    }
+                }
+            }
+        }
+
+        static void render_delta_report_json(const delta_report& report, std::ostream& os) {
+            auto payload = make_delta_output_record(report);
+            std::string json{};
+            auto ec = glz::write_json(payload, json);
+            if (ec) {
+                throw std::runtime_error("failed to serialize delta output");
+            }
+            os << json << '\n';
+        }
+
+        static void render_delta_report(
+                const delta_report& report,
+                output_mode mode,
+                bool verbose,
+                color_mode color_mode_value,
+                color_scheme delta_color_scheme_value,
+                std::ostream& os) {
+            if (mode == output_mode::json) {
+                render_delta_report_json(report, os);
+                return;
+            }
+            render_delta_report_table(report, verbose, color_mode_value, delta_color_scheme_value, os);
+        }
+
+        static bool parse_delta_command_args(std::string_view raw_arg, delta_request& delta, std::ostream& err) {
+            auto args = trim_view(raw_arg);
+            if (args.empty()) {
+                return true;
+            }
+
+            std::optional<std::string> symbol{};
+            std::optional<optimization_level> target{};
+            while (!args.empty()) {
+                auto split = args.find_first_of(" \t\r\n");
+                auto token = split == std::string_view::npos ? args : args.substr(0U, split);
+                args = split == std::string_view::npos ? std::string_view{} : trim_view(args.substr(split + 1U));
+                token = trim_view(token);
+                if (token.empty() || token == "@last"sv) {
+                    continue;
+                }
+
+                if (utils::str_case_eq(token, "spectrum"sv)) {
+                    delta.mode = delta_mode::spectrum;
+                    continue;
+                }
+
+                optimization_level parsed_level{};
+                if (try_parse_optimization_level(token, parsed_level)) {
+                    if (target && *target != parsed_level) {
+                        err << "invalid :delta, multiple optimization targets provided\n";
+                        return false;
+                    }
+                    target = parsed_level;
+                    continue;
+                }
+
+                if (symbol) {
+                    err << "invalid :delta, expected at most one symbol token\n";
+                    return false;
+                }
+                symbol = std::string{token};
+            }
+
+            if (target) {
+                delta.target = *target;
+            }
+            delta.symbol = symbol;
+            return true;
+        }
+
+        static bool process_delta_command(
+                std::string_view cmd, startup_config& cfg, repl_state& state, std::ostream& out, std::ostream& err) {
+            auto arg = command_argument(cmd, ":delta"sv);
+            if (!arg) {
+                return false;
+            }
+
+            if (state.decl_cells.empty() && state.exec_cells.empty()) {
+                err << "no stored cells available for delta analysis\n";
+                return true;
+            }
+
+            auto delta = delta_request{};
+            if (!parse_delta_command_args(*arg, delta, err)) {
+                return true;
+            }
+
+            try {
+                auto request = make_analysis_request(cfg, state);
+                auto report = collect_delta_report(request, delta);
+                render_delta_report(report, cfg.output, cfg.verbose, cfg.color, cfg.delta_color_scheme, out);
+            } catch (const std::exception& e) {
+                err << "delta analysis error: " << e.what() << '\n';
+            }
+
+            return true;
+        }
+
         static void render_analysis_result_compact(const analysis_result& result, std::ostream& os) {
             if (result.kind == analysis_kind::diag) {
                 if (result.artifact_text.empty()) {
@@ -1585,6 +2453,8 @@ examples:
             payload.stderr_path = result.stderr_path.string();
             payload.text = result.artifact_text;
             payload.clang_command = result.command;
+            payload.opcode_table = result.opcode_table;
+            payload.operations = result.operations;
 
             std::string json{};
             auto ec = glz::write_json(payload, json);
@@ -1752,6 +2622,9 @@ examples:
                 }
                 return true;
             }
+            if (process_delta_command(cmd, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
             if (process_analysis_command(cmd, ":asm"sv, analysis_kind::asm_text, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
@@ -1916,6 +2789,7 @@ examples:
         std::string opt_arg{"{}"_format(cfg.opt_level)};
         std::string output_arg{"{}"_format(cfg.output)};
         std::string color_arg{"{}"_format(cfg.color)};
+        std::string color_scheme_arg{"{}"_format(cfg.delta_color_scheme)};
         std::string target_arg{};
         std::string cpu_arg{};
         std::string mca_cpu_arg{};
@@ -1945,6 +2819,7 @@ examples:
         app.add_flag("--no-banner", no_banner, "Disable startup banner");
         app.add_option("--output", output_arg, "Output mode: table|json");
         app.add_option("--color", color_arg, "Color mode: auto|always|never");
+        app.add_option("--color-scheme", color_scheme_arg, "Color scheme: classic|vaporwave");
         app.add_flag("--no-color", "Force color mode to never");
         app.add_flag("--print-config", cfg.print_config, "Print resolved config and exit");
         app.add_flag("--quiet", cfg.quiet, "Suppress non-essential output");
@@ -1975,6 +2850,10 @@ examples:
         }
         if (!try_parse_color_mode(color_arg, cfg.color)) {
             std::cerr << "invalid --color value: " << color_arg << " (expected auto|always|never)\n";
+            return std::optional<int>{2};
+        }
+        if (!try_parse_color_scheme(color_scheme_arg, cfg.delta_color_scheme)) {
+            std::cerr << "invalid --color-scheme value: " << color_scheme_arg << " (expected classic|vaporwave)\n";
             return std::optional<int>{2};
         }
         if (!detail::try_parse_bool(banner_arg, cfg.banner_enabled)) {

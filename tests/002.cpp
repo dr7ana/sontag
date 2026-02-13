@@ -36,7 +36,9 @@ namespace sontag::test {
                 "--output",
                 "json",
                 "--color",
-                "never"};
+                "never",
+                "--color-scheme",
+                "classic"};
         auto argv = detail::to_argv(args);
 
         auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);
@@ -58,6 +60,7 @@ namespace sontag::test {
         CHECK_FALSE(cfg.banner_enabled);
         CHECK(cfg.output == output_mode::json);
         CHECK(cfg.color == color_mode::never);
+        CHECK(cfg.delta_color_scheme == color_scheme::classic);
     }
 
     TEST_CASE("002: parse_cli rejects invalid startup combos", "[002][cli]") {
@@ -84,6 +87,16 @@ namespace sontag::test {
         SECTION("invalid banner value is rejected") {
             startup_config cfg{};
             std::vector<std::string> args{"sontag", "--banner", "maybe"};
+            auto argv = detail::to_argv(args);
+
+            auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);
+            REQUIRE(result);
+            CHECK(*result == 2);
+        }
+
+        SECTION("invalid color scheme value is rejected") {
+            startup_config cfg{};
+            std::vector<std::string> args{"sontag", "--color-scheme", "synthwave"};
             auto argv = detail::to_argv(args);
 
             auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);

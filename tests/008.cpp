@@ -70,6 +70,8 @@ namespace sontag::test {
         CHECK(json_text.find("\"source\"") != std::string::npos);
         CHECK(json_text.find("\"ir\"") != std::string::npos);
         CHECK(json_text.find("\"asm\"") != std::string::npos);
+        CHECK(json_text.find("\"opcode_table\"") != std::string::npos);
+        CHECK(json_text.find("\"operations\"") != std::string::npos);
     }
 
     TEST_CASE("008: inspect mca summary parses deterministic wrapper output", "[008][inspect][mca]") {
@@ -113,6 +115,8 @@ namespace sontag::test {
         CHECK(json_text.find("\"iterations\":100") != std::string::npos);
         CHECK(json_text.find("\"instructions\":200") != std::string::npos);
         CHECK(json_text.find("\"ipc\":3.51") != std::string::npos);
+        CHECK(json_text.find("\"opcode_table\"") != std::string::npos);
+        CHECK(json_text.find("\"operations\"") != std::string::npos);
     }
 
     TEST_CASE("008: inspect mca heatmap renders resource rows", "[008][inspect][mca]") {
@@ -154,6 +158,8 @@ namespace sontag::test {
         CHECK(json_text.find("\"schema_version\":1") != std::string::npos);
         CHECK(json_text.find("\"label\":\"ALU\"") != std::string::npos);
         CHECK(json_text.find("\"label\":\"LSU\"") != std::string::npos);
+        CHECK(json_text.find("\"opcode_table\"") != std::string::npos);
+        CHECK(json_text.find("\"operations\"") != std::string::npos);
     }
 
     TEST_CASE("008: graph defuse emits dot graph artifact", "[008][graph][defuse]") {

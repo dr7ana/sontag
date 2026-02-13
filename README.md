@@ -101,6 +101,7 @@ sontag >
 - LLVM IR output (`:ir`)
 - compiler diagnostics output (`:diag`)
 - microarchitecture analysis via `llvm-mca` (`:mca`)
+- optimization delta analysis (`:delta`) with pairwise `O0 -> target` and spectrum `O0..target` opcode-aligned operation comparison (default target: `O2`)
 - graph generation (`:graph <subcommand>`)
   - control-flow graphs (`:graph cfg`)
   - function call graphs (`:graph call`)
@@ -138,11 +139,106 @@ sontag >
 - `:diag [symbol|@last]` runs compile diagnostics on the current snapshot and prints compiler errors/warnings (optionally filtered by symbol).
 - `:mca [symbol|@last]` compiles to assembly, runs microarchitecture analysis, and prints throughput/latency/resource-pressure analysis text.
 - `:mca` does not operate on data symbols (for example `[D]`/`[B]` entries from `:symbols`).
+- `:delta [spectrum] [target_opt] [symbol|@last]` runs either pairwise (`O0 -> target_opt`) or spectrum (`O0..target_opt`) optimization comparison, reports opcode UID mapping, and prints per-level operation streams.
 - `:inspect asm [symbol|@last]` emits structured JSON containing aligned source/IR/asm line records for downstream tooling.
 - `:inspect mca [summary|heatmap] [symbol|@last]` emits structured JSON from `llvm-mca` output and prints a compact terminal summary.
 - `:graph cfg [symbol|@last]` compiles to LLVM IR, builds a function-scoped control-flow graph, and emits graph summary + DOT artifact (with optional rendered image).
 - `:graph call [symbol|@last]` compiles to LLVM IR, builds a root-scoped function call graph, and emits graph summary + DOT artifact (with optional rendered image).
 - `:graph defuse [symbol|@last]` compiles to LLVM IR, builds a function-scoped def-use graph, and emits graph summary + DOT artifact (with optional rendered image).
+
+## `:delta`
+
+Use `:delta` for optimization-level instruction stream comparison on the current snapshot.
+
+Modes:
+- `:delta [target_opt] [symbol|@last]`: pairwise mode (`O0 -> target_opt`), default target is `O2`.
+- `:delta spectrum [target_opt] [symbol|@last]`: spectrum mode (`O0..target_opt`), default upper bound is `O2`.
+
+Output summary fields:
+- `mode`: `pairwise` or `spectrum`
+- `baseline` / `target`: optimization range endpoints
+- `changes`: unchanged/modified/inserted/removed/moved counters
+- `levels`: per-level success, exit code, operation count, opcode counts
+
+Side-by-side row markers:
+- `=` unchanged opcode UID relative to baseline
+- `*` modified opcode UID relative to baseline
+- `-` line absent at that level for the aligned row
+- `+` line inserted at that level beyond baseline coverage
+
+Alignment behavior:
+- pairwise: first matching triplet anchor between baseline and target
+- spectrum: earliest shared baseline triplet across all compared levels (by average target index)
+
+### Examples:
+
+#### File:
+```c++
+// ./temp/objdump_loop.cpp
+
+int value = 64;
+int values[4];
+
+constexpr int add(int a, int b) {
+    return a + b;
+}
+
+constexpr int fold(int a, int b, int c) {
+    if (--c > 0) {
+        return fold(a, add(a, b), c);
+    }
+    return add(a, b);
+}
+
+int __sontag_main() {
+    auto double_value = value * 2;
+    values[0] = value;
+    values[1] = double_value;
+    values[2] = add(values[0], values[1]);
+    values[3] = fold(values[0], values[1], 3);
+
+    return 0;
+}
+```
+
+#### Input:
+```bash
+sontag > :file ./temp/objdump_loop.cpp
+loaded file /home/dan/dev/sontag/build/temp/objdump_loop.cpp (decl_cells=1, exec_cells=1) (state: valid)
+sontag > :delta spectrum
+delta: success
+mode: spectrum
+symbol: __sontag_main()
+baseline: O0
+target: O2
+changes: unchanged=3 modified=7 inserted=0 removed=3 moved=0
+opcode table entries: 8
+levels:
+  O0 success=true exit_code=0 operations=13
+    opcodes: push(1) mov(9) sub(1) shl(1) call(1)
+  O1 success=true exit_code=0 operations=9
+    opcodes: push(1) mov(5) lea(2) call(1)
+  O2 success=true exit_code=0 operations=10
+    opcodes: mov(5) lea(3) xor(1) ret(1)
+spectrum (O0 -> O2, full side-by-side):
+        alignment anchors: O0[7] <-> O1[6] O0[7] <-> O2[2]
+          O0 lines                          | O1 lines                        | O2 lines                       
+        - [0] 1:push rbp                    | -                               | -                              
+        - [1] 2:mov rbp, rsp                | * [0] 1:push rax                | -                              
+        - [2] 3:sub rsp, 0x10               | * [1] 2:mov edi, dword          | -                              
+        - [3] 2:mov eax, dword              | * [2] 6:lea esi, [rdi + rdi]    | -                              
+        - [4] 4:shl eax                     | * [3] 2:mov dword, edi          | -                              
+        = [5] 2:mov dword [rbp - 0x4], eax  | = [4] 2:mov dword, esi          | = [0] 2:mov eax, dword         
+        * [6] 2:mov eax, dword              | * [5] 6:lea eax, [rdi + 2*rdi]  | * [1] 6:lea ecx, [rax + rax]   
+        = [7] 2:mov dword, eax              | = [6] 2:mov dword, eax          | = [2] 2:mov dword, eax         
+        = [8] 2:mov eax, dword [rbp - 0x4]  | = [7] 2:mov edx, 0x3            | = [3] 2:mov dword, ecx         
+        * [9] 2:mov dword, eax              | * [8] 5:call <l0>               | * [4] 6:lea ecx, [rax + 2*rax] 
+        - [10] 2:mov edi, dword             | -                               | = [5] 2:mov dword, ecx         
+        - [11] 2:mov esi, dword             | -                               | * [6] 6:lea eax, [rax + 4*rax] 
+        - [12] 5:call <l0>                  | -                               | * [7] 2:mov dword, eax         
+        -                                   | -                               | + [8] 7:xor eax, eax           
+        -                                   | -                               | + [9] 8:ret
+```
 
 ## `:graph`
 
@@ -198,3 +294,4 @@ Examples:
 Notes:
 - `:inspect` commands emit JSON artifacts under `artifacts/inspect/...` and print a compact terminal summary.
 - `:inspect` commands do not generate rendered image files.
+- `color_scheme` config options currently supported are `classic` (default) and `vaporwave`.

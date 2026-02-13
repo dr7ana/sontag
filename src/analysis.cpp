@@ -6,6 +6,9 @@
 #include <glaze/glaze.hpp>
 
 #include <cxxabi.h>
+
+#include "internal/delta.hpp"
+#include "internal/opcode.hpp"
 extern "C" {
 #include <fcntl.h>
 #include <sys/wait.h>
@@ -13,12 +16,14 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -44,6 +49,8 @@ namespace sontag::detail {
         std::vector<inspect_line_record> source{};
         std::vector<inspect_line_record> ir{};
         std::vector<inspect_line_record> asm_lines{};
+        std::vector<analysis_opcode_entry> opcode_table{};
+        std::vector<analysis_operation_entry> operations{};
     };
 
     struct inspect_mca_summary_payload {
@@ -60,6 +67,8 @@ namespace sontag::detail {
         double ipc{};
         double block_rthroughput{};
         std::vector<std::string> warnings{};
+        std::vector<analysis_opcode_entry> opcode_table{};
+        std::vector<analysis_operation_entry> operations{};
     };
 
     struct inspect_mca_heatmap_row {
@@ -73,11 +82,26 @@ namespace sontag::detail {
         std::string symbol{};
         std::string symbol_display{};
         std::vector<inspect_mca_heatmap_row> rows{};
+        std::vector<analysis_opcode_entry> opcode_table{};
+        std::vector<analysis_operation_entry> operations{};
     };
 
 }  // namespace sontag::detail
 
 namespace glz {
+
+    template <>
+    struct meta<sontag::analysis_opcode_entry> {
+        using T = sontag::analysis_opcode_entry;
+        static constexpr auto value = object("opcode_uid", &T::opcode_uid, "opcode", &T::opcode);
+    };
+
+    template <>
+    struct meta<sontag::analysis_operation_entry> {
+        using T = sontag::analysis_operation_entry;
+        static constexpr auto value = object(
+                "ordinal", &T::ordinal, "opcode_uid", &T::opcode_uid, "opcode", &T::opcode, "stream", &T::stream);
+    };
 
     template <>
     struct meta<sontag::detail::inspect_line_record> {
@@ -100,7 +124,11 @@ namespace glz {
                        "ir",
                        &T::ir,
                        "asm",
-                       &T::asm_lines);
+                       &T::asm_lines,
+                       "opcode_table",
+                       &T::opcode_table,
+                       "operations",
+                       &T::operations);
     };
 
     template <>
@@ -132,7 +160,11 @@ namespace glz {
                        "block_rthroughput",
                        &T::block_rthroughput,
                        "warnings",
-                       &T::warnings);
+                       &T::warnings,
+                       "opcode_table",
+                       &T::opcode_table,
+                       "operations",
+                       &T::operations);
     };
 
     template <>
@@ -152,7 +184,11 @@ namespace glz {
                        "symbol_display",
                        &T::symbol_display,
                        "rows",
-                       &T::rows);
+                       &T::rows,
+                       "opcode_table",
+                       &T::opcode_table,
+                       "operations",
+                       &T::operations);
     };
 
 }  // namespace glz
@@ -1228,6 +1264,50 @@ namespace sontag {
             return extracted.str();
         }
 
+        static std::optional<std::string_view> parse_objdump_symbol_header_name(std::string_view line) {
+            auto trimmed = trim_ascii(line);
+            if (!trimmed.ends_with(">:")) {
+                return std::nullopt;
+            }
+            auto left = trimmed.find('<');
+            if (left == std::string_view::npos || left + 1U >= trimmed.size()) {
+                return std::nullopt;
+            }
+            auto right = trimmed.rfind(">:");
+            if (right == std::string_view::npos || right <= left + 1U) {
+                return std::nullopt;
+            }
+            return trimmed.substr(left + 1U, (right - left) - 1U);
+        }
+
+        static std::string extract_objdump_for_symbol(
+                const std::string& dump_text, std::string_view mangled_symbol, std::string_view display_symbol) {
+            auto lines = split_lines(dump_text);
+            std::ostringstream extracted{};
+            bool in_symbol = false;
+
+            for (const auto& line : lines) {
+                auto header_name = parse_objdump_symbol_header_name(line);
+                if (header_name) {
+                    if (in_symbol) {
+                        break;
+                    }
+                    if (*header_name == mangled_symbol || *header_name == display_symbol) {
+                        in_symbol = true;
+                        extracted << line << '\n';
+                        continue;
+                    }
+                }
+
+                if (!in_symbol) {
+                    continue;
+                }
+                extracted << line << '\n';
+            }
+
+            return extracted.str();
+        }
+
         static std::string prepare_mca_symbol_input(std::string_view extracted_asm, std::string_view asm_syntax) {
             std::string prepared{};
             prepared.reserve(extracted_asm.size() + 64U);
@@ -1309,7 +1389,7 @@ namespace sontag {
             if (colon == std::string_view::npos || colon + 1U >= line.size()) {
                 return std::nullopt;
             }
-            auto value = std::string{trim_ascii(line.substr(colon + 1U))};
+            std::string value{trim_ascii(line.substr(colon + 1U))};
             if (value.empty()) {
                 return std::nullopt;
             }
@@ -1322,7 +1402,7 @@ namespace sontag {
         }
 
         static std::optional<double> parse_numeric_token(std::string_view token) {
-            auto value = std::string{trim_ascii(token)};
+            std::string value{trim_ascii(token)};
             if (value.empty()) {
                 return std::nullopt;
             }
@@ -1501,6 +1581,260 @@ namespace sontag {
             args.emplace_back(arg_tokens::output_path);
             args.push_back(output_path.string());
             return args;
+        }
+
+        static std::vector<analysis_opcode_entry> to_analysis_opcode_entries(
+                const std::vector<opcode::opcode_entry>& entries) {
+            std::vector<analysis_opcode_entry> opcode_table{};
+            opcode_table.reserve(entries.size());
+            for (const auto& entry : entries) {
+                opcode_table.push_back(analysis_opcode_entry{.opcode_uid = entry.uid, .opcode = entry.mnemonic});
+            }
+            return opcode_table;
+        }
+
+        static std::vector<analysis_operation_entry> to_analysis_operation_entries(
+                const std::vector<opcode::mapped_operation_stream>& streams) {
+            std::vector<analysis_operation_entry> operations{};
+            size_t total_size = 0U;
+            for (const auto& stream : streams) {
+                total_size += stream.operations.size();
+            }
+            operations.reserve(total_size);
+
+            for (const auto& stream : streams) {
+                for (const auto& op : stream.operations) {
+                    operations.push_back(
+                            analysis_operation_entry{
+                                    .ordinal = static_cast<uint64_t>(op.ordinal),
+                                    .opcode_uid = op.opcode,
+                                    .opcode = op.mnemonic,
+                                    .stream = stream.name});
+                }
+            }
+            return operations;
+        }
+
+        static std::vector<delta_operation> to_delta_operations(const std::vector<opcode::operation_node>& operations) {
+            std::vector<delta_operation> normalized{};
+            normalized.reserve(operations.size());
+            for (const auto& operation : operations) {
+                normalized.push_back(
+                        delta_operation{
+                                .ordinal = operation.ordinal,
+                                .opcode_uid = operation.opcode,
+                                .opcode = operation.mnemonic,
+                                .triplet = operation.signature.empty() ? operation.mnemonic : operation.signature});
+            }
+            return normalized;
+        }
+
+        static opcode::mapped_operation_set build_opcode_mapping(
+                std::span<const opcode::operation_stream_input> streams) {
+            return opcode::map_operation_streams(streams);
+        }
+
+        static void attach_opcode_mapping(
+                analysis_result& result, std::span<const opcode::operation_stream_input> streams) {
+            auto mapped = build_opcode_mapping(streams);
+            result.opcode_table = to_analysis_opcode_entries(mapped.opcode_table);
+            result.operations = to_analysis_operation_entries(mapped.streams);
+        }
+
+        struct delta_symbol_resolution {
+            std::optional<std::string> mangled{};
+            std::string display{};
+            std::vector<delta_quality_flag> quality_flags{};
+        };
+
+        static std::vector<optimization_level> make_delta_pair_levels(optimization_level target) {
+            if (target == optimization_level::o0) {
+                return {optimization_level::o0, optimization_level::o2};
+            }
+            return {optimization_level::o0, target};
+        }
+
+        static std::vector<optimization_level> make_delta_spectrum_levels(optimization_level upper_bound) {
+            std::vector<optimization_level> levels{optimization_level::o0};
+            switch (upper_bound) {
+                case optimization_level::o0:
+                    levels.push_back(optimization_level::o1);
+                    levels.push_back(optimization_level::o2);
+                    return levels;
+                case optimization_level::o1:
+                    levels.push_back(optimization_level::o1);
+                    return levels;
+                case optimization_level::o2:
+                    levels.push_back(optimization_level::o1);
+                    levels.push_back(optimization_level::o2);
+                    return levels;
+                case optimization_level::o3:
+                    levels.push_back(optimization_level::o1);
+                    levels.push_back(optimization_level::o2);
+                    levels.push_back(optimization_level::o3);
+                    return levels;
+                case optimization_level::ofast:
+                    levels.push_back(optimization_level::o1);
+                    levels.push_back(optimization_level::o2);
+                    levels.push_back(optimization_level::o3);
+                    levels.push_back(optimization_level::ofast);
+                    return levels;
+                case optimization_level::oz:
+                    levels.push_back(optimization_level::o1);
+                    levels.push_back(optimization_level::o2);
+                    levels.push_back(optimization_level::oz);
+                    return levels;
+            }
+            return levels;
+        }
+
+        static std::vector<optimization_level> make_delta_levels(const delta_request& delta) {
+            switch (delta.mode) {
+                case delta_mode::pairwise:
+                    return make_delta_pair_levels(delta.target);
+                case delta_mode::spectrum:
+                    return make_delta_spectrum_levels(delta.target);
+            }
+            return make_delta_pair_levels(delta.target);
+        }
+
+        static void append_unique(std::vector<delta_quality_flag>& quality_flags, delta_quality_flag quality_flag) {
+            if (std::find(quality_flags.begin(), quality_flags.end(), quality_flag) != quality_flags.end()) {
+                return;
+            }
+            quality_flags.push_back(quality_flag);
+        }
+
+        static bool is_function_symbol_kind(char kind) {
+            auto lower = static_cast<char>(std::tolower(static_cast<unsigned char>(kind)));
+            return lower == 't' || lower == 'w';
+        }
+
+        static delta_symbol_resolution resolve_delta_symbol(
+                const analysis_request& request, const std::optional<std::string>& symbol) {
+            auto resolution = delta_symbol_resolution{};
+            auto requested_symbol = symbol.value_or("__sontag_main");
+            resolution.display = requested_symbol;
+
+            auto symbols = try_collect_defined_symbols(request);
+            if (!symbols) {
+                append_unique(resolution.quality_flags, delta_quality_flag::symbol_resolution_failed);
+                return resolution;
+            }
+
+            auto assign_from_mangled = [&](std::string_view mangled) {
+                resolution.mangled = std::string{mangled};
+                for (const auto& symbol : *symbols) {
+                    if (symbol.mangled == mangled) {
+                        resolution.display = symbol.demangled;
+                        return;
+                    }
+                }
+                resolution.display = demangle_symbol_name(mangled);
+            };
+
+            if (auto resolved_requested = resolve_symbol_name(*symbols, requested_symbol)) {
+                assign_from_mangled(*resolved_requested);
+                return resolution;
+            }
+
+            if (!symbol) {
+                if (auto resolved_default = resolve_symbol_name(*symbols, "__sontag_main"sv)) {
+                    assign_from_mangled(*resolved_default);
+                    return resolution;
+                }
+                for (const auto& symbol : *symbols) {
+                    if (!is_function_symbol_kind(symbol.kind)) {
+                        continue;
+                    }
+                    assign_from_mangled(symbol.mangled);
+                    return resolution;
+                }
+            }
+
+            append_unique(resolution.quality_flags, delta_quality_flag::symbol_resolution_failed);
+            return resolution;
+        }
+
+        static void append_quality_from_exception(
+                std::string_view error_text,
+                std::vector<delta_quality_flag>& report_quality_flags,
+                std::vector<delta_quality_flag>& level_quality_flags) {
+            auto append_both = [&](delta_quality_flag quality_flag) {
+                append_unique(report_quality_flags, quality_flag);
+                append_unique(level_quality_flags, quality_flag);
+            };
+
+            if (contains_token(error_text, "unable to resolve symbol"sv)) {
+                append_both(delta_quality_flag::symbol_resolution_failed);
+                return;
+            }
+            if (contains_token(error_text, "symbol not found in artifact"sv)) {
+                append_both(delta_quality_flag::symbol_extract_failed);
+                return;
+            }
+            append_both(delta_quality_flag::tool_execution_failed);
+        }
+
+        static const delta_level_record* find_level(
+                const std::vector<delta_level_record>& levels, optimization_level wanted_level) {
+            for (const auto& level : levels) {
+                if (level.level == wanted_level) {
+                    return &level;
+                }
+            }
+            return nullptr;
+        }
+
+        static bool level_success(const std::vector<delta_level_record>& levels, optimization_level wanted_level) {
+            for (const auto& level : levels) {
+                if (level.level == wanted_level) {
+                    return level.success;
+                }
+            }
+            return false;
+        }
+
+        static bool all_levels_success(
+                const std::vector<delta_level_record>& levels, std::span<const optimization_level> wanted_levels) {
+            for (auto level : wanted_levels) {
+                if (!level_success(levels, level)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static delta_change_counters compute_pairwise_counters(
+                const std::vector<delta_level_record>& levels, optimization_level baseline, optimization_level target) {
+            auto counters = delta_change_counters{};
+
+            auto* baseline_level = find_level(levels, baseline);
+            auto* target_level = find_level(levels, target);
+            if (baseline_level == nullptr || target_level == nullptr) {
+                return counters;
+            }
+            if (!baseline_level->success || !target_level->success) {
+                return counters;
+            }
+
+            auto overlap = std::min(baseline_level->operations.size(), target_level->operations.size());
+            for (size_t i = 0U; i < overlap; ++i) {
+                if (baseline_level->operations[i].opcode_uid == target_level->operations[i].opcode_uid) {
+                    ++counters.unchanged_count;
+                }
+                else {
+                    ++counters.modified_count;
+                }
+            }
+
+            if (baseline_level->operations.size() > overlap) {
+                counters.removed_count = baseline_level->operations.size() - overlap;
+            }
+            if (target_level->operations.size() > overlap) {
+                counters.inserted_count = target_level->operations.size() - overlap;
+            }
+            return counters;
         }
 
     }  // namespace detail
@@ -1843,13 +2177,17 @@ namespace sontag {
 
             auto symbol_name = resolved_symbol ? *resolved_symbol : std::string{"<all>"};
             auto symbol_display = detail::resolve_symbol_display_name(symbol_name, symbol_display_names);
+            auto inspect_streams = std::array{opcode::operation_stream_input{.name = "asm", .disassembly = asm_text}};
+            auto opcode_mapping = detail::build_opcode_mapping(inspect_streams);
 
             auto payload = detail::inspect_asm_map_payload{
                     .symbol = symbol_name,
                     .symbol_display = symbol_display,
                     .source = detail::make_line_records(source_text),
                     .ir = detail::make_line_records(ir_text),
-                    .asm_lines = detail::make_line_records(asm_text)};
+                    .asm_lines = detail::make_line_records(asm_text),
+                    .opcode_table = detail::to_analysis_opcode_entries(opcode_mapping.opcode_table),
+                    .operations = detail::to_analysis_operation_entries(opcode_mapping.streams)};
             auto payload_json = detail::serialize_json_payload(payload);
             detail::write_text_file(artifact_path, payload_json);
 
@@ -1900,6 +2238,11 @@ namespace sontag {
             }
 
             auto symbol_display = detail::resolve_symbol_display_name(symbol_name, symbol_display_names);
+            auto mca_input_path = mca_result.artifact_path;
+            mca_input_path.replace_extension(".input.s");
+            auto mca_input_text = detail::read_text_file(mca_input_path);
+            auto mca_streams = std::array{opcode::operation_stream_input{.name = "asm", .disassembly = mca_input_text}};
+            auto opcode_mapping = detail::build_opcode_mapping(mca_streams);
 
             std::string payload_json{};
             std::string artifact_summary{};
@@ -1907,7 +2250,9 @@ namespace sontag {
                 auto payload = detail::inspect_mca_summary_payload{
                         .symbol = symbol_name,
                         .symbol_display = symbol_display,
-                        .source_path = mca_result.source_path.string()};
+                        .source_path = mca_result.source_path.string(),
+                        .opcode_table = detail::to_analysis_opcode_entries(opcode_mapping.opcode_table),
+                        .operations = detail::to_analysis_operation_entries(opcode_mapping.streams)};
                 detail::parse_mca_summary(mca_result.artifact_text, payload);
                 payload.warnings = detail::split_lines(mca_result.diagnostics_text);
                 payload_json = detail::serialize_json_payload(payload);
@@ -1933,7 +2278,9 @@ namespace sontag {
                 auto payload = detail::inspect_mca_heatmap_payload{
                         .symbol = symbol_name,
                         .symbol_display = symbol_display,
-                        .rows = detail::parse_mca_heatmap_rows(mca_result.artifact_text)};
+                        .rows = detail::parse_mca_heatmap_rows(mca_result.artifact_text),
+                        .opcode_table = detail::to_analysis_opcode_entries(opcode_mapping.opcode_table),
+                        .operations = detail::to_analysis_operation_entries(opcode_mapping.streams)};
                 payload_json = detail::serialize_json_payload(payload);
 
                 std::ostringstream summary{};
@@ -2033,6 +2380,11 @@ namespace sontag {
             result.command = std::move(mca_command);
             result.artifact_text = std::move(stdout_text);
             result.diagnostics_text = std::move(stderr_text);
+            if (result.success) {
+                auto mca_streams = std::array{
+                        opcode::operation_stream_input{.name = "asm", .disassembly = detail::read_text_file(asm_path)}};
+                detail::attach_opcode_mapping(result, mca_streams);
+            }
             return result;
         }
 
@@ -2104,6 +2456,11 @@ namespace sontag {
             result.command = std::move(objdump_command);
             result.artifact_text = std::move(stdout_text);
             result.diagnostics_text = std::move(stderr_text);
+            if (result.success) {
+                auto dump_streams =
+                        std::array{opcode::operation_stream_input{.name = "asm", .disassembly = result.artifact_text}};
+                detail::attach_opcode_mapping(result, dump_streams);
+            }
             return result;
         }
 
@@ -2201,6 +2558,111 @@ namespace sontag {
             throw std::runtime_error("failed to collect symbols from current snapshot");
         }
         return *symbols;
+    }
+
+    delta_report collect_delta_report(
+            const analysis_request& request, std::optional<std::string> symbol, optimization_level target) {
+        auto delta = delta_request{.mode = delta_mode::pairwise, .symbol = symbol, .target = target};
+        return collect_delta_report(request, delta);
+    }
+
+    delta_report collect_delta_report(const analysis_request& request, const delta_request& delta) {
+        if (request.decl_cells.empty() && request.exec_cells.empty()) {
+            throw std::runtime_error("delta collection requires at least one stored cell");
+        }
+
+        auto report = delta_report{};
+        report.mode = delta.mode;
+        report.baseline = optimization_level::o0;
+        report.target = delta.target;
+
+        auto symbol_resolution = detail::resolve_delta_symbol(request, delta.symbol);
+        report.symbol = symbol_resolution.mangled.value_or(delta.symbol.value_or("__sontag_main"));
+        report.symbol_display = symbol_resolution.display.empty() ? report.symbol : symbol_resolution.display;
+        report.quality_flags = symbol_resolution.quality_flags;
+
+        auto requested_levels = detail::make_delta_levels(delta);
+        std::vector<size_t> mapped_level_indices{};
+        std::vector<std::string> mapped_disassembly{};
+
+        for (auto level : requested_levels) {
+            auto level_record = delta_level_record{.level = level};
+
+            auto level_request = request;
+            level_request.opt_level = level;
+            level_request.symbol = std::nullopt;
+
+            try {
+                auto dump_result = run_analysis(level_request, analysis_kind::dump);
+
+                level_record.success = dump_result.success;
+                level_record.exit_code = dump_result.exit_code;
+                level_record.artifact_path = dump_result.artifact_path;
+                level_record.diagnostics_text = dump_result.diagnostics_text;
+
+                if (!dump_result.success) {
+                    auto quality_flag = dump_result.exit_code == 127 ? delta_quality_flag::tool_execution_failed
+                                                                     : delta_quality_flag::compile_failed;
+                    detail::append_unique(level_record.quality_flags, quality_flag);
+                    detail::append_unique(report.quality_flags, quality_flag);
+                }
+                else {
+                    auto extracted = symbol_resolution.mangled ? detail::extract_objdump_for_symbol(
+                                                                         dump_result.artifact_text,
+                                                                         *symbol_resolution.mangled,
+                                                                         symbol_resolution.display)
+                                                               : std::string{};
+                    if (symbol_resolution.mangled && extracted.empty()) {
+                        detail::append_unique(level_record.quality_flags, delta_quality_flag::symbol_extract_failed);
+                        detail::append_unique(report.quality_flags, delta_quality_flag::symbol_extract_failed);
+                    }
+                    else {
+                        if (!extracted.empty()) {
+                            dump_result.artifact_text = std::move(extracted);
+                        }
+                        mapped_level_indices.push_back(report.levels.size());
+                        mapped_disassembly.push_back(std::move(dump_result.artifact_text));
+                    }
+                }
+            } catch (const std::exception& e) {
+                level_record.success = false;
+                level_record.exit_code = -1;
+                level_record.diagnostics_text = e.what();
+                detail::append_quality_from_exception(e.what(), report.quality_flags, level_record.quality_flags);
+            }
+
+            report.levels.push_back(std::move(level_record));
+        }
+
+        if (!mapped_disassembly.empty()) {
+            std::vector<opcode::operation_stream_input> streams{};
+            streams.reserve(mapped_disassembly.size());
+            for (const auto& disassembly : mapped_disassembly) {
+                streams.push_back(opcode::operation_stream_input{.name = "dump", .disassembly = disassembly});
+            }
+
+            auto mapped = detail::build_opcode_mapping(streams);
+            auto mapped_levels = std::min(mapped_level_indices.size(), mapped.streams.size());
+            for (size_t i = 0U; i < mapped_levels; ++i) {
+                auto& level_record = report.levels[mapped_level_indices[i]];
+                level_record.operations = detail::to_delta_operations(mapped.streams[i].operations);
+                if (level_record.operations.empty()) {
+                    detail::append_unique(level_record.quality_flags, delta_quality_flag::empty_operation_stream);
+                    detail::append_unique(report.quality_flags, delta_quality_flag::empty_operation_stream);
+                }
+            }
+
+            report.opcode_table = {};
+            report.opcode_table.reserve(mapped.opcode_table.size());
+            for (const auto& entry : mapped.opcode_table) {
+                report.opcode_table.push_back(delta_opcode_entry{.opcode_uid = entry.uid, .opcode = entry.mnemonic});
+            }
+        }
+
+        report.success = detail::all_levels_success(report.levels, requested_levels);
+        report.counters = detail::compute_pairwise_counters(report.levels, report.baseline, report.target);
+
+        return report;
     }
 
     std::string synthesize_source(const analysis_request& request) {
