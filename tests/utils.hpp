@@ -6,6 +6,7 @@
 #include <glaze/glaze.hpp>
 
 #include "../src/internal/delta.hpp"
+#include "../src/internal/metrics.hpp"
 #include "../src/internal/opcode.hpp"
 
 extern "C" {
