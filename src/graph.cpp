@@ -672,18 +672,9 @@ namespace sontag::graph {
             append_dot_escaped(label, block.id);
             label.append("\\l");
 
-            size_t max_lines = 12U;
-            size_t shown = 0U;
             for (const auto& instruction : block.instructions) {
-                if (shown >= max_lines) {
-                    break;
-                }
                 append_dot_escaped(label, instruction);
                 label.append("\\l");
-                ++shown;
-            }
-            if (block.instructions.size() > shown) {
-                label.append("...\\l");
             }
             return label;
         }
