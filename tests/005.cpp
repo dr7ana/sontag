@@ -43,8 +43,18 @@ namespace sontag::test { namespace detail {
         std::vector<snapshot_record> snapshots{};
     };
 
+    enum class cell_kind { declarative, executable };
+
+    struct cell_record {
+        uint64_t cell_id{};
+        cell_kind kind{cell_kind::executable};
+        std::string text{};
+    };
+
     struct persisted_cells {
         int schema_version{1};
+        uint64_t next_cell_id{1U};
+        std::vector<cell_record> cells{};
         std::vector<std::string> decl_cells{};
         std::vector<std::string> exec_cells{};
     };
@@ -74,7 +84,7 @@ namespace sontag::test { namespace detail {
         auto text = ss.str();
 
         T value{};
-        auto ec = glz::read_json(value, text);
+        auto ec = glz::read<glz::opts{.error_on_unknown_keys = false}>(value, text);
         REQUIRE_FALSE(ec);
         return value;
     }
@@ -215,10 +225,25 @@ namespace glz {
     };
 
     template <>
+    struct meta<sontag::test::detail::cell_record> {
+        using T = sontag::test::detail::cell_record;
+        static constexpr auto value = object("cell_id", &T::cell_id, "kind", &T::kind, "text", &T::text);
+    };
+
+    template <>
     struct meta<sontag::test::detail::persisted_cells> {
         using T = sontag::test::detail::persisted_cells;
-        static constexpr auto value = object(
-                "schema_version", &T::schema_version, "decl_cells", &T::decl_cells, "exec_cells", &T::exec_cells);
+        static constexpr auto value =
+                object("schema_version",
+                       &T::schema_version,
+                       "next_cell_id",
+                       &T::next_cell_id,
+                       "cells",
+                       &T::cells,
+                       "decl_cells",
+                       &T::decl_cells,
+                       "exec_cells",
+                       &T::exec_cells);
     };
 
     template <>
@@ -574,6 +599,70 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells[0] == "int x = base;");
     }
 
+    TEST_CASE("005: clear last removes most recently added declarative cell", "[005][session][clear_last]") {
+        detail::temp_dir temp{"sontag_clear_last_decl"};
+        auto source_path = temp.path / "from_file.cpp";
+        detail::write_text_file(
+                source_path,
+                "int seed = 9;\n"
+                "int __sontag_main() {\n"
+                "    int x = seed + 1;\n"
+                "    return x;\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":file {}\n:decl int v = 6;\n:clear last\n:show all\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("loaded file") != std::string::npos);
+        CHECK(output.out.find("stored decl #2 (state: valid)") != std::string::npos);
+        CHECK(output.out.find("cleared last declarative cell") != std::string::npos);
+        CHECK(output.out.find("int v = 6;") == std::string::npos);
+        CHECK(output.out.find("int seed = 9;") != std::string::npos);
+        CHECK(output.out.find("int x = seed + 1;") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.decl_cells[0].find("int seed = 9;") != std::string::npos);
+        CHECK(persisted_cells.decl_cells[0].find("int v = 6;") == std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("int x = seed + 1;") != std::string::npos);
+    }
+
+    TEST_CASE("005: persisted cell ids stay monotonic after clear last", "[005][session][cell_id]") {
+        detail::temp_dir temp{"sontag_cell_id_monotonic"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int base = 1;\n"
+                "int temp = base;\n"
+                ":clear last\n"
+                ":decl int next = base + 1;\n"
+                ":quit\n");
+
+        CHECK(output.out.find("stored decl #1 (state: valid)") != std::string::npos);
+        CHECK(output.out.find("stored cell #1 (state: valid)") != std::string::npos);
+        CHECK(output.out.find("cleared last executable cell") != std::string::npos);
+        CHECK(output.out.find("stored decl #2 (state: valid)") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+
+        REQUIRE(persisted_cells.cells.size() == 2U);
+        CHECK(persisted_cells.cells[0].kind == detail::cell_kind::declarative);
+        CHECK(persisted_cells.cells[1].kind == detail::cell_kind::declarative);
+        CHECK(persisted_cells.cells[0].cell_id < persisted_cells.cells[1].cell_id);
+        CHECK(persisted_cells.next_cell_id == persisted_cells.cells[1].cell_id + 1U);
+    }
+
     TEST_CASE("005: declfile appends full file as a declarative cell", "[005][session][declfile]") {
         detail::temp_dir temp{"sontag_declfile"};
         auto source_path = temp.path / "decl_only.hpp";
@@ -806,6 +895,50 @@ int __sontag_main() {
               std::string::npos);
         CHECK(persisted_cells.exec_cells[0].find("total += accumulate(values);") != std::string::npos);
         CHECK(persisted_cells.exec_cells[0].find("return total + state.bins[0];") != std::string::npos);
+    }
+
+    TEST_CASE("005: file preserves macro-heavy declarative prefixes", "[005][session][file][macro]") {
+        detail::temp_dir temp{"sontag_file_macros"};
+        auto source_path = temp.path / "macros.cpp";
+        detail::write_text_file(
+                source_path,
+                R"(#define APPLY2(a, b) ((a) + (b))
+#define SCALE3(x) \
+    ((x) * 3)
+#define ASSIGN_AND_BUMP(dst, src) \
+    do {                          \
+        (dst) = (src);            \
+        ++(dst);                  \
+    } while (false)
+
+int seed = 7;
+
+int __sontag_main() {
+    int value = APPLY2(seed, 4);
+    ASSIGN_AND_BUMP(value, SCALE3(value));
+    return value;
+}
+)");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":file {}\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+        CHECK(output.out.find("loaded file") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.decl_cells[0].find("#define APPLY2(a, b)") != std::string::npos);
+        CHECK(persisted_cells.decl_cells[0].find("#define SCALE3(x)") != std::string::npos);
+        CHECK(persisted_cells.decl_cells[0].find("#define ASSIGN_AND_BUMP(dst, src)") != std::string::npos);
+        CHECK(persisted_cells.decl_cells[0].find("int seed = 7;") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("int value = APPLY2(seed, 4);") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("ASSIGN_AND_BUMP(value, SCALE3(value));") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("return value;") != std::string::npos);
     }
 
     TEST_CASE("005: file loads braces in strings and raw strings inside driver body", "[005][session][file]") {

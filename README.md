@@ -167,8 +167,8 @@ Side-by-side row markers:
 - `+` line inserted at that level beyond baseline coverage
 
 Alignment behavior:
-- pairwise: first matching triplet anchor between baseline and target
-- spectrum: earliest shared baseline triplet across all compared levels (by average target index)
+- pairwise: first matching normalized operation key (`mnemonic|dst_bucket|src_bucket`) between baseline and target
+- spectrum: earliest shared baseline normalized operation key across all compared levels (by average target index)
 
 ### Examples:
 
@@ -221,23 +221,21 @@ levels:
   O2 success=true exit_code=0 operations=10
     opcodes: mov(5) lea(3) xor(1) ret(1)
 spectrum (O0 -> O2, full side-by-side):
-        alignment anchors: O0[7] <-> O1[6] O0[7] <-> O2[2]
+        alignment anchors: O0[3] <-> O1[1] O0[3] <-> O2[0]
           O0 lines                          | O1 lines                        | O2 lines                       
         - [0] 1:push rbp                    | -                               | -                              
-        - [1] 2:mov rbp, rsp                | * [0] 1:push rax                | -                              
-        - [2] 3:sub rsp, 0x10               | * [1] 2:mov edi, dword          | -                              
-        - [3] 2:mov eax, dword              | * [2] 6:lea esi, [rdi + rdi]    | -                              
-        - [4] 4:shl eax                     | * [3] 2:mov dword, edi          | -                              
-        = [5] 2:mov dword [rbp - 0x4], eax  | = [4] 2:mov dword, esi          | = [0] 2:mov eax, dword         
-        * [6] 2:mov eax, dword              | * [5] 6:lea eax, [rdi + 2*rdi]  | * [1] 6:lea ecx, [rax + rax]   
-        = [7] 2:mov dword, eax              | = [6] 2:mov dword, eax          | = [2] 2:mov dword, eax         
-        = [8] 2:mov eax, dword [rbp - 0x4]  | = [7] 2:mov edx, 0x3            | = [3] 2:mov dword, ecx         
-        * [9] 2:mov dword, eax              | * [8] 5:call <l0>               | * [4] 6:lea ecx, [rax + 2*rax] 
-        - [10] 2:mov edi, dword             | -                               | = [5] 2:mov dword, ecx         
-        - [11] 2:mov esi, dword             | -                               | * [6] 6:lea eax, [rax + 4*rax] 
-        - [12] 5:call <l0>                  | -                               | * [7] 2:mov dword, eax         
-        -                                   | -                               | + [8] 7:xor eax, eax           
-        -                                   | -                               | + [9] 8:ret
+        - [1] 2:mov rbp, rsp                | -                               | -                              
+        - [2] 3:sub rsp, 0x10               | * [0] 1:push rax                | -                              
+        = [3] 2:mov eax, dword              | = [1] 2:mov edi, dword          | = [0] 2:mov eax, dword         
+        * [4] 4:shl eax                     | * [2] 6:lea esi, [rdi + rdi]    | * [1] 6:lea ecx, [rax + rax]   
+        = [5] 2:mov dword [rbp - 0x4], eax  | = [3] 2:mov dword, edi          | = [2] 2:mov dword, eax         
+        = [6] 2:mov eax, dword              | = [4] 2:mov dword, esi          | = [3] 2:mov dword, ecx         
+        * [7] 2:mov dword, eax              | * [5] 6:lea eax, [rdi + 2*rdi]  | * [4] 6:lea ecx, [rax + 2*rax] 
+        = [8] 2:mov eax, dword [rbp - 0x4]  | = [6] 2:mov dword, eax          | = [5] 2:mov dword, ecx         
+        * [9] 2:mov dword, eax              | = [7] 2:mov edx, 0x3            | * [6] 6:lea eax, [rax + 4*rax] 
+        * [10] 2:mov edi, dword             | * [8] 5:call <l0>               | = [7] 2:mov dword, eax         
+        - [11] 2:mov esi, dword             | -                               | * [8] 7:xor eax, eax           
+        - [12] 5:call <l0>                  | -                               | * [9] 8:ret 
 ```
 
 ## `:graph`

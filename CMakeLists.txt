@@ -49,10 +49,18 @@ endif()
 option(WARNINGS_AS_ERRORS "Treat all warnings as errors. turn off for development, on for release" OFF)
 option(SONTAG_BUILD_TESTS "Build sontag test suite" ${SONTAG_IS_TOPLEVEL_PROJECT})
 option(SONTAG_SMOKE "Build sontag smoke tests" OFF)
+option(SONTAG_USE_LIBCXX "Build C++ targets with libc++ instead of libstdc++ when using clang" ON)
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(SONTAG_USE_LIBCXX)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>")
+    add_link_options("$<$<LINK_LANGUAGE:CXX>:-stdlib=libc++>")
+else()
+    message(FATAL_ERROR "sontag currently requires libc++; set -DSONTAG_USE_LIBCXX=ON")
+endif()
 
 add_library(sontag
     src/analysis.cpp
@@ -62,7 +70,7 @@ add_library(sontag
 )
 
 target_include_directories(sontag PUBLIC include)
-target_compile_features(sontag PUBLIC cxx_std_23)
+target_compile_features(sontag PUBLIC cxx_std_26)
 
 add_subdirectory(external)
 

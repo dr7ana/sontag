@@ -22,10 +22,12 @@ extern "C" {
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <flat_map>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -40,6 +42,14 @@ namespace sontag::cli { namespace detail {
 
     using namespace std::string_view_literals;
     namespace fs = std::filesystem;
+
+    enum class cell_kind { declarative, executable };
+
+    struct cell_record {
+        uint64_t cell_id{};
+        cell_kind kind{cell_kind::executable};
+        std::string text{};
+    };
 
     struct persisted_config {
         int schema_version{1};
@@ -69,13 +79,17 @@ namespace sontag::cli { namespace detail {
 
     struct persisted_cells {
         int schema_version{1};
+        uint64_t next_cell_id{1U};
+        std::vector<cell_record> cells{};
         std::vector<std::string> decl_cells{};
         std::vector<std::string> exec_cells{};
     };
 
     struct repl_state {
-        std::vector<std::string> decl_cells{};
-        std::vector<std::string> exec_cells{};
+        std::flat_map<uint64_t, cell_record> cells{};
+        std::set<uint64_t> decl_ids{};
+        std::set<uint64_t> exec_ids{};
+        uint64_t next_cell_id{1U};
         persisted_snapshots snapshot_data{};
         fs::path session_dir{};
         fs::path config_path{};
@@ -316,10 +330,25 @@ namespace glz {
     };
 
     template <>
+    struct meta<sontag::cli::detail::cell_record> {
+        using T = sontag::cli::detail::cell_record;
+        static constexpr auto value = object("cell_id", &T::cell_id, "kind", &T::kind, "text", &T::text);
+    };
+
+    template <>
     struct meta<sontag::cli::detail::persisted_cells> {
         using T = sontag::cli::detail::persisted_cells;
-        static constexpr auto value = object(
-                "schema_version", &T::schema_version, "decl_cells", &T::decl_cells, "exec_cells", &T::exec_cells);
+        static constexpr auto value =
+                object("schema_version",
+                       &T::schema_version,
+                       "next_cell_id",
+                       &T::next_cell_id,
+                       "cells",
+                       &T::cells,
+                       "decl_cells",
+                       &T::decl_cells,
+                       "exec_cells",
+                       &T::exec_cells);
     };
 
     template <>
@@ -1091,13 +1120,82 @@ namespace sontag::cli {
         }
 
         static size_t total_cell_count(const repl_state& state) {
-            return state.decl_cells.size() + state.exec_cells.size();
+            return state.cells.size();
+        }
+
+        static size_t kind_cell_count(const repl_state& state, cell_kind kind) {
+            if (kind == cell_kind::declarative) {
+                return state.decl_ids.size();
+            }
+            return state.exec_ids.size();
+        }
+
+        static std::vector<std::string> collect_cells_by_kind(const repl_state& state, cell_kind kind) {
+            auto* ids = &state.exec_ids;
+            if (kind == cell_kind::declarative) {
+                ids = &state.decl_ids;
+            }
+
+            std::vector<std::string> cells{};
+            cells.reserve(ids->size());
+            for (auto cell_id : *ids) {
+                if (auto it = state.cells.find(cell_id); it != state.cells.end()) {
+                    cells.push_back(it->second.text);
+                }
+            }
+            return cells;
+        }
+
+        static void clear_cells(repl_state& state) {
+            state.cells.clear();
+            state.decl_ids.clear();
+            state.exec_ids.clear();
+        }
+
+        static void add_cell_with_id(repl_state& state, uint64_t cell_id, cell_kind kind, std::string text) {
+            auto inserted = state.cells.emplace(
+                    cell_id, cell_record{.cell_id = cell_id, .kind = kind, .text = std::move(text)});
+            if (!inserted.second) {
+                throw std::runtime_error("duplicate cell id while rebuilding state: {}"_format(cell_id));
+            }
+
+            if (kind == cell_kind::declarative) {
+                state.decl_ids.insert(cell_id);
+            }
+            else {
+                state.exec_ids.insert(cell_id);
+            }
+
+            if (cell_id >= state.next_cell_id) {
+                state.next_cell_id = cell_id + 1U;
+            }
+        }
+
+        static uint64_t append_cell(repl_state& state, std::string text, cell_kind kind) {
+            auto cell_id = state.next_cell_id++;
+            auto inserted = state.cells.emplace(
+                    cell_id, cell_record{.cell_id = cell_id, .kind = kind, .text = std::move(text)});
+            if (!inserted.second) {
+                throw std::runtime_error("duplicate cell id while appending state: {}"_format(cell_id));
+            }
+            if (kind == cell_kind::declarative) {
+                state.decl_ids.insert(cell_id);
+            }
+            else {
+                state.exec_ids.insert(cell_id);
+            }
+            return cell_id;
         }
 
         static void persist_cells(const repl_state& state) {
             persisted_cells data{};
-            data.decl_cells = state.decl_cells;
-            data.exec_cells = state.exec_cells;
+            data.next_cell_id = state.next_cell_id;
+            data.cells.reserve(state.cells.size());
+            for (const auto& [cell_id, cell] : state.cells) {
+                data.cells.push_back(cell);
+            }
+            data.decl_cells = collect_cells_by_kind(state, cell_kind::declarative);
+            data.exec_cells = collect_cells_by_kind(state, cell_kind::executable);
             write_json_file(data, state.cells_path);
         }
 
@@ -1198,8 +1296,26 @@ namespace sontag::cli {
             if (fs::exists(state.cells_path)) {
                 auto cell_data = read_json_file<persisted_cells>(state.cells_path, true);
                 validate_supported_schema_version(cell_data.schema_version, state.cells_path);
-                state.decl_cells = std::move(cell_data.decl_cells);
-                state.exec_cells = std::move(cell_data.exec_cells);
+                clear_cells(state);
+                state.next_cell_id = 1U;
+
+                if (!cell_data.cells.empty()) {
+                    for (auto& persisted_cell : cell_data.cells) {
+                        add_cell_with_id(
+                                state, persisted_cell.cell_id, persisted_cell.kind, std::move(persisted_cell.text));
+                    }
+                    if (cell_data.next_cell_id > state.next_cell_id) {
+                        state.next_cell_id = cell_data.next_cell_id;
+                    }
+                }
+                else {
+                    for (auto& cell : cell_data.decl_cells) {
+                        append_cell(state, std::move(cell), cell_kind::declarative);
+                    }
+                    for (auto& cell : cell_data.exec_cells) {
+                        append_cell(state, std::move(cell), cell_kind::executable);
+                    }
+                }
             }
 
             persist_current_snapshot(state);
@@ -1272,17 +1388,17 @@ namespace sontag::cli {
         }
 
         static void print_decl_cells(const repl_state& state, std::ostream& os) {
-            print_cells(state.decl_cells, os, "no declarative cells");
+            print_cells(collect_cells_by_kind(state, cell_kind::declarative), os, "no declarative cells");
         }
 
         static void print_exec_cells(const repl_state& state, std::ostream& os) {
-            print_cells(state.exec_cells, os, "no executable cells");
+            print_cells(collect_cells_by_kind(state, cell_kind::executable), os, "no executable cells");
         }
 
         static void print_all_cells(const repl_state& state, std::ostream& os) {
             analysis_request request{};
-            request.decl_cells = state.decl_cells;
-            request.exec_cells = state.exec_cells;
+            request.decl_cells = collect_cells_by_kind(state, cell_kind::declarative);
+            request.exec_cells = collect_cells_by_kind(state, cell_kind::executable);
             os << synthesize_source(request);
         }
 
@@ -1458,8 +1574,8 @@ examples:
             analysis_request request{};
             request.clang_path = cfg.clang_path;
             request.session_dir = state.session_dir;
-            request.decl_cells = state.decl_cells;
-            request.exec_cells = state.exec_cells;
+            request.decl_cells = collect_cells_by_kind(state, cell_kind::declarative);
+            request.exec_cells = collect_cells_by_kind(state, cell_kind::executable);
             request.language_standard = cfg.language_standard;
             request.opt_level = cfg.opt_level;
             request.target_triple = cfg.target_triple;
@@ -1532,17 +1648,17 @@ examples:
             }
 
             if (declarative) {
-                state.decl_cells.emplace_back(cell);
+                append_cell(state, std::string{cell}, cell_kind::declarative);
                 persist_cells(state);
                 persist_current_snapshot(state);
-                out << "stored decl #" << state.decl_cells.size() << " (state: valid)\n";
+                out << "stored decl #" << kind_cell_count(state, cell_kind::declarative) << " (state: valid)\n";
                 return true;
             }
 
-            state.exec_cells.emplace_back(cell);
+            append_cell(state, std::string{cell}, cell_kind::executable);
             persist_cells(state);
             persist_current_snapshot(state);
-            out << "stored cell #" << state.exec_cells.size() << " (state: valid)\n";
+            out << "stored cell #" << kind_cell_count(state, cell_kind::executable) << " (state: valid)\n";
             return true;
         }
 
@@ -1571,8 +1687,13 @@ examples:
                 return false;
             }
 
-            state.decl_cells = std::move(decl_cells);
-            state.exec_cells = std::move(exec_cells);
+            clear_cells(state);
+            for (auto& cell : decl_cells) {
+                append_cell(state, std::move(cell), cell_kind::declarative);
+            }
+            for (auto& cell : exec_cells) {
+                append_cell(state, std::move(cell), cell_kind::executable);
+            }
             persist_cells(state);
             persist_current_snapshot(state);
             out << success_message << " (state: valid)\n";
@@ -1782,18 +1903,235 @@ examples:
             return "[{}] {}:{}"_format(operation.ordinal, operation.opcode_uid, body);
         }
 
+        struct delta_match_key {
+            std::string_view mnemonic{};
+            std::string_view dst_bucket{"none"sv};
+            std::string_view src_bucket{"none"sv};
+            bool valid{false};
+        };
+
+        static constexpr char ascii_tolower(char c) noexcept {
+            return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
+        }
+
+        static constexpr bool ascii_is_space(char c) noexcept {
+            return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+        }
+
+        static constexpr bool ascii_is_digit(char c) noexcept {
+            return c >= '0' && c <= '9';
+        }
+
+        static std::string_view trim_ascii(std::string_view value) {
+            while (!value.empty() && ascii_is_space(value.front())) {
+                value.remove_prefix(1U);
+            }
+            while (!value.empty() && ascii_is_space(value.back())) {
+                value.remove_suffix(1U);
+            }
+            return value;
+        }
+
+        static std::string_view first_token(std::string_view value) {
+            value = trim_ascii(value);
+            if (value.empty()) {
+                return {};
+            }
+
+            auto end = value.find_first_of(" \t");
+            if (end == std::string_view::npos) {
+                return value;
+            }
+            return value.substr(0U, end);
+        }
+
+        static std::string_view lower_token(std::string_view token, std::array<char, 32>& scratch) {
+            auto trimmed = trim_ascii(token);
+            while (!trimmed.empty() && (trimmed.front() == '*' || trimmed.front() == '%')) {
+                trimmed.remove_prefix(1U);
+            }
+            while (!trimmed.empty() &&
+                   (trimmed.back() == ',' || trimmed.back() == ':' || trimmed.back() == ')' || trimmed.back() == '(')) {
+                trimmed.remove_suffix(1U);
+            }
+            if (trimmed.empty()) {
+                return {};
+            }
+
+            auto count = std::min(trimmed.size(), scratch.size());
+            for (size_t i = 0U; i < count; ++i) {
+                scratch[i] = ascii_tolower(trimmed[i]);
+            }
+            return std::string_view{scratch.data(), count};
+        }
+
+        static std::string_view classify_register_bucket(std::string_view token) {
+            if (token.empty()) {
+                return "other"sv;
+            }
+
+            if (token.starts_with("xmm"sv)) {
+                return "vec128"sv;
+            }
+            if (token.starts_with("ymm"sv)) {
+                return "vec256"sv;
+            }
+            if (token.starts_with("zmm"sv)) {
+                return "vec512"sv;
+            }
+
+            static constexpr auto gpr64_named =
+                    std::array{"rax"sv, "rbx"sv, "rcx"sv, "rdx"sv, "rsi"sv, "rdi"sv, "rbp"sv, "rsp"sv, "rip"sv};
+            if (std::ranges::find(gpr64_named, token) != gpr64_named.end()) {
+                return "gpr64"sv;
+            }
+
+            static constexpr auto gpr32_named =
+                    std::array{"eax"sv, "ebx"sv, "ecx"sv, "edx"sv, "esi"sv, "edi"sv, "ebp"sv, "esp"sv, "eip"sv};
+            if (std::ranges::find(gpr32_named, token) != gpr32_named.end()) {
+                return "gpr32"sv;
+            }
+
+            static constexpr auto gpr16_named =
+                    std::array{"ax"sv, "bx"sv, "cx"sv, "dx"sv, "si"sv, "di"sv, "bp"sv, "sp"sv, "ip"sv};
+            if (std::ranges::find(gpr16_named, token) != gpr16_named.end()) {
+                return "gpr16"sv;
+            }
+
+            static constexpr auto gpr8_named = std::array{
+                    "al"sv, "ah"sv, "bl"sv, "bh"sv, "cl"sv, "ch"sv, "dl"sv, "dh"sv, "sil"sv, "dil"sv, "spl"sv, "bpl"sv};
+            if (std::ranges::find(gpr8_named, token) != gpr8_named.end()) {
+                return "gpr8"sv;
+            }
+
+            if (token.size() >= 2U && token[0] == 'r') {
+                auto suffix = token.back();
+                auto digits = token.substr(1U, token.size() - 1U);
+                if (suffix == 'd') {
+                    digits = token.substr(1U, token.size() - 2U);
+                    if (!digits.empty() && std::ranges::all_of(digits, ascii_is_digit)) {
+                        return "gpr32"sv;
+                    }
+                }
+                if (suffix == 'w') {
+                    digits = token.substr(1U, token.size() - 2U);
+                    if (!digits.empty() && std::ranges::all_of(digits, ascii_is_digit)) {
+                        return "gpr16"sv;
+                    }
+                }
+                if (suffix == 'b') {
+                    digits = token.substr(1U, token.size() - 2U);
+                    if (!digits.empty() && std::ranges::all_of(digits, ascii_is_digit)) {
+                        return "gpr8"sv;
+                    }
+                }
+                if (std::ranges::all_of(digits, ascii_is_digit)) {
+                    return "gpr64"sv;
+                }
+            }
+
+            return "other"sv;
+        }
+
+        static std::string_view classify_operand_bucket(std::string_view operand) {
+            auto trimmed = trim_ascii(operand);
+            if (trimmed.empty()) {
+                return "none"sv;
+            }
+
+            if (trimmed.find('[') != std::string_view::npos && trimmed.find(']') != std::string_view::npos) {
+                return "mem"sv;
+            }
+
+            auto token = first_token(trimmed);
+            std::array<char, 32> lowered{};
+            auto key = lower_token(token, lowered);
+            if (key.empty()) {
+                return "other"sv;
+            }
+
+            static constexpr auto memory_prefixes = std::array{
+                    "byte"sv, "word"sv, "dword"sv, "qword"sv, "xmmword"sv, "ymmword"sv, "zmmword"sv, "ptr"sv};
+            if (std::ranges::find(memory_prefixes, key) != memory_prefixes.end()) {
+                return "mem"sv;
+            }
+
+            if (key.starts_with("0x"sv) || key.starts_with("-0x"sv) || ascii_is_digit(key.front()) ||
+                (key.front() == '-' && key.size() >= 2U && ascii_is_digit(key[1]))) {
+                return "imm"sv;
+            }
+
+            if (key.front() == '<') {
+                return "other"sv;
+            }
+
+            auto reg_bucket = classify_register_bucket(key);
+            if (reg_bucket != "other"sv) {
+                return reg_bucket;
+            }
+
+            return "other"sv;
+        }
+
+        static delta_match_key make_match_key(std::string_view operation_text) {
+            operation_text = trim_ascii(operation_text);
+            if (operation_text.empty()) {
+                return {};
+            }
+
+            auto mnemonic = first_token(operation_text);
+            if (mnemonic.empty()) {
+                return {};
+            }
+
+            std::array<char, 32> lowered{};
+            auto normalized_mnemonic = lower_token(mnemonic, lowered);
+            if (normalized_mnemonic.empty()) {
+                return {};
+            }
+
+            auto operands_text = trim_ascii(operation_text.substr(mnemonic.size()));
+            auto comma = operands_text.find(',');
+            auto dst_operand = comma == std::string_view::npos ? operands_text : operands_text.substr(0U, comma);
+            auto src_operand = comma == std::string_view::npos ? std::string_view{} : operands_text.substr(comma + 1U);
+
+            return delta_match_key{
+                    .mnemonic = normalized_mnemonic,
+                    .dst_bucket = classify_operand_bucket(dst_operand),
+                    .src_bucket = classify_operand_bucket(src_operand),
+                    .valid = true};
+        }
+
+        static std::vector<delta_match_key> build_match_keys(const std::vector<delta_operation>& operations) {
+            std::vector<delta_match_key> keys{};
+            keys.reserve(operations.size());
+            for (const auto& operation : operations) {
+                auto text = operation.triplet.empty() ? std::string_view{operation.opcode}
+                                                      : std::string_view{operation.triplet};
+                keys.push_back(make_match_key(text));
+            }
+            return keys;
+        }
+
+        static constexpr bool match_keys_equal(const delta_match_key& lhs, const delta_match_key& rhs) {
+            return lhs.valid && rhs.valid && lhs.mnemonic == rhs.mnemonic && lhs.dst_bucket == rhs.dst_bucket &&
+                   lhs.src_bucket == rhs.src_bucket;
+        }
+
         static delta_alignment find_alignment(
                 const std::vector<delta_operation>& baseline, const std::vector<delta_operation>& target) {
             auto alignment = delta_alignment{};
+            auto baseline_keys = build_match_keys(baseline);
+            auto target_keys = build_match_keys(target);
             for (size_t i = 0U; i < baseline.size(); ++i) {
-                if (baseline[i].triplet.empty()) {
+                if (!baseline_keys[i].valid) {
                     continue;
                 }
                 for (size_t j = 0U; j < target.size(); ++j) {
-                    if (target[j].triplet.empty()) {
+                    if (!target_keys[j].valid) {
                         continue;
                     }
-                    if (baseline[i].triplet != target[j].triplet) {
+                    if (!match_keys_equal(baseline_keys[i], target_keys[j])) {
                         continue;
                     }
                     alignment.anchored = true;
@@ -1806,13 +2144,13 @@ examples:
             return alignment;
         }
 
-        static std::optional<size_t> find_first_triplet_match(
-                const std::vector<delta_operation>& operations, std::string_view wanted_triplet) {
-            for (size_t i = 0U; i < operations.size(); ++i) {
-                if (operations[i].triplet.empty()) {
+        static std::optional<size_t> find_first_match_key_match(
+                std::span<const delta_match_key> operation_keys, const delta_match_key& wanted_key) {
+            for (size_t i = 0U; i < operation_keys.size(); ++i) {
+                if (!operation_keys[i].valid) {
                     continue;
                 }
-                if (operations[i].triplet == wanted_triplet) {
+                if (match_keys_equal(operation_keys[i], wanted_key)) {
                     return i;
                 }
             }
@@ -1832,10 +2170,19 @@ examples:
             }
 
             auto* baseline = levels.front();
+            std::vector<std::vector<delta_match_key>> level_keys{};
+            level_keys.reserve(levels.size());
+            for (size_t i = 0U; i < levels.size(); ++i) {
+                if (levels[i] == nullptr) {
+                    return std::nullopt;
+                }
+                level_keys.push_back(build_match_keys(levels[i]->operations));
+            }
+
             std::optional<delta_common_anchor> best{};
             for (size_t i = 0U; i < baseline->operations.size(); ++i) {
-                auto triplet = baseline->operations[i].triplet;
-                if (triplet.empty()) {
+                auto wanted_key = level_keys.front()[i];
+                if (!wanted_key.valid) {
                     continue;
                 }
 
@@ -1846,12 +2193,7 @@ examples:
 
                 auto valid = true;
                 for (size_t j = 1U; j < levels.size(); ++j) {
-                    if (levels[j] == nullptr) {
-                        valid = false;
-                        break;
-                    }
-
-                    auto target_index = find_first_triplet_match(levels[j]->operations, triplet);
+                    auto target_index = find_first_match_key_match(level_keys[j], wanted_key);
                     if (!target_index) {
                         valid = false;
                         break;
@@ -2333,7 +2675,7 @@ examples:
                 return false;
             }
 
-            if (state.decl_cells.empty() && state.exec_cells.empty()) {
+            if (state.cells.empty()) {
                 err << "no stored cells available for delta analysis\n";
                 return true;
             }
@@ -2486,7 +2828,7 @@ examples:
                 return false;
             }
 
-            if (state.decl_cells.empty() && state.exec_cells.empty()) {
+            if (state.cells.empty()) {
                 err << "no stored cells available for analysis\n";
                 return true;
             }
@@ -2505,6 +2847,27 @@ examples:
             return true;
         }
 
+        static bool clear_last_cell(repl_state& state, std::ostream& out) {
+            if (state.cells.empty()) {
+                out << "no cells to clear\n";
+                return true;
+            }
+
+            auto it = std::prev(state.cells.end());
+            auto cell_id = it->first;
+            auto kind = it->second.kind;
+            state.cells.erase(it);
+            if (kind == cell_kind::declarative) {
+                state.decl_ids.erase(cell_id);
+                out << "cleared last declarative cell\n";
+                return true;
+            }
+
+            state.exec_ids.erase(cell_id);
+            out << "cleared last executable cell\n";
+            return true;
+        }
+
         static bool process_command(
                 const std::string& line, startup_config& cfg, repl_state& state, bool& should_quit) {
             auto cmd = trim_view(line);
@@ -2517,14 +2880,9 @@ examples:
                 return true;
             }
             if (cmd == ":clear last"sv) {
-                if (state.exec_cells.empty()) {
-                    std::cout << "no executable cells to clear\n";
-                    return true;
-                }
-                state.exec_cells.pop_back();
+                clear_last_cell(state, std::cout);
                 persist_cells(state);
                 persist_current_snapshot(state);
-                std::cout << "cleared last executable cell\n";
                 return true;
             }
             if (cmd == ":clear"sv) {
@@ -2578,8 +2936,8 @@ examples:
                 return true;
             }
             if (cmd == ":reset"sv) {
-                state.decl_cells.clear();
-                state.exec_cells.clear();
+                clear_cells(state);
+                state.next_cell_id = 1U;
                 persist_cells(state);
                 persist_current_snapshot(state);
                 std::cout << "session reset\n";
@@ -2590,7 +2948,7 @@ examples:
                 return true;
             }
             if (cmd == ":symbols"sv) {
-                if (state.decl_cells.empty() && state.exec_cells.empty()) {
+                if (state.cells.empty()) {
                     std::cerr << "no stored cells available for symbol listing\n";
                     return true;
                 }

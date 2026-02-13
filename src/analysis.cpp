@@ -198,7 +198,14 @@ namespace sontag {
 
         using namespace std::string_view_literals;
 
-        static std::string_view trim_ascii(std::string_view value);
+        static constexpr std::string_view trim_ascii(std::string_view value) {
+            auto first = value.find_first_not_of(" \t\r\n");
+            if (first == std::string_view::npos) {
+                return {};
+            }
+            auto last = value.find_last_not_of(" \t\r\n");
+            return value.substr(first, (last - first) + 1U);
+        }
 
         static bool is_identifier_char(char c) {
             return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
@@ -761,7 +768,7 @@ namespace sontag {
             if (value.empty()) {
                 return;
             }
-            if (std::find(values.begin(), values.end(), value) == values.end()) {
+            if (std::ranges::find(values, value) == values.end()) {
                 values.push_back(std::move(value));
             }
         }
@@ -927,31 +934,39 @@ namespace sontag {
                     request, request.objdump_path, arg_tokens::llvm_objdump_version_prefix, temp_dir, artifact_id);
         }
 
-        static bool starts_with(std::string_view value, std::string_view prefix) {
+        static constexpr bool starts_with(std::string_view value, std::string_view prefix) {
             return value.size() >= prefix.size() && value.substr(0U, prefix.size()) == prefix;
         }
 
-        static std::vector<std::string> split_lines(const std::string& text) {
+        static std::vector<std::string> split_lines(std::string_view text) {
             std::vector<std::string> lines{};
-            std::istringstream in{text};
-            std::string line{};
-            while (std::getline(in, line)) {
-                lines.push_back(line);
+            size_t begin = 0U;
+            while (begin <= text.size()) {
+                auto end = text.find('\n', begin);
+                if (end == std::string_view::npos) {
+                    end = text.size();
+                }
+
+                auto line = text.substr(begin, end - begin);
+                if (!line.empty() && line.back() == '\r') {
+                    line.remove_suffix(1U);
+                }
+                lines.emplace_back(line);
+
+                if (end == text.size()) {
+                    break;
+                }
+                begin = end + 1U;
             }
             return lines;
         }
 
-        static bool contains_token(std::string_view haystack, std::string_view needle) {
+        static constexpr bool contains_token(std::string_view haystack, std::string_view needle) {
             return haystack.find(needle) != std::string_view::npos;
         }
 
-        static std::string_view trim_ascii(std::string_view value) {
-            auto first = value.find_first_not_of(" \t\r\n");
-            if (first == std::string_view::npos) {
-                return {};
-            }
-            auto last = value.find_last_not_of(" \t\r\n");
-            return value.substr(first, (last - first) + 1U);
+        static constexpr bool ascii_is_digit(char c) noexcept {
+            return c >= '0' && c <= '9';
         }
 
         static std::string demangle_symbol_name(std::string_view mangled) {
@@ -1012,7 +1027,7 @@ namespace sontag {
                 symbols.push_back(std::move(*parsed));
             }
 
-            std::sort(symbols.begin(), symbols.end(), [](const analysis_symbol& lhs, const analysis_symbol& rhs) {
+            std::ranges::sort(symbols, [](const analysis_symbol& lhs, const analysis_symbol& rhs) {
                 if (lhs.demangled != rhs.demangled) {
                     return lhs.demangled < rhs.demangled;
                 }
@@ -1022,14 +1037,11 @@ namespace sontag {
                 return lhs.kind < rhs.kind;
             });
 
-            symbols.erase(
-                    std::unique(
-                            symbols.begin(),
-                            symbols.end(),
-                            [](const analysis_symbol& lhs, const analysis_symbol& rhs) {
-                                return lhs.kind == rhs.kind && lhs.mangled == rhs.mangled;
-                            }),
-                    symbols.end());
+            auto deduplicated_end =
+                    std::ranges::unique(symbols, [](const analysis_symbol& lhs, const analysis_symbol& rhs) {
+                        return lhs.kind == rhs.kind && lhs.mangled == rhs.mangled;
+                    });
+            symbols.erase(deduplicated_end.begin(), deduplicated_end.end());
 
             return symbols;
         }
@@ -1068,7 +1080,8 @@ namespace sontag {
             return parse_nm_symbols(nm_output);
         }
 
-        static std::optional<size_t> parse_header_line_number(std::string_view line, const std::string& source_path) {
+        static constexpr std::optional<size_t> parse_header_line_number(
+                std::string_view line, std::string_view source_path) {
             if (!starts_with(line, source_path)) {
                 return std::nullopt;
             }
@@ -1086,7 +1099,7 @@ namespace sontag {
             }
             size_t line_number = 0U;
             for (auto c : line_number_text) {
-                if (!std::isdigit(static_cast<unsigned char>(c))) {
+                if (!ascii_is_digit(c)) {
                     return std::nullopt;
                 }
                 line_number = (line_number * 10U) + static_cast<size_t>(c - '0');
@@ -1095,9 +1108,9 @@ namespace sontag {
         }
 
         static std::string filter_diag_by_symbol(
-                const std::string& diagnostics_text,
-                const std::string& source_text,
-                const std::string& source_path,
+                std::string_view diagnostics_text,
+                std::string_view source_text,
+                std::string_view source_path,
                 std::string_view symbol) {
             if (diagnostics_text.empty()) {
                 return {};
@@ -1201,7 +1214,7 @@ namespace sontag {
             return resolve_symbol_name(*symbols, symbol);
         }
 
-        static std::string extract_ir_for_symbol(const std::string& ir_text, std::string_view mangled_symbol) {
+        static std::string extract_ir_for_symbol(std::string_view ir_text, std::string_view mangled_symbol) {
             auto lines = split_lines(ir_text);
             std::ostringstream extracted{};
             bool in_function = false;
@@ -1235,7 +1248,7 @@ namespace sontag {
             return extracted.str();
         }
 
-        static std::string extract_asm_for_symbol(const std::string& asm_text, std::string_view mangled_symbol) {
+        static std::string extract_asm_for_symbol(std::string_view asm_text, std::string_view mangled_symbol) {
             auto lines = split_lines(asm_text);
             std::ostringstream extracted{};
             bool in_function = false;
@@ -1281,7 +1294,7 @@ namespace sontag {
         }
 
         static std::string extract_objdump_for_symbol(
-                const std::string& dump_text, std::string_view mangled_symbol, std::string_view display_symbol) {
+                std::string_view dump_text, std::string_view mangled_symbol, std::string_view display_symbol) {
             auto lines = split_lines(dump_text);
             std::ostringstream extracted{};
             bool in_symbol = false;
@@ -1315,7 +1328,7 @@ namespace sontag {
             if (asm_syntax == "intel"sv) {
                 prepared.append(".intel_syntax noprefix\n");
             }
-            auto lines = split_lines(std::string{extracted_asm});
+            auto lines = split_lines(extracted_asm);
             for (const auto& line : lines) {
                 auto trimmed = trim_ascii(line);
                 if (trimmed.starts_with(".cfi_"sv)) {
@@ -1699,7 +1712,7 @@ namespace sontag {
         }
 
         static void append_unique(std::vector<delta_quality_flag>& quality_flags, delta_quality_flag quality_flag) {
-            if (std::find(quality_flags.begin(), quality_flags.end(), quality_flag) != quality_flags.end()) {
+            if (std::ranges::find(quality_flags, quality_flag) != quality_flags.end()) {
                 return;
             }
             quality_flags.push_back(quality_flag);
