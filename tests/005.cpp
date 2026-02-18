@@ -60,13 +60,37 @@ namespace sontag::test { namespace detail {
         REQUIRE(out.good());
     }
 
-    static std::optional<size_t> snapshot_cell_count(const persisted_snapshots& snapshots, std::string_view name) {
+    static const snapshot_record* snapshot_by_name(const persisted_snapshots& snapshots, std::string_view name) {
         for (const auto& record : snapshots.snapshots) {
             if (record.name == name) {
-                return record.cell_count;
+                return &record;
             }
         }
+        return nullptr;
+    }
+
+    static std::optional<size_t> snapshot_cell_count(const persisted_snapshots& snapshots, std::string_view name) {
+        if (auto* record = snapshot_by_name(snapshots, name)) {
+            return record->cell_count;
+        }
         return std::nullopt;
+    }
+
+    static size_t count_occurrences(std::string_view haystack, std::string_view needle) {
+        if (needle.empty()) {
+            return 0U;
+        }
+        auto count = size_t{0U};
+        auto pos = size_t{0U};
+        while (true) {
+            auto found = haystack.find(needle, pos);
+            if (found == std::string_view::npos) {
+                break;
+            }
+            ++count;
+            pos = found + needle.size();
+        }
+        return count;
     }
 
     static fs::path find_single_session_dir(const fs::path& cache_dir) {
@@ -211,16 +235,23 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells.empty());
 
         auto snapshots = detail::read_json_file<detail::persisted_snapshots>(session_dir / "snapshots.json");
-        auto baseline_count = detail::snapshot_cell_count(snapshots, "baseline");
-        REQUIRE(baseline_count);
-        CHECK(*baseline_count == 1U);
+        auto* baseline = detail::snapshot_by_name(snapshots, "baseline");
+        REQUIRE(baseline != nullptr);
+        CHECK(baseline->cell_count == 1U);
+        REQUIRE(baseline->decl_cells.size() == 1U);
+        CHECK(baseline->decl_cells[0].find("seed") != std::string::npos);
+        CHECK(baseline->exec_cells.empty());
 
-        auto current_count = detail::snapshot_cell_count(snapshots, "current");
-        REQUIRE(current_count);
-        CHECK(*current_count == 2U);
+        auto* current = detail::snapshot_by_name(snapshots, "current");
+        REQUIRE(current != nullptr);
+        CHECK(current->cell_count == 2U);
+        REQUIRE(current->decl_cells.size() == 2U);
+        CHECK(current->decl_cells[0].find("seed") != std::string::npos);
+        CHECK(current->decl_cells[1].find("inc(") != std::string::npos);
+        CHECK(current->exec_cells.empty());
     }
 
-    TEST_CASE("005: resume latest restores state and reset updates current snapshot", "[005][session][resume]") {
+    TEST_CASE("005: resume latest restores state and reset clears named snapshots", "[005][session][resume]") {
         detail::temp_dir temp{"sontag_session_resume"};
 
         startup_config initial_cfg{};
@@ -271,18 +302,17 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells.empty());
 
         auto snapshots = detail::read_json_file<detail::persisted_snapshots>(session_dir / "snapshots.json");
+        CHECK(snapshots.active_snapshot == "current");
+        REQUIRE(snapshots.snapshots.size() == 1U);
 
-        auto baseline_count = detail::snapshot_cell_count(snapshots, "baseline");
-        REQUIRE(baseline_count);
-        CHECK(*baseline_count == 2U);
+        CHECK_FALSE(detail::snapshot_cell_count(snapshots, "baseline"));
+        CHECK_FALSE(detail::snapshot_cell_count(snapshots, "resumed"));
 
-        auto resumed_count = detail::snapshot_cell_count(snapshots, "resumed");
-        REQUIRE(resumed_count);
-        CHECK(*resumed_count == 2U);
-
-        auto current_count = detail::snapshot_cell_count(snapshots, "current");
-        REQUIRE(current_count);
-        CHECK(*current_count == 0U);
+        auto* current = detail::snapshot_by_name(snapshots, "current");
+        REQUIRE(current != nullptr);
+        CHECK(current->cell_count == 0U);
+        CHECK(current->decl_cells.empty());
+        CHECK(current->exec_cells.empty());
     }
 
     TEST_CASE("005: show all prints declarative and executable regions", "[005][session][show]") {
@@ -357,6 +387,47 @@ namespace sontag::test {
         CHECK(output.out.find("diff (O0 -> O2, full side-by-side):") != std::string::npos);
         CHECK(output.out.find("alignment anchor: ") != std::string::npos);
         CHECK(output.out.find("metrics:") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: delta snapshot uses snapshot labels with current as baseline", "[005][session][delta][snapshot]") {
+        detail::temp_dir temp{"sontag_delta_snapshot_labels"};
+        auto baseline_path = temp.path / "baseline.cpp";
+        auto current_path = temp.path / "current.cpp";
+        detail::write_text_file(
+                baseline_path,
+                "int seed = 9;\n"
+                "int __sontag_main() {\n"
+                "    int value = seed + 1;\n"
+                "    return value;\n"
+                "}\n");
+        detail::write_text_file(
+                current_path,
+                "int seed = 3;\n"
+                "int __sontag_main() {\n"
+                "    return seed * 2;\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto script = ":file {}\n:mark snap1\n:reset file {}\n:file {}\n:delta snap1\n:quit\n"_format(
+                baseline_path.string(), baseline_path.string(), current_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("mode: pairwise") != std::string::npos);
+        CHECK(output.out.find("baseline: current") != std::string::npos);
+        CHECK(output.out.find("target: snap1") != std::string::npos);
+        CHECK(output.out.find("levels:") != std::string::npos);
+        CHECK(output.out.find("  current success=") != std::string::npos);
+        CHECK(output.out.find("  snap1 success=") != std::string::npos);
+        CHECK(output.out.find("diff (current -> snap1, full side-by-side):") != std::string::npos);
+        CHECK(output.out.find("alignment anchor: current[") != std::string::npos);
+        CHECK(output.out.find("<-> snap1[") != std::string::npos);
+        CHECK(output.out.find("baseline: O0") == std::string::npos);
+        CHECK(output.out.find("target: O2") == std::string::npos);
         CHECK(output.err.empty());
     }
 
@@ -466,7 +537,7 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells[0] == "uint64_t value{64};");
     }
 
-    TEST_CASE("005: clear last removes only most recent executable cell", "[005][session][clear_last]") {
+    TEST_CASE("005: reset last removes only most recent executable cell", "[005][session][reset_last]") {
         detail::temp_dir temp{"sontag_clear_last"};
 
         startup_config cfg{};
@@ -478,7 +549,7 @@ namespace sontag::test {
                 ":decl int base = 5;\n"
                 "int x = base;\n"
                 "int y = x + 1;\n"
-                ":clear last\n"
+                ":reset last\n"
                 ":show exec\n"
                 ":quit\n");
 
@@ -498,7 +569,7 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells[0] == "int x = base;");
     }
 
-    TEST_CASE("005: clear last removes most recently added declarative cell", "[005][session][clear_last]") {
+    TEST_CASE("005: reset last removes most recently added declarative cell", "[005][session][reset_last]") {
         detail::temp_dir temp{"sontag_clear_last_decl"};
         auto source_path = temp.path / "from_file.cpp";
         detail::write_text_file(
@@ -513,7 +584,7 @@ namespace sontag::test {
         cfg.cache_dir = temp.path / "cache";
         cfg.history_enabled = false;
 
-        auto script = ":file {}\n:decl int v = 6;\n:clear last\n:show all\n:quit\n"_format(source_path.string());
+        auto script = ":file {}\n:decl int v = 6;\n:reset last\n:show all\n:quit\n"_format(source_path.string());
         auto output = detail::run_repl_script_capture_output(cfg, script);
 
         CHECK(output.out.find("loaded file") != std::string::npos);
@@ -533,7 +604,7 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells[0].find("int x = seed + 1;") != std::string::npos);
     }
 
-    TEST_CASE("005: persisted cell ids stay monotonic after clear last", "[005][session][cell_id]") {
+    TEST_CASE("005: persisted cell ids stay monotonic after reset last", "[005][session][cell_id]") {
         detail::temp_dir temp{"sontag_cell_id_monotonic"};
 
         startup_config cfg{};
@@ -544,7 +615,7 @@ namespace sontag::test {
                 cfg,
                 ":decl int base = 1;\n"
                 "int temp = base;\n"
-                ":clear last\n"
+                ":reset last\n"
                 ":decl int next = base + 1;\n"
                 ":quit\n");
 
@@ -615,9 +686,9 @@ namespace sontag::test {
         CHECK(output.out.find("#include <cstdint>") != std::string::npos);
         CHECK(output.out.find("uint64_t value = 64;") != std::string::npos);
         CHECK(output.out.find("uint64_t doubled = value * 2;") != std::string::npos);
-        CHECK(output.out.find("return static_cast<int>(doubled);") != std::string::npos);
-        CHECK(output.out.find("return 0;") == std::string::npos);
-        CHECK(output.out.find("return static_cast<int>(doubled);\n\n}") == std::string::npos);
+        CHECK(output.out.find("return static_cast<int>(doubled);") == std::string::npos);
+        CHECK(output.out.find("return 0;") != std::string::npos);
+        CHECK(output.out.find("return 0;\n}") != std::string::npos);
 
         auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
@@ -625,6 +696,60 @@ namespace sontag::test {
         REQUIRE(persisted_cells.exec_cells.size() == 1U);
         CHECK(persisted_cells.decl_cells[0].find("uint64_t value = 64;") != std::string::npos);
         CHECK(persisted_cells.exec_cells[0].find("uint64_t doubled = value * 2;") != std::string::npos);
+    }
+
+    TEST_CASE("005: file keeps early returns but replaces terminal return", "[005][session][file][return]") {
+        detail::temp_dir temp{"sontag_file_trailing_return"};
+        auto source_path = temp.path / "returns.cpp";
+        detail::write_text_file(
+                source_path,
+                "int __sontag_main() {\n"
+                "    int value = 4;\n"
+                "    if (value < 0) {\n"
+                "        return -1;\n"
+                "    }\n"
+                "    return value + 2;\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":file {}\n:show all\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("return -1;") != std::string::npos);
+        CHECK(output.out.find("return value + 2;") == std::string::npos);
+        CHECK(output.out.find("return 0;") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.exec_cells[0].find("return value + 2;") != std::string::npos);
+    }
+
+    TEST_CASE("005: executable cells replace terminal return with canonical return", "[005][session][return]") {
+        detail::temp_dir temp{"sontag_exec_trailing_return"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                "int value = 12;\n"
+                "return value;\n"
+                ":show all\n"
+                ":quit\n");
+
+        CHECK(output.out.find("int value = 12;") != std::string::npos);
+        CHECK(output.out.find("return value;") == std::string::npos);
+        CHECK(output.out.find("return 0;") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.exec_cells.size() == 2U);
+        CHECK(persisted_cells.exec_cells[1] == "return value;");
     }
 
     TEST_CASE("005: file appends onto existing state", "[005][session][file][append]") {
@@ -660,7 +785,42 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells[0].find("int value = seed + 2;") != std::string::npos);
     }
 
-    TEST_CASE("005: clear last undoes full file import transaction", "[005][session][clear_last][file]") {
+    TEST_CASE("005: multiple file imports synthesize a single canonical return", "[005][session][file][return]") {
+        detail::temp_dir temp{"sontag_file_multi_return"};
+        auto first_path = temp.path / "first.cpp";
+        auto second_path = temp.path / "second.cpp";
+        detail::write_text_file(
+                first_path,
+                "int seed = 4;\n"
+                "int __sontag_main() {\n"
+                "    int lhs = seed + 1;\n"
+                "    return lhs;\n"
+                "}\n");
+        detail::write_text_file(
+                second_path,
+                "int value = 7;\n"
+                "int __sontag_main() {\n"
+                "    int rhs = value * 2;\n"
+                "    return rhs;\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":file {}\n:file {}\n:show all\n:quit\n"_format(first_path.string(), second_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("int lhs = seed + 1;") != std::string::npos);
+        CHECK(output.out.find("int rhs = value * 2;") != std::string::npos);
+        CHECK(output.out.find("return lhs;") == std::string::npos);
+        CHECK(output.out.find("return rhs;") == std::string::npos);
+        CHECK(detail::count_occurrences(output.out, "return 0;") == 1U);
+        CHECK(output.out.find("\n\n\n    // exec cell 2") == std::string::npos);
+        CHECK(output.out.find("\n\n\n    return 0;") == std::string::npos);
+    }
+
+    TEST_CASE("005: reset last undoes full file import transaction", "[005][session][reset_last][file]") {
         detail::temp_dir temp{"sontag_clear_last_file_transaction"};
         auto source_path = temp.path / "program.cpp";
         detail::write_text_file(
@@ -675,7 +835,7 @@ namespace sontag::test {
         cfg.cache_dir = temp.path / "cache";
         cfg.history_enabled = false;
 
-        auto script = ":file {}\n:clear last\n:show all\n:quit\n"_format(source_path.string());
+        auto script = ":file {}\n:reset last\n:show all\n:quit\n"_format(source_path.string());
         auto output = detail::run_repl_script_capture_output(cfg, script);
 
         CHECK(output.out.find("loaded file") != std::string::npos);
@@ -690,7 +850,7 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells.empty());
     }
 
-    TEST_CASE("005: clear file removes matching file import after later commands", "[005][session][clear_file]") {
+    TEST_CASE("005: reset file removes matching file import after later commands", "[005][session][reset_file]") {
         detail::temp_dir temp{"sontag_clear_file_after_mutations"};
         auto source_path = temp.path / "imported.cpp";
         detail::write_text_file(
@@ -705,7 +865,7 @@ namespace sontag::test {
         cfg.cache_dir = temp.path / "cache";
         cfg.history_enabled = false;
 
-        auto script = ":file {}\n:decl int tail = 9;\n:clear file {}\n:show all\n:quit\n"_format(
+        auto script = ":file {}\n:decl int tail = 9;\n:reset file {}\n:show all\n:quit\n"_format(
                 source_path.string(), source_path.string());
         auto output = detail::run_repl_script_capture_output(cfg, script);
 
@@ -724,7 +884,7 @@ namespace sontag::test {
         CHECK(persisted_cells.decl_cells[0].find("int tail = 9;") != std::string::npos);
     }
 
-    TEST_CASE("005: clear file removes matching declfile import", "[005][session][clear_file][declfile]") {
+    TEST_CASE("005: reset file removes matching declfile import", "[005][session][reset_file][declfile]") {
         detail::temp_dir temp{"sontag_clear_file_declfile"};
         auto source_path = temp.path / "decl.hpp";
         detail::write_text_file(
@@ -738,7 +898,7 @@ namespace sontag::test {
         cfg.history_enabled = false;
 
         auto script =
-                ":declfile {}\n:clear file {}\n:show all\n:quit\n"_format(source_path.string(), source_path.string());
+                ":declfile {}\n:reset file {}\n:show all\n:quit\n"_format(source_path.string(), source_path.string());
         auto output = detail::run_repl_script_capture_output(cfg, script);
 
         CHECK(output.out.find("loaded declfile") != std::string::npos);
@@ -752,7 +912,7 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells.empty());
     }
 
-    TEST_CASE("005: clear file no-op when path has no matching import", "[005][session][clear_file]") {
+    TEST_CASE("005: reset file no-op when path has no matching import", "[005][session][reset_file]") {
         detail::temp_dir temp{"sontag_clear_file_no_match"};
         auto missing_path = temp.path / "missing.cpp";
 
@@ -760,11 +920,33 @@ namespace sontag::test {
         cfg.cache_dir = temp.path / "cache";
         cfg.history_enabled = false;
 
-        auto script = ":decl int baseline = 1;\n:clear file {}\n:quit\n"_format(missing_path.string());
+        auto script = ":decl int baseline = 1;\n:reset file {}\n:quit\n"_format(missing_path.string());
         auto output = detail::run_repl_script_capture_output(cfg, script);
 
         CHECK(output.out.find("stored decl #1 -> state: valid") != std::string::npos);
         CHECK(output.out.find("no matching file import found for") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        CHECK(persisted_cells.exec_cells.empty());
+        CHECK(persisted_cells.decl_cells[0].find("int baseline = 1;") != std::string::npos);
+    }
+
+    TEST_CASE("005: clear command rejects subcommands", "[005][session][clear]") {
+        detail::temp_dir temp{"sontag_clear_no_subcommands"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int baseline = 1;\n"
+                ":clear last\n"
+                ":quit\n");
+
+        CHECK(output.err.find("invalid :clear, expected no arguments") != std::string::npos);
 
         auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");

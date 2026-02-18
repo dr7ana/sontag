@@ -9,6 +9,7 @@
 
 #include "internal/delta.hpp"
 #include "internal/editor.hpp"
+#include "internal/opcode.hpp"
 #include "internal/session_types.hpp"
 
 extern "C" {
@@ -1035,15 +1036,27 @@ namespace sontag::cli {
             return os.str();
         }
 
-        static void upsert_snapshot(persisted_snapshots& data, std::string_view name, size_t cell_count) {
+        static void upsert_snapshot(
+                persisted_snapshots& data,
+                std::string_view name,
+                const std::vector<std::string>& decl_cells,
+                const std::vector<std::string>& exec_cells) {
+            auto cell_count = decl_cells.size() + exec_cells.size();
             auto it = std::find_if(data.snapshots.begin(), data.snapshots.end(), [name](const snapshot_record& entry) {
                 return entry.name == name;
             });
             if (it == data.snapshots.end()) {
-                data.snapshots.push_back(snapshot_record{std::string(name), cell_count});
+                data.snapshots.push_back(
+                        snapshot_record{
+                                .name = std::string{name},
+                                .cell_count = cell_count,
+                                .decl_cells = decl_cells,
+                                .exec_cells = exec_cells});
                 return;
             }
             it->cell_count = cell_count;
+            it->decl_cells = decl_cells;
+            it->exec_cells = exec_cells;
         }
 
         static void persist_snapshots(const repl_state& state) {
@@ -1214,7 +1227,9 @@ namespace sontag::cli {
         }
 
         static void persist_current_snapshot(repl_state& state) {
-            upsert_snapshot(state.snapshot_data, "current"sv, total_cell_count(state));
+            auto decl_cells = collect_cells_by_kind(state, cell_kind::decl);
+            auto exec_cells = collect_cells_by_kind(state, cell_kind::exec);
+            upsert_snapshot(state.snapshot_data, "current"sv, decl_cells, exec_cells);
             persist_snapshots(state);
         }
 
@@ -1532,8 +1547,6 @@ namespace sontag::cli {
             static constexpr auto help_text = R"(commands:
   :help
   :clear
-  :clear last
-  :clear file <path>
   :show <config|decl|exec|all>
   :symbols
   :decl <code>
@@ -1541,6 +1554,8 @@ namespace sontag::cli {
   :file <path>
   :set <key>=<value>
   :reset
+  :reset last
+  :reset file <path>
   :mark <name>
   :snapshots
   :asm [symbol|@last]
@@ -1549,6 +1564,7 @@ namespace sontag::cli {
   :diag [symbol|@last]
   :mca [symbol|@last]
   :delta [spectrum] [target_opt] [symbol|@last]
+  :delta <snapshot> [target_opt]
   :inspect asm [symbol|@last]
   :inspect mca [summary|heatmap] [symbol|@last]
   :graph cfg [symbol|@last]
@@ -1560,7 +1576,7 @@ examples:
   :decl struct point { int x; int y; };
   :declfile examples/common.hpp
   :file examples/program.cpp
-  :clear file examples/program.cpp
+  :reset file examples/program.cpp
   :set std=c++23
   :set opt=O3
   :set output=json
@@ -1574,6 +1590,7 @@ examples:
   :delta spectrum
   :delta O3
   :delta spectrum O3
+  :delta snap1
   :delta add
   :inspect asm
   :inspect mca
@@ -1862,14 +1879,14 @@ examples:
                 repl_state& state,
                 std::ostream& out,
                 std::ostream& err) {
-            auto path = parse_path_argument(":clear file"sv, raw_argument, err);
+            auto path = parse_path_argument(":reset file"sv, raw_argument, err);
             if (!path) {
                 return true;
             }
 
             auto source_key = normalize_source_key(*path);
             if (!source_key) {
-                err << "failed to normalize path for :clear file\n";
+                err << "failed to normalize path for :reset file\n";
                 return true;
             }
 
@@ -2003,8 +2020,8 @@ examples:
             payload.success = report.success;
             payload.symbol = report.symbol;
             payload.symbol_display = report.symbol_display;
-            payload.baseline = "{}"_format(report.baseline);
-            payload.target = "{}"_format(report.target);
+            payload.baseline = report.baseline_label;
+            payload.target = report.target_label;
             payload.opcode_table = report.opcode_table;
             payload.counters = report.counters;
             payload.quality_flags = delta_quality_flag_strings(report.quality_flags);
@@ -2012,7 +2029,7 @@ examples:
 
             for (const auto& level : report.levels) {
                 auto level_payload = delta_level_output_record{
-                        .level = "{}"_format(level.level),
+                        .level = level.label.empty() ? "{}"_format(level.level) : level.label,
                         .success = level.success,
                         .exit_code = level.exit_code,
                         .artifact_path = level.artifact_path.string(),
@@ -2109,7 +2126,8 @@ examples:
         }
 
         static std::string format_delta_level_summary_line(const delta_level_record& level) {
-            auto line = "  {} success={}"_format(level.level, level.success ? "true"sv : "false"sv);
+            auto label = level.label.empty() ? "{}"_format(level.level) : level.label;
+            auto line = "  {} success={}"_format(label, level.success ? "true"sv : "false"sv);
             if (!level.success) {
                 line.append(" | exit_code={}"_format(level.exit_code));
             }
@@ -2592,7 +2610,7 @@ examples:
 
                 auto column = delta_render_column{
                         .level = level,
-                        .header = "{}"_format(level->level),
+                        .header = level->label.empty() ? "{}"_format(level->level) : level->label,
                         .alignment = alignment,
                         .shift = alignment.shift};
 
@@ -2644,9 +2662,9 @@ examples:
                 if (target.alignment.anchored) {
                     os << ("{}alignment anchor: {}[{}] <-> {}[{}]\n"_format(
                             diff_indent,
-                            report.baseline,
+                            report.baseline_label,
                             target.alignment.baseline_index,
-                            report.target,
+                            report.target_label,
                             target.alignment.target_index));
                 }
                 else {
@@ -2679,7 +2697,7 @@ examples:
                 return;
             }
 
-            auto baseline_label = "{}"_format(report.baseline);
+            auto baseline_label = report.baseline_label;
             if (shared_baseline && shared_baseline_index.has_value()) {
                 os << " {}[{}]"_format(baseline_label, *shared_baseline_index);
                 for (size_t i = 1U; i < columns.size(); ++i) {
@@ -2711,9 +2729,9 @@ examples:
 
         static std::string diff_heading(const delta_report& report) {
             if (report.mode == delta_mode::spectrum) {
-                return "spectrum ({} -> {}):"_format(report.baseline, report.target);
+                return "spectrum ({} -> {}):"_format(report.baseline_label, report.target_label);
             }
-            return "diff ({} -> {}, full side-by-side):"_format(report.baseline, report.target);
+            return "diff ({} -> {}, full side-by-side):"_format(report.baseline_label, report.target_label);
         }
 
         struct metric_descriptor {
@@ -2931,8 +2949,8 @@ examples:
             os << "delta: {}\n"_format(report.success ? "success"sv : "failed"sv);
             os << "mode: {}\n"_format(report.mode);
             os << "symbol: {}\n"_format(report.symbol_display);
-            os << "baseline: {}\n"_format(report.baseline);
-            os << "target: {}\n"_format(report.target);
+            os << "baseline: {}\n"_format(report.baseline_label);
+            os << "target: {}\n"_format(report.target_label);
             os << ("changes: unchanged={} modified={} inserted={} removed={} moved={}\n"_format(
                     report.counters.unchanged_count,
                     report.counters.modified_count,
@@ -2977,7 +2995,8 @@ examples:
             }
 
             for (const auto& level : report.levels) {
-                os << "{} operations:\n"_format(level.level);
+                auto label = level.label.empty() ? "{}"_format(level.level) : level.label;
+                os << "{} operations:\n"_format(label);
                 if (level.operations.empty()) {
                     os << "  <none>\n";
                 }
@@ -3019,8 +3038,132 @@ examples:
             render_delta_report_table(report, verbose, color_mode_value, delta_color_scheme_value, os);
         }
 
-        static bool parse_delta_command_args(std::string_view raw_arg, delta_request& delta, std::ostream& err) {
+        static const snapshot_record* find_snapshot_record(const repl_state& state, std::string_view name) {
+            for (const auto& snapshot : state.snapshot_data.snapshots) {
+                if (snapshot.name == name) {
+                    return &snapshot;
+                }
+            }
+            return nullptr;
+        }
+
+        static void append_unique_quality_flag(
+                std::vector<delta_quality_flag>& flags, delta_quality_flag quality_flag) {
+            if (std::ranges::find(flags, quality_flag) != flags.end()) {
+                return;
+            }
+            flags.push_back(quality_flag);
+        }
+
+        static const delta_level_record* find_delta_level_record(const delta_report& report, optimization_level level) {
+            for (const auto& level_record : report.levels) {
+                if (level_record.level == level) {
+                    return &level_record;
+                }
+            }
+            return nullptr;
+        }
+
+        static void remap_delta_level_operations(
+                std::vector<delta_level_record>& levels, std::vector<delta_opcode_entry>& opcode_table) {
+            auto interner = opcode::opcode_interner{};
+            for (auto& level_record : levels) {
+                for (auto& operation : level_record.operations) {
+                    operation.opcode_uid = interner.intern(operation.opcode);
+                }
+            }
+
+            opcode_table.clear();
+            auto entries = interner.opcode_entries();
+            opcode_table.reserve(entries.size());
+            for (const auto& entry : entries) {
+                opcode_table.push_back(delta_opcode_entry{.opcode_uid = entry.uid, .opcode = entry.mnemonic});
+            }
+        }
+
+        static delta_change_counters compute_pairwise_delta_counters(
+                const delta_level_record& baseline_level, const delta_level_record& target_level) {
+            auto counters = delta_change_counters{};
+            if (!baseline_level.success || !target_level.success) {
+                return counters;
+            }
+
+            auto overlap = std::min(baseline_level.operations.size(), target_level.operations.size());
+            for (size_t i = 0U; i < overlap; ++i) {
+                if (baseline_level.operations[i].opcode_uid == target_level.operations[i].opcode_uid) {
+                    ++counters.unchanged_count;
+                }
+                else {
+                    ++counters.modified_count;
+                }
+            }
+
+            if (baseline_level.operations.size() > overlap) {
+                counters.removed_count = baseline_level.operations.size() - overlap;
+            }
+            if (target_level.operations.size() > overlap) {
+                counters.inserted_count = target_level.operations.size() - overlap;
+            }
+            return counters;
+        }
+
+        static delta_report collect_snapshot_pairwise_delta_report(
+                const startup_config& cfg,
+                const repl_state& state,
+                std::string_view snapshot_name,
+                optimization_level compare_opt) {
+            auto* snapshot = find_snapshot_record(state, snapshot_name);
+            if (snapshot == nullptr) {
+                throw std::runtime_error("unknown snapshot: {}"_format(snapshot_name));
+            }
+
+            auto current_request = make_analysis_request(cfg, state);
+            auto snapshot_request = current_request;
+            snapshot_request.decl_cells = snapshot->decl_cells;
+            snapshot_request.exec_cells = snapshot->exec_cells;
+
+            auto delta = delta_request{.mode = delta_mode::pairwise, .symbol = std::nullopt, .target = compare_opt};
+            auto current_report = collect_delta_report(current_request, delta);
+            auto snapshot_report = collect_delta_report(snapshot_request, delta);
+
+            auto* current_level = find_delta_level_record(current_report, compare_opt);
+            auto* snapshot_level = find_delta_level_record(snapshot_report, compare_opt);
+            if (current_level == nullptr || snapshot_level == nullptr) {
+                throw std::runtime_error("failed to collect delta levels for {}"_format(compare_opt));
+            }
+
+            auto report = delta_report{};
+            report.mode = delta_mode::pairwise;
+            report.baseline = optimization_level::o0;
+            report.target = optimization_level::o2;
+            report.baseline_label = "current";
+            report.target_label = std::string{snapshot_name};
+            report.symbol = current_report.symbol.empty() ? snapshot_report.symbol : current_report.symbol;
+            report.symbol_display = current_report.symbol_display.empty() ? snapshot_report.symbol_display
+                                                                          : current_report.symbol_display;
+            report.quality_flags = current_report.quality_flags;
+            for (auto quality_flag : snapshot_report.quality_flags) {
+                append_unique_quality_flag(report.quality_flags, quality_flag);
+            }
+
+            auto current_level_record = *current_level;
+            current_level_record.level = report.baseline;
+            current_level_record.label = report.baseline_label;
+            auto snapshot_level_record = *snapshot_level;
+            snapshot_level_record.level = report.target;
+            snapshot_level_record.label = report.target_label;
+
+            report.levels = {std::move(current_level_record), std::move(snapshot_level_record)};
+            remap_delta_level_operations(report.levels, report.opcode_table);
+            report.success = report.levels[0].success && report.levels[1].success;
+            report.counters = compute_pairwise_delta_counters(report.levels[0], report.levels[1]);
+            return report;
+        }
+
+        static bool parse_delta_command_args(
+                std::string_view raw_arg, delta_request& delta, bool& target_explicit, std::ostream& err) {
             auto args = trim_view(raw_arg);
+            target_explicit = false;
             if (args.empty()) {
                 return true;
             }
@@ -3048,6 +3191,7 @@ examples:
                         return false;
                     }
                     target = parsed_level;
+                    target_explicit = true;
                     continue;
                 }
 
@@ -3078,13 +3222,32 @@ examples:
             }
 
             auto delta = delta_request{};
-            if (!parse_delta_command_args(*arg, delta, err)) {
+            auto target_explicit = false;
+            if (!parse_delta_command_args(*arg, delta, target_explicit, err)) {
                 return true;
             }
 
+            auto snapshot_name = std::optional<std::string>{};
+            if (delta.symbol.has_value()) {
+                if (find_snapshot_record(state, *delta.symbol) != nullptr) {
+                    snapshot_name = *delta.symbol;
+                }
+            }
+
             try {
-                auto request = make_analysis_request(cfg, state);
-                auto report = collect_delta_report(request, delta);
+                auto report = delta_report{};
+                if (snapshot_name.has_value()) {
+                    if (delta.mode == delta_mode::spectrum) {
+                        err << "invalid :delta, snapshot comparison does not support spectrum mode\n";
+                        return true;
+                    }
+                    auto compare_opt = target_explicit ? delta.target : cfg.opt_level;
+                    report = collect_snapshot_pairwise_delta_report(cfg, state, *snapshot_name, compare_opt);
+                }
+                else {
+                    auto request = make_analysis_request(cfg, state);
+                    report = collect_delta_report(request, delta);
+                }
                 render_delta_report(report, cfg.output, cfg.verbose, cfg.color, cfg.delta_color_scheme, out);
             } catch (const std::exception& e) {
                 err << "delta analysis error: " << e.what() << '\n';
@@ -3260,24 +3423,11 @@ examples:
                 return true;
             }
             if (auto clear_arg = command_argument(cmd, ":clear"sv)) {
-                if (clear_arg->empty()) {
-                    clear_terminal(std::cout);
+                if (!clear_arg->empty()) {
+                    std::cerr << "invalid :clear, expected no arguments\n";
                     return true;
                 }
-                if (*clear_arg == "last"sv) {
-                    (void)clear_last_transaction(cfg, state, std::cout, std::cerr);
-                    return true;
-                }
-                if (auto file_arg = command_argument(*clear_arg, "file"sv)) {
-                    if (file_arg->empty()) {
-                        std::cerr << "invalid :clear file, expected path after command\n";
-                        return true;
-                    }
-                    (void)clear_file_transaction(*file_arg, cfg, state, std::cout, std::cerr);
-                    return true;
-                }
-
-                std::cerr << "invalid :clear, expected last|file <path>\n";
+                clear_terminal(std::cout);
                 return true;
             }
             if (auto show_arg = command_argument(cmd, ":show"sv)) {
@@ -3326,14 +3476,32 @@ examples:
             if (process_file_command(cmd, cfg, state)) {
                 return true;
             }
-            if (cmd == ":reset"sv) {
-                clear_cells(state);
-                clear_transactions(state);
-                state.next_cell_id = 1U;
-                state.next_tx_id = 1U;
-                persist_cells(state);
-                persist_current_snapshot(state);
-                std::cout << "session reset\n";
+            if (auto reset_arg = command_argument(cmd, ":reset"sv)) {
+                if (reset_arg->empty()) {
+                    clear_cells(state);
+                    clear_transactions(state);
+                    state.next_cell_id = 1U;
+                    state.next_tx_id = 1U;
+                    state.snapshot_data = persisted_snapshots{};
+                    persist_cells(state);
+                    persist_current_snapshot(state);
+                    std::cout << "session reset\n";
+                    return true;
+                }
+                if (*reset_arg == "last"sv) {
+                    (void)clear_last_transaction(cfg, state, std::cout, std::cerr);
+                    return true;
+                }
+                if (auto file_arg = command_argument(*reset_arg, "file"sv)) {
+                    if (file_arg->empty()) {
+                        std::cerr << "invalid :reset file, expected path after command\n";
+                        return true;
+                    }
+                    (void)clear_file_transaction(*file_arg, cfg, state, std::cout, std::cerr);
+                    return true;
+                }
+
+                std::cerr << "invalid :reset, expected last|file <path>\n";
                 return true;
             }
             if (cmd == ":snapshots"sv) {
@@ -3361,7 +3529,9 @@ examples:
                     std::cerr << "invalid :mark, expected a snapshot name\n";
                     return true;
                 }
-                upsert_snapshot(state.snapshot_data, name, total_cell_count(state));
+                auto decl_cells = collect_cells_by_kind(state, cell_kind::decl);
+                auto exec_cells = collect_cells_by_kind(state, cell_kind::exec);
+                upsert_snapshot(state.snapshot_data, name, decl_cells, exec_cells);
                 persist_snapshots(state);
                 std::cout << "marked snapshot '" << name << "' at cell_count=" << total_cell_count(state) << '\n';
                 return true;

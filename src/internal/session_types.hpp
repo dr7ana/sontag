@@ -1,11 +1,11 @@
 #pragma once
 
+#include <glaze/glaze.hpp>
+
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
-
-#include <glaze/glaze.hpp>
 
 namespace sontag::internal {
 
@@ -43,6 +43,8 @@ namespace sontag::internal {
     struct snapshot_record {
         std::string name{};
         size_t cell_count{};
+        std::vector<std::string> decl_cells{};
+        std::vector<std::string> exec_cells{};
     };
 
     struct persisted_snapshots {
@@ -98,7 +100,15 @@ namespace glz {
     template <>
     struct meta<sontag::internal::snapshot_record> {
         using T = sontag::internal::snapshot_record;
-        static constexpr auto value = object("name", &T::name, "cell_count", &T::cell_count);
+        static constexpr auto value =
+                object("name",
+                       &T::name,
+                       "cell_count",
+                       &T::cell_count,
+                       "decl_cells",
+                       &T::decl_cells,
+                       "exec_cells",
+                       &T::exec_cells);
     };
 
     template <>

@@ -95,9 +95,11 @@ sontag >
 - file ingestion commands:
   - `:declfile <path>` loads full file text as one declarative cell
   - `:file <path>` AST-splits a source file into declarative prefix + driver body (`main` or `__sontag_main`)
-- clear commands:
-  - `:clear last` undoes the most recent mutation transaction (single line or full file import)
-  - `:clear file <path>` undoes the most recent matching file import transaction from either `:file` or `:declfile`
+- clear/reset commands:
+  - `:clear` clears the terminal screen
+  - `:reset` clears all transactions/state
+  - `:reset last` undoes the most recent mutation transaction (single line or full file import)
+  - `:reset file <path>` undoes the most recent matching file import transaction from either `:file` or `:declfile`
 - generated translation unit preview (`:show all`)
 - symbol listing from compiled output (`:symbols`)
 - assembly output (`:asm`)
@@ -105,7 +107,9 @@ sontag >
 - LLVM IR output (`:ir`)
 - compiler diagnostics output (`:diag`)
 - microarchitecture analysis via `llvm-mca` (`:mca`)
-- optimization delta analysis (`:delta`) with pairwise `O0 -> target` and spectrum `O0..target` opcode-aligned operation comparison (default target: `O2`)
+- optimization delta analysis (`:delta`) with:
+  - pairwise `O0 -> target` and spectrum `O0..target` opcode-aligned operation comparison (default target: `O2`)
+  - snapshot pairwise comparison (`:delta <snapshot>`) with `current` as baseline and the snapshot label as target
 - graph generation (`:graph <subcommand>`)
   - control-flow graphs (`:graph cfg`)
   - function call graphs (`:graph call`)
@@ -128,13 +132,15 @@ sontag >
 - use `:show all` to inspect the full generated source in order: declarations first, then executable cells wrapped in the synthesized function.
 - all mutating commands validate atomically; on failure, state is unchanged.
 
-## Clear Semantics
+## Reset Semantics
 
 - state mutations are tracked as transactions:
   - single-line mutations (`:decl ...` or plain executable input) are one transaction
   - `:file <path>` and `:declfile <path>` are import transactions
-- `:clear last` removes the most recent successful transaction.
-- `:clear file <path>` removes the most recent successful import transaction matching the normalized path, whether imported with `:file` or `:declfile`.
+- `:clear` is screen-only (no subcommands).
+- `:reset` clears all persisted cells, transactions, and named snapshots.
+- `:reset last` removes the most recent successful transaction.
+- `:reset file <path>` removes the most recent successful import transaction matching the normalized path, whether imported with `:file` or `:declfile`.
 - successful mutation output uses:
   - `... -> state: valid`
 - failed mutation output ends with:
@@ -157,6 +163,7 @@ sontag >
 - `:mca [symbol|@last]` compiles to assembly, runs microarchitecture analysis, and prints throughput/latency/resource-pressure analysis text.
 - `:mca` does not operate on data symbols (for example `[D]`/`[B]` entries from `:symbols`).
 - `:delta [spectrum] [target_opt] [symbol|@last]` runs either pairwise (`O0 -> target_opt`) or spectrum (`O0..target_opt`) optimization comparison, reports opcode UID mapping, and prints per-level operation streams.
+- `:delta <snapshot> [target_opt]` runs pairwise current-vs-snapshot comparison at one optimization level (default: current `opt_level`), with labels `current` and `<snapshot>`.
 - `:inspect asm [symbol|@last]` emits structured JSON containing aligned source/IR/asm line records for downstream tooling.
 - `:inspect mca [summary|heatmap] [symbol|@last]` emits structured JSON from `llvm-mca` output and prints a compact terminal summary.
 - `:graph cfg [symbol|@last]` compiles to LLVM IR, builds a function-scoped control-flow graph, and emits graph summary + DOT artifact (with optional rendered image).
@@ -165,15 +172,16 @@ sontag >
 
 ## `:delta`
 
-Use `:delta` for optimization-level instruction stream comparison on the current snapshot.
+Use `:delta` for instruction-stream comparison on the current snapshot.
 
 Modes:
 - `:delta [target_opt] [symbol|@last]`: pairwise mode (`O0 -> target_opt`), default target is `O2`.
 - `:delta spectrum [target_opt] [symbol|@last]`: spectrum mode (`O0..target_opt`), default upper bound is `O2`.
+- `:delta <snapshot> [target_opt]`: pairwise current-vs-snapshot mode at one optimization level (default: current `opt_level`).
 
 Output summary fields:
 - `mode`: `pairwise` or `spectrum`
-- `baseline` / `target`: optimization range endpoints
+- `baseline` / `target`: range endpoints (`O*` labels in optimization mode, `current`/snapshot labels in snapshot mode)
 - `changes`: unchanged/modified/inserted/removed/moved counters
 - `levels`: per-level success, exit code, operation count, opcode counts
 

@@ -76,6 +76,7 @@ namespace sontag {
 
     struct delta_level_record {
         optimization_level level{optimization_level::o0};
+        std::string label{};
         bool success{false};
         int exit_code{-1};
         std::filesystem::path artifact_path{};
@@ -101,6 +102,8 @@ namespace sontag {
         std::string symbol_display{};
         optimization_level baseline{optimization_level::o0};
         optimization_level target{optimization_level::o2};
+        std::string baseline_label{};
+        std::string target_label{};
         std::vector<delta_opcode_entry> opcode_table{};
         std::vector<delta_level_record> levels{};
         delta_change_counters counters{};
