@@ -51,7 +51,7 @@ option(SONTAG_BUILD_TESTS "Build sontag test suite" ${SONTAG_IS_TOPLEVEL_PROJECT
 option(SONTAG_SMOKE "Build sontag smoke tests" OFF)
 option(SONTAG_USE_LIBCXX "Build C++ targets with libc++ instead of libstdc++ when using clang" ON)
 
-set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -70,7 +70,7 @@ add_library(sontag
 )
 
 target_include_directories(sontag PUBLIC include)
-target_compile_features(sontag PUBLIC cxx_std_26)
+target_compile_features(sontag PUBLIC cxx_std_23)
 
 add_subdirectory(external)
 
