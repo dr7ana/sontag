@@ -8,6 +8,7 @@
 #include "../src/internal/delta.hpp"
 #include "../src/internal/metrics.hpp"
 #include "../src/internal/opcode.hpp"
+#include "../src/internal/session_types.hpp"
 
 extern "C" {
 #include <fcntl.h>

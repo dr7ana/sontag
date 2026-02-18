@@ -9,6 +9,7 @@
 
 #include "internal/delta.hpp"
 #include "internal/editor.hpp"
+#include "internal/session_types.hpp"
 
 extern "C" {
 #include <sys/wait.h>
@@ -26,6 +27,7 @@ extern "C" {
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <set>
 #include <span>
@@ -43,53 +45,22 @@ namespace sontag::cli { namespace detail {
     using namespace std::string_view_literals;
     namespace fs = std::filesystem;
 
-    enum class cell_kind { declarative, executable };
-
-    struct cell_record {
-        uint64_t cell_id{};
-        cell_kind kind{cell_kind::executable};
-        std::string text{};
-    };
-
-    struct persisted_config {
-        int schema_version{1};
-        std::string clang{};
-        std::string cxx_standard{};
-        std::string opt_level{};
-        std::optional<std::string> target{};
-        std::optional<std::string> cpu{};
-        std::optional<std::string> mca_cpu{};
-        std::string mca_path{"llvm-mca"};
-        std::string cache_dir{};
-        std::string output{};
-        std::string color{};
-        std::string color_scheme{"classic"};
-    };
-
-    struct snapshot_record {
-        std::string name{};
-        size_t cell_count{};
-    };
-
-    struct persisted_snapshots {
-        int schema_version{1};
-        std::string active_snapshot{"current"};
-        std::vector<snapshot_record> snapshots{{snapshot_record{"current", 0U}}};
-    };
-
-    struct persisted_cells {
-        int schema_version{1};
-        uint64_t next_cell_id{1U};
-        std::vector<cell_record> cells{};
-        std::vector<std::string> decl_cells{};
-        std::vector<std::string> exec_cells{};
-    };
+    using internal::cell_kind;
+    using internal::cell_record;
+    using internal::mutation_transaction;
+    using internal::persisted_cells;
+    using internal::persisted_config;
+    using internal::persisted_snapshots;
+    using internal::snapshot_record;
+    using internal::transaction_kind;
 
     struct repl_state {
         std::flat_map<uint64_t, cell_record> cells{};
         std::set<uint64_t> decl_ids{};
         std::set<uint64_t> exec_ids{};
         uint64_t next_cell_id{1U};
+        std::vector<mutation_transaction> transactions{};
+        uint64_t next_tx_id{1U};
         persisted_snapshots snapshot_data{};
         fs::path session_dir{};
         fs::path config_path{};
@@ -307,76 +278,6 @@ namespace glz {
                        &T::counters,
                        "quality_flags",
                        &T::quality_flags);
-    };
-
-    template <>
-    struct meta<sontag::cli::detail::persisted_config> {
-        using T = sontag::cli::detail::persisted_config;
-        static constexpr auto value =
-                object("schema_version",
-                       &T::schema_version,
-                       "clang",
-                       &T::clang,
-                       "cxx_standard",
-                       &T::cxx_standard,
-                       "opt_level",
-                       &T::opt_level,
-                       "target",
-                       &T::target,
-                       "cpu",
-                       &T::cpu,
-                       "mca_cpu",
-                       &T::mca_cpu,
-                       "mca_path",
-                       &T::mca_path,
-                       "cache_dir",
-                       &T::cache_dir,
-                       "output",
-                       &T::output,
-                       "color",
-                       &T::color,
-                       "color_scheme",
-                       &T::color_scheme);
-    };
-
-    template <>
-    struct meta<sontag::cli::detail::snapshot_record> {
-        using T = sontag::cli::detail::snapshot_record;
-        static constexpr auto value = object("name", &T::name, "cell_count", &T::cell_count);
-    };
-
-    template <>
-    struct meta<sontag::cli::detail::persisted_snapshots> {
-        using T = sontag::cli::detail::persisted_snapshots;
-        static constexpr auto value =
-                object("schema_version",
-                       &T::schema_version,
-                       "active_snapshot",
-                       &T::active_snapshot,
-                       "snapshots",
-                       &T::snapshots);
-    };
-
-    template <>
-    struct meta<sontag::cli::detail::cell_record> {
-        using T = sontag::cli::detail::cell_record;
-        static constexpr auto value = object("cell_id", &T::cell_id, "kind", &T::kind, "text", &T::text);
-    };
-
-    template <>
-    struct meta<sontag::cli::detail::persisted_cells> {
-        using T = sontag::cli::detail::persisted_cells;
-        static constexpr auto value =
-                object("schema_version",
-                       &T::schema_version,
-                       "next_cell_id",
-                       &T::next_cell_id,
-                       "cells",
-                       &T::cells,
-                       "decl_cells",
-                       &T::decl_cells,
-                       "exec_cells",
-                       &T::exec_cells);
     };
 
     template <>
@@ -1154,7 +1055,7 @@ namespace sontag::cli {
         }
 
         static size_t kind_cell_count(const repl_state& state, cell_kind kind) {
-            if (kind == cell_kind::declarative) {
+            if (kind == cell_kind::decl) {
                 return state.decl_ids.size();
             }
             return state.exec_ids.size();
@@ -1162,7 +1063,7 @@ namespace sontag::cli {
 
         static std::vector<std::string> collect_cells_by_kind(const repl_state& state, cell_kind kind) {
             auto* ids = &state.exec_ids;
-            if (kind == cell_kind::declarative) {
+            if (kind == cell_kind::decl) {
                 ids = &state.decl_ids;
             }
 
@@ -1182,6 +1083,10 @@ namespace sontag::cli {
             state.exec_ids.clear();
         }
 
+        static void clear_transactions(repl_state& state) {
+            state.transactions.clear();
+        }
+
         static void add_cell_with_id(repl_state& state, uint64_t cell_id, cell_kind kind, std::string text) {
             auto inserted = state.cells.emplace(
                     cell_id, cell_record{.cell_id = cell_id, .kind = kind, .text = std::move(text)});
@@ -1189,7 +1094,7 @@ namespace sontag::cli {
                 throw std::runtime_error("duplicate cell id while rebuilding state: {}"_format(cell_id));
             }
 
-            if (kind == cell_kind::declarative) {
+            if (kind == cell_kind::decl) {
                 state.decl_ids.insert(cell_id);
             }
             else {
@@ -1208,7 +1113,7 @@ namespace sontag::cli {
             if (!inserted.second) {
                 throw std::runtime_error("duplicate cell id while appending state: {}"_format(cell_id));
             }
-            if (kind == cell_kind::declarative) {
+            if (kind == cell_kind::decl) {
                 state.decl_ids.insert(cell_id);
             }
             else {
@@ -1217,15 +1122,94 @@ namespace sontag::cli {
             return cell_id;
         }
 
+        static uint64_t append_transaction(
+                repl_state& state,
+                transaction_kind kind,
+                std::optional<std::string> source_key,
+                std::vector<uint64_t> cell_ids) {
+            auto tx_id = state.next_tx_id++;
+            state.transactions.push_back(
+                    mutation_transaction{
+                            .tx_id = tx_id,
+                            .kind = kind,
+                            .source_key = std::move(source_key),
+                            .cell_ids = std::move(cell_ids)});
+            return tx_id;
+        }
+
+        static bool transaction_kind_is_import(transaction_kind kind) {
+            return kind == transaction_kind::file || kind == transaction_kind::declfile;
+        }
+
+        static std::optional<std::string> normalize_source_key(const fs::path& path) {
+            if (path.empty()) {
+                return std::nullopt;
+            }
+
+            std::error_code ec{};
+            auto weak = fs::weakly_canonical(path, ec);
+            if (!ec) {
+                return weak.lexically_normal().string();
+            }
+            return path.lexically_normal().string();
+        }
+
+        static std::vector<std::string> collect_cells_by_kind_excluding_ids(
+                const repl_state& state, cell_kind kind, const std::set<uint64_t>& excluded_cell_ids) {
+            auto* ids = &state.exec_ids;
+            if (kind == cell_kind::decl) {
+                ids = &state.decl_ids;
+            }
+
+            std::vector<std::string> cells{};
+            cells.reserve(ids->size());
+            for (auto cell_id : *ids) {
+                if (excluded_cell_ids.contains(cell_id)) {
+                    continue;
+                }
+                if (auto it = state.cells.find(cell_id); it != state.cells.end()) {
+                    cells.push_back(it->second.text);
+                }
+            }
+            return cells;
+        }
+
+        static std::vector<uint64_t> filter_existing_cell_ids(
+                const repl_state& state, const std::vector<uint64_t>& cell_ids) {
+            std::vector<uint64_t> filtered{};
+            filtered.reserve(cell_ids.size());
+            for (auto cell_id : cell_ids) {
+                if (!state.cells.contains(cell_id)) {
+                    continue;
+                }
+                if (std::ranges::find(filtered, cell_id) != filtered.end()) {
+                    continue;
+                }
+                filtered.push_back(cell_id);
+            }
+            return filtered;
+        }
+
+        static void synthesize_transactions_from_cells(repl_state& state) {
+            clear_transactions(state);
+            state.next_tx_id = 1U;
+            for (const auto& [cell_id, cell] : state.cells) {
+                auto kind = cell.kind == cell_kind::decl ? transaction_kind::decl : transaction_kind::exec;
+                (void)append_transaction(state, kind, std::nullopt, std::vector<uint64_t>{cell_id});
+            }
+        }
+
         static void persist_cells(const repl_state& state) {
             persisted_cells data{};
             data.next_cell_id = state.next_cell_id;
+            data.next_tx_id = state.next_tx_id;
             data.cells.reserve(state.cells.size());
             for (const auto& [cell_id, cell] : state.cells) {
                 data.cells.push_back(cell);
             }
-            data.decl_cells = collect_cells_by_kind(state, cell_kind::declarative);
-            data.exec_cells = collect_cells_by_kind(state, cell_kind::executable);
+            data.transactions = state.transactions;
+            data.decl_cells = collect_cells_by_kind(state, cell_kind::decl);
+            data.exec_cells = collect_cells_by_kind(state, cell_kind::exec);
             write_json_file(data, state.cells_path);
         }
 
@@ -1327,7 +1311,9 @@ namespace sontag::cli {
                 auto cell_data = read_json_file<persisted_cells>(state.cells_path, true);
                 validate_supported_schema_version(cell_data.schema_version, state.cells_path);
                 clear_cells(state);
+                clear_transactions(state);
                 state.next_cell_id = 1U;
+                state.next_tx_id = 1U;
 
                 if (!cell_data.cells.empty()) {
                     for (auto& persisted_cell : cell_data.cells) {
@@ -1340,11 +1326,37 @@ namespace sontag::cli {
                 }
                 else {
                     for (auto& cell : cell_data.decl_cells) {
-                        append_cell(state, std::move(cell), cell_kind::declarative);
+                        append_cell(state, std::move(cell), cell_kind::decl);
                     }
                     for (auto& cell : cell_data.exec_cells) {
-                        append_cell(state, std::move(cell), cell_kind::executable);
+                        append_cell(state, std::move(cell), cell_kind::exec);
                     }
+                }
+
+                if (!cell_data.transactions.empty()) {
+                    state.transactions.clear();
+                    state.transactions.reserve(cell_data.transactions.size());
+                    auto max_tx_id = uint64_t{0U};
+                    for (auto& tx : cell_data.transactions) {
+                        auto filtered_cell_ids = filter_existing_cell_ids(state, tx.cell_ids);
+                        if (filtered_cell_ids.empty()) {
+                            continue;
+                        }
+                        tx.cell_ids = std::move(filtered_cell_ids);
+                        state.transactions.push_back(std::move(tx));
+                        if (state.transactions.back().tx_id > max_tx_id) {
+                            max_tx_id = state.transactions.back().tx_id;
+                        }
+                    }
+                    if (!state.transactions.empty()) {
+                        state.next_tx_id = std::max(cell_data.next_tx_id, max_tx_id + 1U);
+                    }
+                    else {
+                        synthesize_transactions_from_cells(state);
+                    }
+                }
+                else {
+                    synthesize_transactions_from_cells(state);
                 }
             }
 
@@ -1418,17 +1430,17 @@ namespace sontag::cli {
         }
 
         static void print_decl_cells(const repl_state& state, std::ostream& os) {
-            print_cells(collect_cells_by_kind(state, cell_kind::declarative), os, "no declarative cells");
+            print_cells(collect_cells_by_kind(state, cell_kind::decl), os, "no declarative cells");
         }
 
         static void print_exec_cells(const repl_state& state, std::ostream& os) {
-            print_cells(collect_cells_by_kind(state, cell_kind::executable), os, "no executable cells");
+            print_cells(collect_cells_by_kind(state, cell_kind::exec), os, "no executable cells");
         }
 
         static void print_all_cells(const repl_state& state, std::ostream& os) {
             analysis_request request{};
-            request.decl_cells = collect_cells_by_kind(state, cell_kind::declarative);
-            request.exec_cells = collect_cells_by_kind(state, cell_kind::executable);
+            request.decl_cells = collect_cells_by_kind(state, cell_kind::decl);
+            request.exec_cells = collect_cells_by_kind(state, cell_kind::exec);
             os << synthesize_source(request);
         }
 
@@ -1521,6 +1533,7 @@ namespace sontag::cli {
   :help
   :clear
   :clear last
+  :clear file <path>
   :show <config|decl|exec|all>
   :symbols
   :decl <code>
@@ -1547,6 +1560,7 @@ examples:
   :decl struct point { int x; int y; };
   :declfile examples/common.hpp
   :file examples/program.cpp
+  :clear file examples/program.cpp
   :set std=c++23
   :set opt=O3
   :set output=json
@@ -1604,8 +1618,8 @@ examples:
             analysis_request request{};
             request.clang_path = cfg.clang_path;
             request.session_dir = state.session_dir;
-            request.decl_cells = collect_cells_by_kind(state, cell_kind::declarative);
-            request.exec_cells = collect_cells_by_kind(state, cell_kind::executable);
+            request.decl_cells = collect_cells_by_kind(state, cell_kind::decl);
+            request.exec_cells = collect_cells_by_kind(state, cell_kind::exec);
             request.language_standard = cfg.language_standard;
             request.opt_level = cfg.opt_level;
             request.target_triple = cfg.target_triple;
@@ -1644,6 +1658,10 @@ examples:
                 const repl_state& state,
                 const std::vector<std::string>& decl_cells,
                 const std::vector<std::string>& exec_cells) {
+            if (decl_cells.empty() && exec_cells.empty()) {
+                return validation_result{.success = true, .diagnostics = {}};
+            }
+
             auto request = make_analysis_request(cfg, state);
             request.symbol = std::nullopt;
             request.decl_cells = decl_cells;
@@ -1653,6 +1671,64 @@ examples:
             return validation_result{.success = diag.success, .diagnostics = std::move(diag.artifact_text)};
         }
 
+        static bool emit_validation_failure(const validation_result& validation, std::ostream& err) {
+            if (!validation.success && !validation.diagnostics.empty()) {
+                err << validation.diagnostics;
+                if (!validation.diagnostics.ends_with('\n')) {
+                    err << '\n';
+                }
+            }
+            if (!validation.success) {
+                err << "state unchanged\n";
+                return true;
+            }
+            return false;
+        }
+
+        static bool append_validated_transaction(
+                startup_config& cfg,
+                repl_state& state,
+                std::vector<std::string> decl_cells,
+                std::vector<std::string> exec_cells,
+                transaction_kind transaction_kind_value,
+                std::optional<std::string> source_key,
+                std::string_view success_message,
+                std::ostream& out,
+                std::ostream& err) {
+            try {
+                auto candidate_decl_cells = collect_cells_by_kind(state, cell_kind::decl);
+                auto candidate_exec_cells = collect_cells_by_kind(state, cell_kind::exec);
+                for (const auto& cell : decl_cells) {
+                    candidate_decl_cells.push_back(cell);
+                }
+                for (const auto& cell : exec_cells) {
+                    candidate_exec_cells.push_back(cell);
+                }
+
+                auto validation = validate_state_cells(cfg, state, candidate_decl_cells, candidate_exec_cells);
+                if (emit_validation_failure(validation, err)) {
+                    return false;
+                }
+            } catch (const std::exception& e) {
+                err << "state validation error: " << e.what() << '\n';
+                return false;
+            }
+
+            std::vector<uint64_t> cell_ids{};
+            cell_ids.reserve(decl_cells.size() + exec_cells.size());
+            for (auto& cell : decl_cells) {
+                cell_ids.push_back(append_cell(state, std::move(cell), cell_kind::decl));
+            }
+            for (auto& cell : exec_cells) {
+                cell_ids.push_back(append_cell(state, std::move(cell), cell_kind::exec));
+            }
+            (void)append_transaction(state, transaction_kind_value, std::move(source_key), std::move(cell_ids));
+            persist_cells(state);
+            persist_current_snapshot(state);
+            out << success_message << " -> state: valid\n";
+            return true;
+        }
+
         static bool append_validated_cell(
                 startup_config& cfg,
                 repl_state& state,
@@ -1660,16 +1736,84 @@ examples:
                 bool declarative,
                 std::ostream& out,
                 std::ostream& err) {
-            try {
-                auto validation = validate_candidate_state(cfg, state, cell, declarative);
-                if (!validation.success && !validation.diagnostics.empty()) {
-                    err << validation.diagnostics;
-                    if (!validation.diagnostics.ends_with('\n')) {
-                        err << '\n';
+            auto transaction_kind_value = declarative ? transaction_kind::decl : transaction_kind::exec;
+            auto success_message = std::string{};
+            if (declarative) {
+                success_message = "stored decl #{}"_format(kind_cell_count(state, cell_kind::decl) + 1U);
+            }
+            else {
+                success_message = "stored cell #{}"_format(kind_cell_count(state, cell_kind::exec) + 1U);
+            }
+
+            auto decl_cells = std::vector<std::string>{};
+            auto exec_cells = std::vector<std::string>{};
+            if (declarative) {
+                decl_cells.emplace_back(cell);
+            }
+            else {
+                exec_cells.emplace_back(cell);
+            }
+
+            return append_validated_transaction(
+                    cfg,
+                    state,
+                    std::move(decl_cells),
+                    std::move(exec_cells),
+                    transaction_kind_value,
+                    std::nullopt,
+                    success_message,
+                    out,
+                    err);
+        }
+
+        struct cell_kind_counts {
+            size_t decl{};
+            size_t exec{};
+        };
+
+        static cell_kind_counts count_transaction_cells(const repl_state& state, const mutation_transaction& tx) {
+            auto counts = cell_kind_counts{};
+            auto seen = std::set<uint64_t>{};
+            for (auto cell_id : tx.cell_ids) {
+                if (seen.contains(cell_id)) {
+                    continue;
+                }
+                seen.insert(cell_id);
+                if (auto it = state.cells.find(cell_id); it != state.cells.end()) {
+                    if (it->second.kind == cell_kind::decl) {
+                        ++counts.decl;
+                    }
+                    else {
+                        ++counts.exec;
                     }
                 }
-                if (!validation.success) {
-                    err << "cell rejected, state unchanged\n";
+            }
+            return counts;
+        }
+
+        static bool remove_transaction_by_index(
+                startup_config& cfg,
+                repl_state& state,
+                size_t transaction_index,
+                std::string_view success_message_prefix,
+                std::ostream& out,
+                std::ostream& err) {
+            if (transaction_index >= state.transactions.size()) {
+                err << "invalid transaction index\n";
+                return false;
+            }
+
+            const auto& tx = state.transactions[transaction_index];
+            auto counts = count_transaction_cells(state, tx);
+            auto excluded_cell_ids = std::set<uint64_t>{tx.cell_ids.begin(), tx.cell_ids.end()};
+
+            try {
+                auto candidate_decl_cells =
+                        collect_cells_by_kind_excluding_ids(state, cell_kind::decl, excluded_cell_ids);
+                auto candidate_exec_cells =
+                        collect_cells_by_kind_excluding_ids(state, cell_kind::exec, excluded_cell_ids);
+                auto validation = validate_state_cells(cfg, state, candidate_decl_cells, candidate_exec_cells);
+                if (emit_validation_failure(validation, err)) {
                     return false;
                 }
             } catch (const std::exception& e) {
@@ -1677,56 +1821,78 @@ examples:
                 return false;
             }
 
-            if (declarative) {
-                append_cell(state, std::string{cell}, cell_kind::declarative);
-                persist_cells(state);
-                persist_current_snapshot(state);
-                out << "stored decl #" << kind_cell_count(state, cell_kind::declarative) << " (state: valid)\n";
-                return true;
+            for (auto cell_id : excluded_cell_ids) {
+                auto it = state.cells.find(cell_id);
+                if (it == state.cells.end()) {
+                    continue;
+                }
+                if (it->second.kind == cell_kind::decl) {
+                    state.decl_ids.erase(cell_id);
+                }
+                else {
+                    state.exec_ids.erase(cell_id);
+                }
+                state.cells.erase(it);
             }
 
-            append_cell(state, std::string{cell}, cell_kind::executable);
+            auto tx_it = state.transactions.begin();
+            std::advance(tx_it, static_cast<long>(transaction_index));
+            state.transactions.erase(tx_it);
             persist_cells(state);
             persist_current_snapshot(state);
-            out << "stored cell #" << kind_cell_count(state, cell_kind::executable) << " (state: valid)\n";
+            out << success_message_prefix << " (cleared decl={}, exec={})"_format(counts.decl, counts.exec)
+                << " -> state: valid\n";
             return true;
         }
 
-        static bool replace_with_validated_cells(
-                startup_config& cfg,
-                repl_state& state,
-                std::vector<std::string> decl_cells,
-                std::vector<std::string> exec_cells,
-                std::string_view success_message,
-                std::ostream& out,
-                std::ostream& err) {
-            try {
-                auto validation = validate_state_cells(cfg, state, decl_cells, exec_cells);
-                if (!validation.success && !validation.diagnostics.empty()) {
-                    err << validation.diagnostics;
-                    if (!validation.diagnostics.ends_with('\n')) {
-                        err << '\n';
-                    }
-                }
-                if (!validation.success) {
-                    err << "cell rejected, state unchanged\n";
-                    return false;
-                }
-            } catch (const std::exception& e) {
-                err << "state validation error: " << e.what() << '\n';
-                return false;
+        static bool clear_last_transaction(
+                startup_config& cfg, repl_state& state, std::ostream& out, std::ostream& err) {
+            if (state.transactions.empty()) {
+                out << "no transactions to clear\n";
+                return true;
             }
 
-            clear_cells(state);
-            for (auto& cell : decl_cells) {
-                append_cell(state, std::move(cell), cell_kind::declarative);
+            return remove_transaction_by_index(
+                    cfg, state, state.transactions.size() - 1U, "cleared last transaction", out, err);
+        }
+
+        static bool clear_file_transaction(
+                std::string_view raw_argument,
+                startup_config& cfg,
+                repl_state& state,
+                std::ostream& out,
+                std::ostream& err) {
+            auto path = parse_path_argument(":clear file"sv, raw_argument, err);
+            if (!path) {
+                return true;
             }
-            for (auto& cell : exec_cells) {
-                append_cell(state, std::move(cell), cell_kind::executable);
+
+            auto source_key = normalize_source_key(*path);
+            if (!source_key) {
+                err << "failed to normalize path for :clear file\n";
+                return true;
             }
-            persist_cells(state);
-            persist_current_snapshot(state);
-            out << success_message << " (state: valid)\n";
+
+            auto found = std::optional<size_t>{};
+            for (size_t i = state.transactions.size(); i > 0U; --i) {
+                auto index = i - 1U;
+                auto& tx = state.transactions[index];
+                if (!transaction_kind_is_import(tx.kind) || !tx.source_key) {
+                    continue;
+                }
+                if (*tx.source_key == *source_key) {
+                    found = index;
+                    break;
+                }
+            }
+
+            if (!found) {
+                out << "no matching file import found for " << *path << '\n';
+                return true;
+            }
+
+            auto message = "cleared file import {}"_format(path->string());
+            (void)remove_transaction_by_index(cfg, state, *found, message, out, err);
             return true;
         }
 
@@ -1750,7 +1916,17 @@ examples:
                     std::cerr << "declfile is empty: " << *path << '\n';
                     return true;
                 }
-                (void)append_validated_cell(cfg, state, content, true, std::cout, std::cerr);
+                auto success_message = "loaded declfile {} (decl=1, exec=0)"_format(path->string());
+                (void)append_validated_transaction(
+                        cfg,
+                        state,
+                        std::vector<std::string>{std::move(content)},
+                        {},
+                        transaction_kind::declfile,
+                        normalize_source_key(*path),
+                        success_message,
+                        std::cout,
+                        std::cerr);
             } catch (const std::exception& e) {
                 std::cerr << "declfile error: " << e.what() << '\n';
             }
@@ -1775,13 +1951,15 @@ examples:
                     return true;
                 }
 
-                auto success_message = "loaded file {} (decl_cells={}, exec_cells={})"_format(
+                auto success_message = "loaded file {} (decl={}, exec={})"_format(
                         path->string(), plan->decl_cells.size(), plan->exec_cells.size());
-                (void)replace_with_validated_cells(
+                (void)append_validated_transaction(
                         cfg,
                         state,
                         std::move(plan->decl_cells),
                         std::move(plan->exec_cells),
+                        transaction_kind::file,
+                        normalize_source_key(*path),
                         success_message,
                         std::cout,
                         std::cerr);
@@ -3070,27 +3248,6 @@ examples:
             return true;
         }
 
-        static bool clear_last_cell(repl_state& state, std::ostream& out) {
-            if (state.cells.empty()) {
-                out << "no cells to clear\n";
-                return true;
-            }
-
-            auto it = std::prev(state.cells.end());
-            auto cell_id = it->first;
-            auto kind = it->second.kind;
-            state.cells.erase(it);
-            if (kind == cell_kind::declarative) {
-                state.decl_ids.erase(cell_id);
-                out << "cleared last declarative cell\n";
-                return true;
-            }
-
-            state.exec_ids.erase(cell_id);
-            out << "cleared last executable cell\n";
-            return true;
-        }
-
         static bool process_command(
                 const std::string& line, startup_config& cfg, repl_state& state, bool& should_quit) {
             auto cmd = trim_view(line);
@@ -3102,14 +3259,25 @@ examples:
                 print_help(std::cout);
                 return true;
             }
-            if (cmd == ":clear last"sv) {
-                clear_last_cell(state, std::cout);
-                persist_cells(state);
-                persist_current_snapshot(state);
-                return true;
-            }
-            if (cmd == ":clear"sv) {
-                clear_terminal(std::cout);
+            if (auto clear_arg = command_argument(cmd, ":clear"sv)) {
+                if (clear_arg->empty()) {
+                    clear_terminal(std::cout);
+                    return true;
+                }
+                if (*clear_arg == "last"sv) {
+                    (void)clear_last_transaction(cfg, state, std::cout, std::cerr);
+                    return true;
+                }
+                if (auto file_arg = command_argument(*clear_arg, "file"sv)) {
+                    if (file_arg->empty()) {
+                        std::cerr << "invalid :clear file, expected path after command\n";
+                        return true;
+                    }
+                    (void)clear_file_transaction(*file_arg, cfg, state, std::cout, std::cerr);
+                    return true;
+                }
+
+                std::cerr << "invalid :clear, expected last|file <path>\n";
                 return true;
             }
             if (auto show_arg = command_argument(cmd, ":show"sv)) {
@@ -3160,7 +3328,9 @@ examples:
             }
             if (cmd == ":reset"sv) {
                 clear_cells(state);
+                clear_transactions(state);
                 state.next_cell_id = 1U;
+                state.next_tx_id = 1U;
                 persist_cells(state);
                 persist_current_snapshot(state);
                 std::cout << "session reset\n";
