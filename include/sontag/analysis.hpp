@@ -11,7 +11,7 @@
 
 namespace sontag {
 
-    enum class analysis_kind {
+    enum class analysis_kind : uint8_t {
         asm_text,
         ir,
         diag,
@@ -53,7 +53,7 @@ namespace sontag {
         return "diag"sv;
     }
 
-    enum class metric_status {
+    enum class metric_status : uint8_t {
         ok,
         na,
         error,
@@ -107,7 +107,6 @@ namespace sontag {
         double value{};
         std::string unit{};
         metric_status status{metric_status::na};
-        std::vector<std::string> quality_flags{};
     };
 
     struct analysis_result {

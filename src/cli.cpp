@@ -87,7 +87,6 @@ namespace sontag::cli { namespace detail {
         double value{};
         std::string unit{};
         std::string status{};
-        std::vector<std::string> quality_flags{};
     };
 
     struct analysis_output_record {
@@ -119,7 +118,6 @@ namespace sontag::cli { namespace detail {
         std::vector<delta_operation_output_record> operations{};
         std::vector<metric_output_record> metrics{};
         std::string diagnostics_text{};
-        std::vector<std::string> quality_flags{};
     };
 
     struct delta_output_record {
@@ -133,7 +131,6 @@ namespace sontag::cli { namespace detail {
         std::vector<delta_opcode_entry> opcode_table{};
         std::vector<delta_level_output_record> levels{};
         delta_change_counters counters{};
-        std::vector<std::string> quality_flags{};
     };
 
     struct source_location {
@@ -190,16 +187,7 @@ namespace glz {
     struct meta<sontag::cli::detail::metric_output_record> {
         using T = sontag::cli::detail::metric_output_record;
         static constexpr auto value =
-                object("name",
-                       &T::name,
-                       "value",
-                       &T::value,
-                       "unit",
-                       &T::unit,
-                       "status",
-                       &T::status,
-                       "quality_flags",
-                       &T::quality_flags);
+                object("name", &T::name, "value", &T::value, "unit", &T::unit, "status", &T::status);
     };
 
     template <>
@@ -248,9 +236,7 @@ namespace glz {
                        "metrics",
                        &T::metrics,
                        "diagnostics_text",
-                       &T::diagnostics_text,
-                       "quality_flags",
-                       &T::quality_flags);
+                       &T::diagnostics_text);
     };
 
     template <>
@@ -276,9 +262,7 @@ namespace glz {
                        "levels",
                        &T::levels,
                        "counters",
-                       &T::counters,
-                       "quality_flags",
-                       &T::quality_flags);
+                       &T::counters);
     };
 
     template <>
@@ -344,7 +328,7 @@ namespace sontag::cli {
             return value;
         }
 
-        static std::optional<size_t> parse_size_t_token(std::string_view token) {
+        static constexpr std::optional<size_t> parse_size_t_token(std::string_view token) {
             auto trimmed = trim_view(token);
             if (trimmed.empty()) {
                 return std::nullopt;
@@ -353,14 +337,10 @@ namespace sontag::cli {
             size_t value = 0U;
             auto begin = trimmed.data();
             auto end = trimmed.data() + trimmed.size();
-            auto [ptr, ec] = std::from_chars(begin, end, value);
-            if (ec != std::errc{} || ptr != end) {
-                return std::nullopt;
-            }
-            return value;
+            return utils::parse_arithmetic<size_t>(std::string_view{begin, end});
         }
 
-        static std::optional<source_location> parse_location_token(
+        static constexpr std::optional<source_location> parse_location_token(
                 std::string_view token, std::optional<size_t> fallback_line) {
             auto trimmed = trim_view(token);
             if (trimmed.empty()) {
@@ -409,7 +389,7 @@ namespace sontag::cli {
             return source_location{.line = *line, .col = *col};
         }
 
-        static std::optional<source_range> parse_angle_range(
+        static constexpr std::optional<source_range> parse_angle_range(
                 std::string_view line, std::optional<size_t> begin_line_hint = std::nullopt) {
             auto left = line.find('<');
             if (left == std::string_view::npos) {
@@ -438,7 +418,7 @@ namespace sontag::cli {
             return source_range{.begin = *begin, .end = *end};
         }
 
-        static std::optional<std::string_view> parse_function_decl_name(std::string_view line) {
+        static constexpr std::optional<std::string_view> parse_function_decl_name(std::string_view line) {
             auto first_quote = line.find('\'');
             if (first_quote == std::string_view::npos) {
                 return std::nullopt;
@@ -452,7 +432,7 @@ namespace sontag::cli {
             return prefix.substr(last_space + 1U);
         }
 
-        static std::optional<size_t> parse_first_line_number(std::string_view line) {
+        static constexpr std::optional<size_t> parse_first_line_number(std::string_view line) {
             auto marker = line.rfind("line:"sv);
             if (marker == std::string_view::npos) {
                 return std::nullopt;
@@ -476,8 +456,8 @@ namespace sontag::cli {
             return line_offsets;
         }
 
-        static std::optional<size_t> source_offset_from_location(
-                std::string_view source, const std::vector<size_t>& line_offsets, const source_location& location) {
+        static constexpr std::optional<size_t> source_offset_from_location(
+                std::string_view source, std::span<size_t> line_offsets, const source_location& location) {
             if (location.line == 0U || location.col == 0U) {
                 return std::nullopt;
             }
@@ -493,7 +473,7 @@ namespace sontag::cli {
             return offset;
         }
 
-        static std::optional<fs::path> parse_path_argument(
+        static constexpr std::optional<fs::path> parse_path_argument(
                 std::string_view command_name, std::string_view raw_argument, std::ostream& err) {
             auto value = trim_view(raw_argument);
             if (value.empty()) {
@@ -552,7 +532,7 @@ namespace sontag::cli {
             return output;
         }
 
-        static command_capture_result run_command_capture(const std::vector<std::string>& args) {
+        static constexpr command_capture_result run_command_capture(std::span<std::string> args) {
             if (args.empty()) {
                 throw std::runtime_error("command args cannot be empty");
             }
@@ -630,7 +610,7 @@ namespace sontag::cli {
             return args;
         }
 
-        static std::optional<driver_ast_info> parse_driver_ast_dump(
+        static constexpr std::optional<driver_ast_info> parse_driver_ast_dump(
                 std::string_view ast_dump_output, std::string_view driver_name) {
             std::istringstream input{std::string{ast_dump_output}};
             std::vector<std::string> lines{};
@@ -683,7 +663,7 @@ namespace sontag::cli {
             return std::nullopt;
         }
 
-        static ast_probe_result probe_driver_ast(
+        static constexpr ast_probe_result probe_driver_ast(
                 const startup_config& cfg, const fs::path& source_path, std::string_view driver_name) {
             auto command = build_ast_dump_command(cfg, source_path, driver_name);
             auto capture = run_command_capture(command);
@@ -1063,11 +1043,11 @@ namespace sontag::cli {
             write_json_file(state.snapshot_data, state.snapshots_path);
         }
 
-        static size_t total_cell_count(const repl_state& state) {
+        static constexpr size_t total_cell_count(const repl_state& state) noexcept {
             return state.cells.size();
         }
 
-        static size_t kind_cell_count(const repl_state& state, cell_kind kind) {
+        static constexpr size_t kind_cell_count(const repl_state& state, cell_kind kind) noexcept {
             if (kind == cell_kind::decl) {
                 return state.decl_ids.size();
             }
@@ -1150,7 +1130,7 @@ namespace sontag::cli {
             return tx_id;
         }
 
-        static bool transaction_kind_is_import(transaction_kind kind) {
+        static constexpr bool transaction_kind_is_import(transaction_kind kind) noexcept {
             return kind == transaction_kind::file || kind == transaction_kind::declfile;
         }
 
@@ -1987,22 +1967,12 @@ examples:
             return true;
         }
 
-        static std::vector<std::string> delta_quality_flag_strings(const std::vector<delta_quality_flag>& flags) {
-            std::vector<std::string> values{};
-            values.reserve(flags.size());
-            for (auto flag : flags) {
-                values.emplace_back("{}"_format(flag));
-            }
-            return values;
-        }
-
         static metric_output_record make_metric_output_record(const analysis_metric_entry& metric) {
             return metric_output_record{
                     .name = metric.name,
                     .value = metric.value,
                     .unit = metric.unit,
-                    .status = "{}"_format(metric.status),
-                    .quality_flags = metric.quality_flags};
+                    .status = "{}"_format(metric.status)};
         }
 
         static metric_output_record make_metric_output_record(const delta_metric_entry& metric) {
@@ -2010,8 +1980,7 @@ examples:
                     .name = metric.name,
                     .value = metric.value,
                     .unit = metric.unit,
-                    .status = "{}"_format(metric.status),
-                    .quality_flags = metric.quality_flags};
+                    .status = "{}"_format(metric.status)};
         }
 
         static delta_output_record make_delta_output_record(const delta_report& report) {
@@ -2024,7 +1993,6 @@ examples:
             payload.target = report.target_label;
             payload.opcode_table = report.opcode_table;
             payload.counters = report.counters;
-            payload.quality_flags = delta_quality_flag_strings(report.quality_flags);
             payload.levels.reserve(report.levels.size());
 
             for (const auto& level : report.levels) {
@@ -2033,8 +2001,7 @@ examples:
                         .success = level.success,
                         .exit_code = level.exit_code,
                         .artifact_path = level.artifact_path.string(),
-                        .diagnostics_text = level.diagnostics_text,
-                        .quality_flags = delta_quality_flag_strings(level.quality_flags)};
+                        .diagnostics_text = level.diagnostics_text};
                 level_payload.operations.reserve(level.operations.size());
                 for (const auto& operation : level.operations) {
                     level_payload.operations.push_back(
@@ -2061,7 +2028,7 @@ examples:
             std::string_view inserted{};
         };
 
-        enum class delta_row_kind { unchanged, modified, removed, inserted };
+        enum class delta_row_kind : uint8_t { unchanged, modified, removed, inserted };
 
         static constexpr auto classic_color_scheme = delta_color_palette{
                 .unchanged = "\x1b[38;5;22m"sv,
@@ -2946,7 +2913,7 @@ examples:
                 color_mode color_mode_value,
                 color_scheme delta_color_scheme_value,
                 std::ostream& os) {
-            os << "delta: {}\n"_format(report.success ? "success"sv : "failed"sv);
+            os << "delta: {}\n"_format(report.success ? "valid"sv : "invalid"sv);
             os << "mode: {}\n"_format(report.mode);
             os << "symbol: {}\n"_format(report.symbol_display);
             os << "baseline: {}\n"_format(report.baseline_label);
@@ -2959,22 +2926,26 @@ examples:
                     report.counters.moved_count));
             os << "opcode table entries: {}\n"_format(report.opcode_table.size());
 
-            if (!report.quality_flags.empty()) {
-                os << "quality flags:\n";
-                for (auto flag : report.quality_flags) {
-                    os << "  - {}\n"_format(flag);
-                }
-            }
-
             os << "levels:\n";
             for (const auto& level : report.levels) {
                 os << "{}\n"_format(format_delta_level_summary_line(level));
+            }
 
-                if (!level.quality_flags.empty()) {
-                    for (auto flag : level.quality_flags) {
-                        os << "    quality: {}\n"_format(flag);
+            if (!report.success) {
+                os << "delta is invalid; skipping diff and metrics\n";
+                if (verbose) {
+                    for (const auto& level : report.levels) {
+                        if (level.diagnostics_text.empty()) {
+                            continue;
+                        }
+                        os << "diagnostics:\n";
+                        os << level.diagnostics_text;
+                        if (!level.diagnostics_text.ends_with('\n')) {
+                            os << '\n';
+                        }
                     }
                 }
+                return;
             }
 
             auto levels = select_delta_side_by_side_levels(report);
@@ -3045,14 +3016,6 @@ examples:
                 }
             }
             return nullptr;
-        }
-
-        static void append_unique_quality_flag(
-                std::vector<delta_quality_flag>& flags, delta_quality_flag quality_flag) {
-            if (std::ranges::find(flags, quality_flag) != flags.end()) {
-                return;
-            }
-            flags.push_back(quality_flag);
         }
 
         static const delta_level_record* find_delta_level_record(const delta_report& report, optimization_level level) {
@@ -3141,10 +3104,6 @@ examples:
             report.symbol = current_report.symbol.empty() ? snapshot_report.symbol : current_report.symbol;
             report.symbol_display = current_report.symbol_display.empty() ? snapshot_report.symbol_display
                                                                           : current_report.symbol_display;
-            report.quality_flags = current_report.quality_flags;
-            for (auto quality_flag : snapshot_report.quality_flags) {
-                append_unique_quality_flag(report.quality_flags, quality_flag);
-            }
 
             auto current_level_record = *current_level;
             current_level_record.level = report.baseline;
@@ -3156,7 +3115,12 @@ examples:
             report.levels = {std::move(current_level_record), std::move(snapshot_level_record)};
             remap_delta_level_operations(report.levels, report.opcode_table);
             report.success = report.levels[0].success && report.levels[1].success;
-            report.counters = compute_pairwise_delta_counters(report.levels[0], report.levels[1]);
+            if (report.success) {
+                report.counters = compute_pairwise_delta_counters(report.levels[0], report.levels[1]);
+            }
+            else {
+                report.counters = {};
+            }
             return report;
         }
 
@@ -3616,7 +3580,7 @@ examples:
             return std::string(trimmed);
         }
 
-        static bool try_parse_bool(std::string_view value, bool& out) {
+        static constexpr bool try_parse_bool(std::string_view value, bool& out) {
             auto trimmed = trim_view(value);
             if (utils::str_case_eq(trimmed, "true"sv) || utils::str_case_eq(trimmed, "1"sv) ||
                 utils::str_case_eq(trimmed, "yes"sv) || utils::str_case_eq(trimmed, "on"sv)) {

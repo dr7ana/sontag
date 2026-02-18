@@ -244,7 +244,7 @@ namespace sontag::graph {
             return std::string{trimmed.substr(pos, end - pos)};
         }
 
-        static bool is_ir_block_label(std::string_view line) {
+        static constexpr bool is_ir_block_label(std::string_view line) {
             auto trimmed = trim_ascii(line);
             if (trimmed.empty() || trimmed.starts_with(';')) {
                 return false;
@@ -803,8 +803,10 @@ namespace sontag::graph {
             return std::string{trimmed.substr(0U, eq)};
         }
 
-        static bool is_ssa_char(char c) {
-            return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.' || c == '$' || c == '-';
+        static constexpr bool is_ssa_char(char c) noexcept {
+            auto lower = static_cast<char>(c | 0x20);
+            auto is_alpha_num = (c >= '0' && c <= '9') || (lower >= 'a' && lower <= 'z');
+            return is_alpha_num || c == '_' || c == '.' || c == '$' || c == '-';
         }
 
         static std::vector<std::string> extract_ssa_tokens(std::string_view line) {

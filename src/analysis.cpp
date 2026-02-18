@@ -209,8 +209,9 @@ namespace sontag {
             return value.substr(first, (last - first) + 1U);
         }
 
-        static bool is_identifier_char(char c) {
-            return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+        static constexpr bool is_identifier_char(char c) noexcept {
+            auto lower = static_cast<char>(c | 0x20);
+            return (c >= '0' && c <= '9') || (lower >= 'a' && lower <= 'z') || c == '_';
         }
 
         static std::string strip_comments_and_string_literals(std::string_view text) {
@@ -1421,23 +1422,6 @@ namespace sontag {
             return records;
         }
 
-        static std::optional<double> parse_number_after_colon(std::string_view line) {
-            auto colon = line.find(':');
-            if (colon == std::string_view::npos || colon + 1U >= line.size()) {
-                return std::nullopt;
-            }
-            std::string value{trim_ascii(line.substr(colon + 1U))};
-            if (value.empty()) {
-                return std::nullopt;
-            }
-            char* end = nullptr;
-            auto parsed = std::strtod(value.c_str(), &end);
-            if (end == value.c_str()) {
-                return std::nullopt;
-            }
-            return parsed;
-        }
-
         static std::optional<double> parse_numeric_token(std::string_view token) {
             std::string value{trim_ascii(token)};
             if (value.empty()) {
@@ -1459,49 +1443,49 @@ namespace sontag {
                     continue;
                 }
                 if (trimmed.starts_with("Iterations:"sv)) {
-                    if (auto value = parse_number_after_colon(trimmed)) {
+                    if (auto value = metrics::parse_number_after_colon(trimmed)) {
                         payload.iterations = static_cast<int>(*value);
                     }
                     continue;
                 }
                 if (trimmed.starts_with("Instructions:"sv)) {
-                    if (auto value = parse_number_after_colon(trimmed)) {
+                    if (auto value = metrics::parse_number_after_colon(trimmed)) {
                         payload.instructions = static_cast<int>(*value);
                     }
                     continue;
                 }
                 if (trimmed.starts_with("Total Cycles:"sv)) {
-                    if (auto value = parse_number_after_colon(trimmed)) {
+                    if (auto value = metrics::parse_number_after_colon(trimmed)) {
                         payload.total_cycles = static_cast<int>(*value);
                     }
                     continue;
                 }
                 if (trimmed.starts_with("Total uOps:"sv)) {
-                    if (auto value = parse_number_after_colon(trimmed)) {
+                    if (auto value = metrics::parse_number_after_colon(trimmed)) {
                         payload.total_uops = static_cast<int>(*value);
                     }
                     continue;
                 }
                 if (trimmed.starts_with("Dispatch Width:"sv)) {
-                    if (auto value = parse_number_after_colon(trimmed)) {
+                    if (auto value = metrics::parse_number_after_colon(trimmed)) {
                         payload.dispatch_width = *value;
                     }
                     continue;
                 }
                 if (trimmed.starts_with("uOps Per Cycle:"sv)) {
-                    if (auto value = parse_number_after_colon(trimmed)) {
+                    if (auto value = metrics::parse_number_after_colon(trimmed)) {
                         payload.uops_per_cycle = *value;
                     }
                     continue;
                 }
                 if (trimmed.starts_with("IPC:"sv)) {
-                    if (auto value = parse_number_after_colon(trimmed)) {
+                    if (auto value = metrics::parse_number_after_colon(trimmed)) {
                         payload.ipc = *value;
                     }
                     continue;
                 }
                 if (trimmed.starts_with("Block RThroughput:"sv)) {
-                    if (auto value = parse_number_after_colon(trimmed)) {
+                    if (auto value = metrics::parse_number_after_colon(trimmed)) {
                         payload.block_rthroughput = *value;
                     }
                 }
@@ -1681,7 +1665,8 @@ namespace sontag {
         struct delta_symbol_resolution {
             std::optional<std::string> mangled{};
             std::string display{};
-            std::vector<delta_quality_flag> quality_flags{};
+            bool resolved{false};
+            std::string diagnostics_text{};
         };
 
         static std::vector<optimization_level> make_delta_pair_levels(optimization_level target) {
@@ -1735,67 +1720,19 @@ namespace sontag {
             return make_delta_pair_levels(delta.target);
         }
 
-        static std::vector<std::string> metric_quality_flags_from_level(
-                const std::vector<delta_quality_flag>& quality_flags) {
-            std::vector<std::string> metric_flags{};
-            metric_flags.reserve(quality_flags.size());
-            for (auto quality_flag : quality_flags) {
-                metric_flags.push_back("{}"_format(quality_flag));
-                switch (quality_flag) {
-                    case delta_quality_flag::symbol_resolution_failed:
-                    case delta_quality_flag::symbol_extract_failed:
-                        append_unique(metric_flags, "symbol_not_found");
-                        break;
-                    case delta_quality_flag::compile_failed:
-                        append_unique(metric_flags, "extractor_failed");
-                        break;
-                    case delta_quality_flag::tool_execution_failed:
-                        append_unique(metric_flags, "extractor_failed");
-                        append_unique(metric_flags, "tool_missing");
-                        break;
-                    case delta_quality_flag::empty_operation_stream:
-                        append_unique(metric_flags, "metric_not_applicable");
-                        break;
-                }
-            }
-            return metric_flags;
-        }
-
-        static void append_metric_quality_flag(std::vector<std::string>& quality_flags, std::string_view flag) {
-            append_unique(quality_flags, std::string{flag});
-        }
-
-        static delta_metric_entry make_ok_metric(
-                std::string_view name,
-                double value,
-                std::string_view unit,
-                std::vector<std::string> quality_flags = {}) {
+        static delta_metric_entry make_ok_metric(std::string_view name, double value, std::string_view unit) {
             return delta_metric_entry{
-                    .name = std::string{name},
-                    .value = value,
-                    .unit = std::string{unit},
-                    .status = metric_status::ok,
-                    .quality_flags = std::move(quality_flags)};
+                    .name = std::string{name}, .value = value, .unit = std::string{unit}, .status = metric_status::ok};
         }
 
-        static delta_metric_entry make_na_metric(
-                std::string_view name, std::string_view unit, std::vector<std::string> quality_flags = {}) {
+        static delta_metric_entry make_na_metric(std::string_view name, std::string_view unit) {
             return delta_metric_entry{
-                    .name = std::string{name},
-                    .value = 0.0,
-                    .unit = std::string{unit},
-                    .status = metric_status::na,
-                    .quality_flags = std::move(quality_flags)};
+                    .name = std::string{name}, .value = 0.0, .unit = std::string{unit}, .status = metric_status::na};
         }
 
-        static delta_metric_entry make_error_metric(
-                std::string_view name, std::string_view unit, std::vector<std::string> quality_flags = {}) {
+        static delta_metric_entry make_error_metric(std::string_view name, std::string_view unit) {
             return delta_metric_entry{
-                    .name = std::string{name},
-                    .value = 0.0,
-                    .unit = std::string{unit},
-                    .status = metric_status::error,
-                    .quality_flags = std::move(quality_flags)};
+                    .name = std::string{name}, .value = 0.0, .unit = std::string{unit}, .status = metric_status::error};
         }
 
         static std::vector<delta_metric_entry> collect_level_metrics(
@@ -1807,33 +1744,26 @@ namespace sontag {
             std::vector<delta_metric_entry> metrics{};
             metrics.reserve(14U);
 
-            auto base_quality_flags = metric_quality_flags_from_level(level_record.quality_flags);
             auto has_disassembly = !symbol_disassembly.empty();
 
             if (!has_disassembly) {
-                auto flags = base_quality_flags;
-                append_metric_quality_flag(flags, "metric_not_applicable"sv);
-                metrics.push_back(make_na_metric("size.symbol_text_bytes"sv, "bytes"sv, flags));
+                metrics.push_back(make_na_metric("size.symbol_text_bytes"sv, "bytes"sv));
             }
             else if (auto span = ::sontag::metrics::parse_objdump_symbol_span(symbol_disassembly)) {
                 metrics.push_back(make_ok_metric(
                         "size.symbol_text_bytes"sv, static_cast<double>(span->end - span->start), "bytes"sv));
             }
             else {
-                auto flags = base_quality_flags;
-                append_metric_quality_flag(flags, "parse_degraded"sv);
-                metrics.push_back(make_na_metric("size.symbol_text_bytes"sv, "bytes"sv, flags));
+                metrics.push_back(make_na_metric("size.symbol_text_bytes"sv, "bytes"sv));
             }
 
             auto profile = ::sontag::metrics::build_asm_operation_profile(level_record.operations, symbol_disassembly);
             auto instruction_count = static_cast<double>(profile.instruction_count);
             if (profile.instruction_count == 0U) {
-                auto flags = base_quality_flags;
-                append_metric_quality_flag(flags, "metric_not_applicable"sv);
-                metrics.push_back(make_na_metric("asm.insn_total"sv, "count"sv, flags));
-                metrics.push_back(make_na_metric("asm.mem_ops_ratio"sv, "ratio"sv, flags));
-                metrics.push_back(make_na_metric("asm.call_count"sv, "count"sv, flags));
-                metrics.push_back(make_na_metric("asm.branch_density"sv, "ratio"sv, flags));
+                metrics.push_back(make_na_metric("asm.insn_total"sv, "count"sv));
+                metrics.push_back(make_na_metric("asm.mem_ops_ratio"sv, "ratio"sv));
+                metrics.push_back(make_na_metric("asm.call_count"sv, "count"sv));
+                metrics.push_back(make_na_metric("asm.branch_density"sv, "ratio"sv));
             }
             else {
                 auto memory_ops = static_cast<double>(profile.load_count + profile.store_count);
@@ -1857,34 +1787,27 @@ namespace sontag {
                 metrics.push_back(make_ok_metric("build.compile_time_ms"sv, compile_time_ms, "ms"sv));
             }
             else {
-                auto flags = base_quality_flags;
-                append_metric_quality_flag(flags, "metric_not_applicable"sv);
-                metrics.push_back(make_na_metric("build.compile_time_ms"sv, "ms"sv, flags));
+                metrics.push_back(make_na_metric("build.compile_time_ms"sv, "ms"sv));
             }
 
             auto missing_symbol = !symbol_resolution.mangled.has_value();
             if (missing_symbol || !level_record.success) {
-                auto flags = base_quality_flags;
-                append_metric_quality_flag(flags, missing_symbol ? "symbol_not_found"sv : "extractor_failed"sv);
-                metrics.push_back(make_na_metric("mca.block_rthroughput"sv, "cycles_per_iteration"sv, flags));
-                metrics.push_back(make_na_metric("mca.ipc"sv, "inst_per_cycle"sv, flags));
-                metrics.push_back(make_na_metric("mca.total_uops"sv, "count"sv, flags));
-                metrics.push_back(make_na_metric("mca.rf_integer_max_mappings"sv, "count"sv, flags));
-                metrics.push_back(make_na_metric("mca.rf_fp_max_mappings"sv, "count"sv, flags));
+                metrics.push_back(make_na_metric("mca.block_rthroughput"sv, "cycles_per_iteration"sv));
+                metrics.push_back(make_na_metric("mca.ipc"sv, "inst_per_cycle"sv));
+                metrics.push_back(make_na_metric("mca.total_uops"sv, "count"sv));
+                metrics.push_back(make_na_metric("mca.rf_integer_max_mappings"sv, "count"sv));
+                metrics.push_back(make_na_metric("mca.rf_fp_max_mappings"sv, "count"sv));
                 return metrics;
             }
 
             level_request.symbol = *symbol_resolution.mangled;
             auto mca_result = run_analysis(level_request, analysis_kind::mca);
             if (!mca_result.success) {
-                auto flags = base_quality_flags;
-                append_metric_quality_flag(
-                        flags, mca_result.exit_code == 127 ? "tool_missing"sv : "extractor_failed"sv);
-                metrics.push_back(make_error_metric("mca.block_rthroughput"sv, "cycles_per_iteration"sv, flags));
-                metrics.push_back(make_error_metric("mca.ipc"sv, "inst_per_cycle"sv, flags));
-                metrics.push_back(make_error_metric("mca.total_uops"sv, "count"sv, flags));
-                metrics.push_back(make_error_metric("mca.rf_integer_max_mappings"sv, "count"sv, flags));
-                metrics.push_back(make_error_metric("mca.rf_fp_max_mappings"sv, "count"sv, flags));
+                metrics.push_back(make_error_metric("mca.block_rthroughput"sv, "cycles_per_iteration"sv));
+                metrics.push_back(make_error_metric("mca.ipc"sv, "inst_per_cycle"sv));
+                metrics.push_back(make_error_metric("mca.total_uops"sv, "count"sv));
+                metrics.push_back(make_error_metric("mca.rf_integer_max_mappings"sv, "count"sv));
+                metrics.push_back(make_error_metric("mca.rf_fp_max_mappings"sv, "count"sv));
                 return metrics;
             }
 
@@ -1902,9 +1825,7 @@ namespace sontag {
                         "mca.rf_integer_max_mappings"sv, *register_file_metrics.integer_max_mappings, "count"sv));
             }
             else {
-                auto flags = base_quality_flags;
-                append_metric_quality_flag(flags, "parse_degraded"sv);
-                metrics.push_back(make_na_metric("mca.rf_integer_max_mappings"sv, "count"sv, flags));
+                metrics.push_back(make_na_metric("mca.rf_integer_max_mappings"sv, "count"sv));
             }
 
             if (register_file_metrics.fp_max_mappings.has_value()) {
@@ -1912,23 +1833,14 @@ namespace sontag {
                         make_ok_metric("mca.rf_fp_max_mappings"sv, *register_file_metrics.fp_max_mappings, "count"sv));
             }
             else {
-                auto flags = base_quality_flags;
-                append_metric_quality_flag(flags, "parse_degraded"sv);
-                metrics.push_back(make_na_metric("mca.rf_fp_max_mappings"sv, "count"sv, flags));
+                metrics.push_back(make_na_metric("mca.rf_fp_max_mappings"sv, "count"sv));
             }
 
             return metrics;
         }
 
-        static void append_unique(std::vector<delta_quality_flag>& quality_flags, delta_quality_flag quality_flag) {
-            if (std::ranges::find(quality_flags, quality_flag) != quality_flags.end()) {
-                return;
-            }
-            quality_flags.push_back(quality_flag);
-        }
-
-        static bool is_function_symbol_kind(char kind) {
-            auto lower = static_cast<char>(std::tolower(static_cast<unsigned char>(kind)));
+        static constexpr bool is_function_symbol_kind(char kind) noexcept {
+            auto lower = static_cast<char>(kind | 0x20);
             return lower == 't' || lower == 'w';
         }
 
@@ -1940,7 +1852,7 @@ namespace sontag {
 
             auto symbols = try_collect_defined_symbols(request);
             if (!symbols) {
-                append_unique(resolution.quality_flags, delta_quality_flag::symbol_resolution_failed);
+                resolution.diagnostics_text = "unable to resolve symbol: failed to collect defined symbols";
                 return resolution;
             }
 
@@ -1957,12 +1869,14 @@ namespace sontag {
 
             if (auto resolved_requested = resolve_symbol_name(*symbols, requested_symbol)) {
                 assign_from_mangled(*resolved_requested);
+                resolution.resolved = true;
                 return resolution;
             }
 
             if (!symbol) {
                 if (auto resolved_default = resolve_symbol_name(*symbols, "__sontag_main"sv)) {
                     assign_from_mangled(*resolved_default);
+                    resolution.resolved = true;
                     return resolution;
                 }
                 for (const auto& symbol : *symbols) {
@@ -1970,32 +1884,13 @@ namespace sontag {
                         continue;
                     }
                     assign_from_mangled(symbol.mangled);
+                    resolution.resolved = true;
                     return resolution;
                 }
             }
 
-            append_unique(resolution.quality_flags, delta_quality_flag::symbol_resolution_failed);
+            resolution.diagnostics_text = "unable to resolve symbol: {}"_format(requested_symbol);
             return resolution;
-        }
-
-        static void append_quality_from_exception(
-                std::string_view error_text,
-                std::vector<delta_quality_flag>& report_quality_flags,
-                std::vector<delta_quality_flag>& level_quality_flags) {
-            auto append_both = [&](delta_quality_flag quality_flag) {
-                append_unique(report_quality_flags, quality_flag);
-                append_unique(level_quality_flags, quality_flag);
-            };
-
-            if (contains_token(error_text, "unable to resolve symbol"sv)) {
-                append_both(delta_quality_flag::symbol_resolution_failed);
-                return;
-            }
-            if (contains_token(error_text, "symbol not found in artifact"sv)) {
-                append_both(delta_quality_flag::symbol_extract_failed);
-                return;
-            }
-            append_both(delta_quality_flag::tool_execution_failed);
         }
 
         static const delta_level_record* find_level(
@@ -2803,7 +2698,10 @@ namespace sontag {
         auto symbol_resolution = detail::resolve_delta_symbol(request, delta.symbol);
         report.symbol = symbol_resolution.mangled.value_or(delta.symbol.value_or("__sontag_main"));
         report.symbol_display = symbol_resolution.display.empty() ? report.symbol : symbol_resolution.display;
-        report.quality_flags = symbol_resolution.quality_flags;
+        if (!symbol_resolution.resolved) {
+            report.success = false;
+            return report;
+        }
 
         auto requested_levels = detail::make_delta_levels(delta);
         std::vector<size_t> mapped_level_indices{};
@@ -2812,6 +2710,7 @@ namespace sontag {
         std::vector<double> level_compile_time_ms{};
         level_symbol_disassembly.reserve(requested_levels.size());
         level_compile_time_ms.reserve(requested_levels.size());
+        auto invalid_delta = false;
 
         for (auto level : requested_levels) {
             auto level_record = delta_level_record{.level = level, .label = "{}"_format(level)};
@@ -2831,10 +2730,7 @@ namespace sontag {
                 level_record.diagnostics_text = dump_result.diagnostics_text;
 
                 if (!dump_result.success) {
-                    auto quality_flag = dump_result.exit_code == 127 ? delta_quality_flag::tool_execution_failed
-                                                                     : delta_quality_flag::compile_failed;
-                    detail::append_unique(level_record.quality_flags, quality_flag);
-                    detail::append_unique(report.quality_flags, quality_flag);
+                    invalid_delta = true;
                 }
                 else {
                     auto extracted = symbol_resolution.mangled ? detail::extract_objdump_for_symbol(
@@ -2843,8 +2739,11 @@ namespace sontag {
                                                                          symbol_resolution.display)
                                                                : std::string{};
                     if (symbol_resolution.mangled && extracted.empty()) {
-                        detail::append_unique(level_record.quality_flags, delta_quality_flag::symbol_extract_failed);
-                        detail::append_unique(report.quality_flags, delta_quality_flag::symbol_extract_failed);
+                        invalid_delta = true;
+                        level_record.success = false;
+                        level_record.diagnostics_text = detail::join_text(
+                                level_record.diagnostics_text,
+                                "symbol not found in artifact: {}"_format(*symbol_resolution.mangled));
                     }
                     else {
                         if (!extracted.empty()) {
@@ -2856,10 +2755,10 @@ namespace sontag {
                     }
                 }
             } catch (const std::exception& e) {
+                invalid_delta = true;
                 level_record.success = false;
                 level_record.exit_code = -1;
                 level_record.diagnostics_text = e.what();
-                detail::append_quality_from_exception(e.what(), report.quality_flags, level_record.quality_flags);
             }
 
             auto level_end = std::chrono::steady_clock::now();
@@ -2883,8 +2782,10 @@ namespace sontag {
                 auto& level_record = report.levels[mapped_level_indices[i]];
                 level_record.operations = detail::to_delta_operations(mapped.streams[i].operations);
                 if (level_record.operations.empty()) {
-                    detail::append_unique(level_record.quality_flags, delta_quality_flag::empty_operation_stream);
-                    detail::append_unique(report.quality_flags, delta_quality_flag::empty_operation_stream);
+                    invalid_delta = true;
+                    level_record.success = false;
+                    level_record.diagnostics_text =
+                            detail::join_text(level_record.diagnostics_text, "no assembly instructions found.");
                 }
             }
 
@@ -2894,20 +2795,30 @@ namespace sontag {
                 report.opcode_table.push_back(delta_opcode_entry{.opcode_uid = entry.uid, .opcode = entry.mnemonic});
             }
         }
-
-        for (size_t i = 0U; i < report.levels.size(); ++i) {
-            auto level_request = request;
-            level_request.opt_level = report.levels[i].level;
-            report.levels[i].metrics = detail::collect_level_metrics(
-                    std::move(level_request),
-                    symbol_resolution,
-                    report.levels[i],
-                    level_symbol_disassembly[i],
-                    level_compile_time_ms[i]);
+        else {
+            invalid_delta = true;
         }
 
-        report.success = detail::all_levels_success(report.levels, requested_levels);
-        report.counters = detail::compute_pairwise_counters(report.levels, report.baseline, report.target);
+        if (!invalid_delta) {
+            for (size_t i = 0U; i < report.levels.size(); ++i) {
+                auto level_request = request;
+                level_request.opt_level = report.levels[i].level;
+                report.levels[i].metrics = detail::collect_level_metrics(
+                        std::move(level_request),
+                        symbol_resolution,
+                        report.levels[i],
+                        level_symbol_disassembly[i],
+                        level_compile_time_ms[i]);
+            }
+        }
+
+        report.success = !invalid_delta && detail::all_levels_success(report.levels, requested_levels);
+        if (report.success) {
+            report.counters = detail::compute_pairwise_counters(report.levels, report.baseline, report.target);
+        }
+        else {
+            report.counters = {};
+        }
 
         return report;
     }

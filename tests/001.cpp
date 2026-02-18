@@ -54,7 +54,7 @@ namespace sontag::test {
         CHECK_FALSE(try_parse_optimization_level("Og"sv, opt));
     }
 
-    TEST_CASE("001: enum string conversion", "[001][config]") {
+    TEST_CASE("001: type string conversion", "[001][config]") {
         CHECK(to_string(cxx_standard::cxx20) == "c++20"sv);
         CHECK(to_string(cxx_standard::cxx23) == "c++23"sv);
         CHECK(to_string(cxx_standard::cxx2c) == "c++2c"sv);

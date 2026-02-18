@@ -20,6 +20,7 @@ namespace sontag::metrics {
     using namespace std::string_view_literals;
 
     struct mca_register_file_metrics {
+        enum class active_register_file : uint8_t { none, integer, fp };
         std::optional<double> integer_max_mappings{};
         std::optional<double> fp_max_mappings{};
     };
@@ -29,7 +30,7 @@ namespace sontag::metrics {
         uint64_t end{};
     };
 
-    enum class asm_operand_kind { none, reg, mem, imm, other };
+    enum class asm_operand_kind : uint8_t { none, reg, mem, imm, other };
 
     struct asm_operation_profile {
         size_t instruction_count{};
@@ -42,24 +43,19 @@ namespace sontag::metrics {
         size_t spill_fill_count{};
     };
 
-    inline std::optional<double> parse_number_after_colon(std::string_view line) {
+    inline constexpr std::optional<double> parse_number_after_colon(std::string_view line) {
         auto colon = line.find(':');
         if (colon == std::string_view::npos || colon + 1U >= line.size()) {
             return std::nullopt;
         }
-        std::string value{opcode::trim_ascii(line.substr(colon + 1U))};
+        auto value = opcode::trim_ascii(line.substr(colon + 1U));
         if (value.empty()) {
             return std::nullopt;
         }
-        auto* end = static_cast<char*>(nullptr);
-        auto parsed = std::strtod(value.c_str(), &end);
-        if (end == value.c_str()) {
-            return std::nullopt;
-        }
-        return parsed;
+        return utils::parse_arithmetic<double>(value);
     }
 
-    inline std::optional<uint64_t> parse_hex_u64(std::string_view token) {
+    inline constexpr std::optional<uint64_t> parse_hex_u64(std::string_view token) {
         token = opcode::trim_ascii(token);
         if (token.empty()) {
             return std::nullopt;
@@ -75,16 +71,10 @@ namespace sontag::metrics {
         if (token.size() > 2U && token[0] == '0' && (token[1] == 'x' || token[1] == 'X')) {
             token.remove_prefix(2U);
         }
-
-        auto value = uint64_t{};
-        auto parsed = std::from_chars(token.data(), token.data() + token.size(), value, 16);
-        if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size()) {
-            return std::nullopt;
-        }
-        return value;
+        return utils::parse_arithmetic<uint64_t>(token, 16);
     }
 
-    inline std::optional<uint64_t> parse_unsigned_immediate(std::string_view token) {
+    inline constexpr std::optional<uint64_t> parse_unsigned_immediate(std::string_view token) {
         token = opcode::trim_ascii(token);
         if (token.empty()) {
             return std::nullopt;
@@ -107,16 +97,10 @@ namespace sontag::metrics {
         if (token.empty() || token.front() == '-') {
             return std::nullopt;
         }
-
-        auto value = uint64_t{};
-        auto parsed = std::from_chars(token.data(), token.data() + token.size(), value, base);
-        if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size()) {
-            return std::nullopt;
-        }
-        return value;
+        return utils::parse_arithmetic<uint64_t>(token, base);
     }
 
-    inline std::optional<objdump_symbol_span> parse_objdump_symbol_span(std::string_view disassembly) {
+    inline constexpr std::optional<objdump_symbol_span> parse_objdump_symbol_span(std::string_view disassembly) {
         auto have_span = false;
         auto min_address = uint64_t{};
         auto max_end = uint64_t{};
@@ -176,7 +160,7 @@ namespace sontag::metrics {
         return objdump_symbol_span{.start = min_address, .end = max_end};
     }
 
-    inline asm_operand_kind classify_operand_kind(std::string_view operand) {
+    inline constexpr asm_operand_kind classify_operand_kind(std::string_view operand) {
         auto trimmed = opcode::trim_ascii(operand);
         if (trimmed.empty()) {
             return asm_operand_kind::none;
@@ -208,19 +192,19 @@ namespace sontag::metrics {
         return asm_operand_kind::other;
     }
 
-    inline bool is_branch_mnemonic(std::string_view mnemonic) {
+    inline constexpr bool is_branch_mnemonic(std::string_view mnemonic) noexcept {
         if (mnemonic.empty()) {
             return false;
         }
         return mnemonic.starts_with('j') || mnemonic == "ret"sv || mnemonic.starts_with("loop"sv);
     }
 
-    inline bool is_stack_memory_triplet(std::string_view triplet) {
+    inline constexpr bool is_stack_memory_triplet(std::string_view triplet) noexcept {
         return triplet.find("[rbp"sv) != std::string_view::npos || triplet.find("[rsp"sv) != std::string_view::npos ||
                triplet.find("[ebp"sv) != std::string_view::npos || triplet.find("[esp"sv) != std::string_view::npos;
     }
 
-    inline asm_operation_profile build_asm_operation_profile(
+    inline constexpr asm_operation_profile build_asm_operation_profile(
             const std::vector<delta_operation>& operations, std::string_view disassembly) {
         auto profile = asm_operation_profile{};
         profile.instruction_count = operations.size();
@@ -291,10 +275,11 @@ namespace sontag::metrics {
         return profile;
     }
 
-    inline mca_register_file_metrics parse_mca_register_file_metrics(std::string_view mca_text) {
-        auto metrics = mca_register_file_metrics{};
+    inline constexpr mca_register_file_metrics parse_mca_register_file_metrics(std::string_view mca_text) {
+        using active_register_file = mca_register_file_metrics::active_register_file;
 
-        enum class active_register_file { none, integer, fp };
+        mca_register_file_metrics metrics{};
+
         auto active = active_register_file::none;
 
         size_t begin = 0U;

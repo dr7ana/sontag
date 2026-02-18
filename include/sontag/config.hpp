@@ -3,6 +3,7 @@
 #include "format.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -79,12 +80,12 @@ namespace sontag {
      * - dump_defaults: Print compiled-in defaults and exit.
      */
 
-    enum class output_mode { table, json };
-    enum class color_mode { automatic, always, never };
-    enum class color_scheme { classic, vaporwave };
-    enum class debug_info_level { none, line, full };
-    enum class cxx_standard { cxx20, cxx23, cxx2c };
-    enum class optimization_level { o0, o1, o2, o3, ofast, oz };
+    enum class output_mode : uint8_t { table, json };
+    enum class color_mode : uint8_t { automatic, always, never };
+    enum class color_scheme : uint8_t { classic, vaporwave };
+    enum class debug_info_level : uint8_t { none, line, full };
+    enum class cxx_standard : uint8_t { cxx20, cxx23, cxx2c };
+    enum class optimization_level : uint8_t { o0, o1, o2, o3, ofast, oz };
 
     inline constexpr std::string_view to_string(output_mode mode) {
         switch (mode) {

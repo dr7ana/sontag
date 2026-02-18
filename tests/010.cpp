@@ -29,10 +29,6 @@ namespace sontag::test { namespace detail {
         return request;
     }
 
-    static bool contains_quality_flag(const std::vector<delta_quality_flag>& quality_flags, delta_quality_flag wanted) {
-        return std::find(quality_flags.begin(), quality_flags.end(), wanted) != quality_flags.end();
-    }
-
     static std::optional<std::reference_wrapper<const delta_metric_entry>> find_metric(
             const std::vector<delta_metric_entry>& metrics, std::string_view name) {
         auto it = std::find_if(metrics.begin(), metrics.end(), [name](const delta_metric_entry& metric) {
@@ -89,7 +85,6 @@ namespace sontag::test {
         auto report = collect_delta_report(request, delta_request{.symbol = "add"});
 
         CHECK(report.mode == delta_mode::pairwise);
-        CHECK_FALSE(detail::contains_quality_flag(report.quality_flags, delta_quality_flag::symbol_resolution_failed));
         CHECK(report.symbol_display.find("add") != std::string::npos);
         REQUIRE(report.levels.size() == 2U);
         CHECK(report.levels[0].level == optimization_level::o0);
@@ -147,17 +142,16 @@ namespace sontag::test {
         CHECK(spectrum_o3.levels[3].level == optimization_level::o3);
     }
 
-    TEST_CASE("010: delta flags unresolved symbol while still collecting levels", "[010][delta]") {
+    TEST_CASE("010: delta marks unresolved symbol as invalid", "[010][delta]") {
         detail::temp_dir temp{"sontag_delta_missing_symbol"};
 
         auto request = detail::make_request(temp.path / "session", "volatile int sink = 0;\n", "sink = 3 * 9;");
 
         auto report = collect_delta_report(request, delta_request{.symbol = "does_not_exist"});
 
-        CHECK(detail::contains_quality_flag(report.quality_flags, delta_quality_flag::symbol_resolution_failed));
-        REQUIRE(report.levels.size() == 2U);
-        CHECK(report.levels[0].level == optimization_level::o0);
-        CHECK(report.levels[1].level == optimization_level::o2);
+        CHECK_FALSE(report.success);
+        CHECK(report.opcode_table.empty());
+        CHECK(report.levels.empty());
     }
 
     TEST_CASE("010: delta opcode mapping is ephemeral with no sidecar artifacts", "[010][delta]") {

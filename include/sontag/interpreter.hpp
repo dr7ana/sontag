@@ -15,7 +15,7 @@ namespace sontag::interpreter {
 
     using namespace std::string_view_literals;
 
-    enum class record_status {
+    enum class record_status : uint8_t {
         ok,
         na,
         error,
@@ -33,7 +33,7 @@ namespace sontag::interpreter {
         return "na"sv;
     }
 
-    enum class warning_severity {
+    enum class warning_severity : uint8_t {
         info,
         warning,
         error,
@@ -51,7 +51,7 @@ namespace sontag::interpreter {
         return "warning"sv;
     }
 
-    enum class operation_stage {
+    enum class operation_stage : uint8_t {
         source,
         ir,
         asm_text,
@@ -72,7 +72,7 @@ namespace sontag::interpreter {
         return "source"sv;
     }
 
-    enum class relation_kind {
+    enum class relation_kind : uint8_t {
         contains,
         calls,
         def_use,
@@ -96,7 +96,7 @@ namespace sontag::interpreter {
         return "contains"sv;
     }
 
-    enum class confidence_level {
+    enum class confidence_level : uint8_t {
         exact,
         heuristic,
         unknown,
@@ -114,7 +114,7 @@ namespace sontag::interpreter {
         return "unknown"sv;
     }
 
-    enum class artifact_kind {
+    enum class artifact_kind : uint8_t {
         source,
         diag,
         ir,
@@ -150,7 +150,7 @@ namespace sontag::interpreter {
         return "source"sv;
     }
 
-    enum class tool_producer {
+    enum class tool_producer : uint8_t {
         clang,
         llvm_mca,
         llvm_objdump,
@@ -322,7 +322,6 @@ namespace sontag::interpreter {
         std::optional<std::string> linkage{};
         std::optional<std::string> visibility{};
         std::vector<std::string> aliases{};
-        std::vector<std::string> quality_flags{};
     };
 
     struct operation_record {
@@ -336,7 +335,6 @@ namespace sontag::interpreter {
         std::vector<std::string> category_tags{};
         std::string raw_text{};
         std::optional<source_span> span{};
-        std::vector<std::string> quality_flags{};
     };
 
     struct relation_record {
@@ -347,7 +345,6 @@ namespace sontag::interpreter {
         std::string destination_id{};
         confidence_level confidence{confidence_level::unknown};
         std::optional<std::string> evidence{};
-        std::vector<std::string> quality_flags{};
     };
 
     struct metric_record {
@@ -357,7 +354,6 @@ namespace sontag::interpreter {
         std::optional<metric_value> value{};
         std::string units{};
         record_status status{record_status::na};
-        std::vector<std::string> quality_flags{};
     };
 
     struct provenance_record {

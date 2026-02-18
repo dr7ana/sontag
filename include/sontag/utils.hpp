@@ -1,7 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <charconv>
 #include <iostream>
+#include <optional>
 #include <ranges>
 #include <source_location>
 #include <string_view>
@@ -52,6 +54,43 @@ namespace sontag {
         inline constexpr bool str_case_eq(std::string_view lhs, std::string_view rhs) {
             return std::ranges::equal(
                     lhs | std::views::transform(char_tolower), rhs | std::views::transform(char_tolower));
+        }
+
+        namespace detail {
+            template <typename T>
+            concept arithmetic_type = std::integral<T> || std::floating_point<T>;
+        }
+
+        template <detail::arithmetic_type T>
+        inline constexpr std::optional<T> parse_arithmetic(std::string_view input, [[maybe_unused]] int base = 10) {
+            T value{};
+            std::from_chars_result result;
+
+            if constexpr (std::integral<T>) {
+                result = std::from_chars(input.data(), input.data() + input.size(), value, base);
+            }
+            else {
+                result = std::from_chars(input.data(), input.data() + input.size(), value);
+            }
+
+            if (result.ec != std::errc{} || result.ptr != input.data() + input.size()) {
+                // only enter this block if we were unsuccessful; silent success cases
+                if (result.ec == std::errc::invalid_argument) {
+                    debug_log{"Error: invalid argument input: ", input};
+                }
+                else if (result.ec == std::errc::result_out_of_range) {
+                    debug_log{"Error: input out of range for uint64_t: ", input};
+                }
+                else if (result.ptr != input.data() + input.size()) {
+                    debug_log{"Error: trailing characters while parsing input: ", input};
+                }
+                else {
+                    debug_log{"Error: unknown error parsing input: ", input};
+                }
+                return std::nullopt;
+            }
+
+            return {value};
         }
 
     }  // namespace utils

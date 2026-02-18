@@ -9,8 +9,8 @@
 
 namespace sontag::internal {
 
-    enum class cell_kind { decl, exec };
-    enum class transaction_kind { exec, decl, file, declfile };
+    enum class cell_kind : uint8_t { decl, exec };
+    enum class transaction_kind : uint8_t { exec, decl, file, declfile };
 
     struct cell_record {
         uint64_t cell_id{};
