@@ -1535,6 +1535,7 @@ namespace sontag::cli {
   :set <key>=<value>
   :reset
   :reset last
+  :reset snapshots
   :reset file <path>
   :mark <name>
   :snapshots
@@ -1557,6 +1558,7 @@ examples:
   :declfile examples/common.hpp
   :file examples/program.cpp
   :reset file examples/program.cpp
+  :reset snapshots
   :set std=c++23
   :set opt=O3
   :set output=json
@@ -3446,7 +3448,6 @@ examples:
                     clear_transactions(state);
                     state.next_cell_id = 1U;
                     state.next_tx_id = 1U;
-                    state.snapshot_data = persisted_snapshots{};
                     persist_cells(state);
                     persist_current_snapshot(state);
                     std::cout << "session reset\n";
@@ -3454,6 +3455,12 @@ examples:
                 }
                 if (*reset_arg == "last"sv) {
                     (void)clear_last_transaction(cfg, state, std::cout, std::cerr);
+                    return true;
+                }
+                if (*reset_arg == "snapshots"sv) {
+                    state.snapshot_data = persisted_snapshots{};
+                    persist_current_snapshot(state);
+                    std::cout << "snapshots reset\n";
                     return true;
                 }
                 if (auto file_arg = command_argument(*reset_arg, "file"sv)) {
@@ -3465,7 +3472,7 @@ examples:
                     return true;
                 }
 
-                std::cerr << "invalid :reset, expected last|file <path>\n";
+                std::cerr << "invalid :reset, expected last|snapshots|file <path>\n";
                 return true;
             }
             if (cmd == ":snapshots"sv) {

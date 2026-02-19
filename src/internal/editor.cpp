@@ -17,6 +17,7 @@ namespace sontag::cli { namespace detail {
                                                 ":graph", ":quit",  ":q",     nullptr};
 
     static const char* clear_completions[] = {"last", nullptr};
+    static const char* reset_completions[] = {"last", "snapshots", "file", nullptr};
     static const char* show_completions[] = {"config", "decl", "exec", "all", nullptr};
     static const char* set_completions[] = {"std", "opt", "output", "color", "color_scheme", nullptr};
     static const char* graph_completions[] = {"cfg", "call", "defuse", nullptr};
@@ -59,6 +60,10 @@ namespace sontag::cli { namespace detail {
 
     static void complete_clear_args(ic_completion_env_t* cenv, const char* prefix) {
         complete_from(cenv, prefix, clear_completions);
+    }
+
+    static void complete_reset_args(ic_completion_env_t* cenv, const char* prefix) {
+        complete_from(cenv, prefix, reset_completions);
     }
 
     static void complete_show_args(ic_completion_env_t* cenv, const char* prefix) {
@@ -121,6 +126,10 @@ namespace sontag::cli { namespace detail {
         }
         if (command == ":set"sv) {
             ic_complete_word(cenv, prefix, complete_set_args, nullptr);
+            return;
+        }
+        if (command == ":reset"sv) {
+            ic_complete_word(cenv, prefix, complete_reset_args, nullptr);
             return;
         }
         if (command == ":graph"sv) {

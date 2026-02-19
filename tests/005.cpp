@@ -251,7 +251,7 @@ namespace sontag::test {
         CHECK(current->exec_cells.empty());
     }
 
-    TEST_CASE("005: resume latest restores state and reset clears named snapshots", "[005][session][resume]") {
+    TEST_CASE("005: resume latest restores state and reset preserves named snapshots", "[005][session][resume]") {
         detail::temp_dir temp{"sontag_session_resume"};
 
         startup_config initial_cfg{};
@@ -303,15 +303,61 @@ namespace sontag::test {
 
         auto snapshots = detail::read_json_file<detail::persisted_snapshots>(session_dir / "snapshots.json");
         CHECK(snapshots.active_snapshot == "current");
-        REQUIRE(snapshots.snapshots.size() == 1U);
+        REQUIRE(snapshots.snapshots.size() == 3U);
 
-        CHECK_FALSE(detail::snapshot_cell_count(snapshots, "baseline"));
-        CHECK_FALSE(detail::snapshot_cell_count(snapshots, "resumed"));
+        auto* baseline = detail::snapshot_by_name(snapshots, "baseline");
+        REQUIRE(baseline != nullptr);
+        CHECK(baseline->cell_count == 2U);
+        REQUIRE(baseline->decl_cells.size() == 2U);
+        CHECK(baseline->exec_cells.empty());
+
+        auto* resumed = detail::snapshot_by_name(snapshots, "resumed");
+        REQUIRE(resumed != nullptr);
+        CHECK(resumed->cell_count == 2U);
+        REQUIRE(resumed->decl_cells.size() == 2U);
+        CHECK(resumed->exec_cells.empty());
 
         auto* current = detail::snapshot_by_name(snapshots, "current");
         REQUIRE(current != nullptr);
         CHECK(current->cell_count == 0U);
         CHECK(current->decl_cells.empty());
+        CHECK(current->exec_cells.empty());
+    }
+
+    TEST_CASE("005: reset snapshots clears named snapshots and keeps current", "[005][session][reset_snapshots]") {
+        detail::temp_dir temp{"sontag_reset_snapshots"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int value = 7;\n"
+                ":mark baseline\n"
+                ":decl int next = value + 1;\n"
+                ":mark expanded\n"
+                ":reset snapshots\n"
+                ":quit\n");
+
+        CHECK(output.out.find("snapshots reset") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 2U);
+        CHECK(persisted_cells.exec_cells.empty());
+
+        auto snapshots = detail::read_json_file<detail::persisted_snapshots>(session_dir / "snapshots.json");
+        CHECK(snapshots.active_snapshot == "current");
+        REQUIRE(snapshots.snapshots.size() == 1U);
+
+        CHECK_FALSE(detail::snapshot_cell_count(snapshots, "baseline"));
+        CHECK_FALSE(detail::snapshot_cell_count(snapshots, "expanded"));
+
+        auto* current = detail::snapshot_by_name(snapshots, "current");
+        REQUIRE(current != nullptr);
+        CHECK(current->cell_count == 2U);
+        REQUIRE(current->decl_cells.size() == 2U);
         CHECK(current->exec_cells.empty());
     }
 
