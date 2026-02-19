@@ -3,13 +3,13 @@
 #include "sontag/config.hpp"
 #include "sontag/graph.hpp"
 
-#include <glaze/glaze.hpp>
-
-#include <cxxabi.h>
-
 #include "internal/delta.hpp"
 #include "internal/metrics.hpp"
 #include "internal/opcode.hpp"
+
+#include <glaze/glaze.hpp>
+
+#include <cxxabi.h>
 extern "C" {
 #include <fcntl.h>
 #include <sys/wait.h>

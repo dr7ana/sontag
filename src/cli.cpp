@@ -3,14 +3,14 @@
 #include "sontag/analysis.hpp"
 #include "sontag/format.hpp"
 
-#include <glaze/glaze.hpp>
-
-#include <CLI/CLI.hpp>
-
 #include "internal/delta.hpp"
 #include "internal/editor.hpp"
 #include "internal/opcode.hpp"
 #include "internal/session_types.hpp"
+
+#include <glaze/glaze.hpp>
+
+#include <CLI/CLI.hpp>
 
 extern "C" {
 #include <sys/wait.h>

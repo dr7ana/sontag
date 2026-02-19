@@ -2,6 +2,8 @@
 
 extern "C" {
 #include <isocline.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 }
 
 #include <array>
@@ -125,6 +127,16 @@ namespace sontag::cli { namespace detail {
 
     static void complete_menu_items(ic_completion_env_t* cenv, const char* prefix) {
         ic_complete_word(cenv, prefix, complete_menu_word_items, nullptr);
+    }
+
+    static void trigger_menu_completion_once() {
+#ifdef TIOCSTI
+        if (::isatty(STDIN_FILENO) != 1) {
+            return;
+        }
+        char tab = '\t';
+        (void)::ioctl(STDIN_FILENO, TIOCSTI, &tab);
+#endif
     }
 
     static void complete_repl(ic_completion_env_t* cenv, const char* prefix) {
@@ -273,7 +285,7 @@ namespace sontag::cli {
         auto prompt_text = std::string(prompt);
         auto previous_auto_tab = ic_enable_auto_tab(false);
         auto previous_hint = ic_enable_hint(false);
-        (void)ic_async_tab();
+        detail::trigger_menu_completion_once();
         auto* raw = ic_readline_ex(prompt_text.c_str(), detail::complete_menu_items, completions, nullptr, nullptr);
         (void)ic_enable_hint(previous_hint);
         (void)ic_enable_auto_tab(previous_auto_tab);

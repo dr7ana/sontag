@@ -72,14 +72,16 @@ IncludeCategories:
     Priority: 2
   - Regex: '^<sontag'
     Priority: 3
-  - Regex: '^"(CLI11|catch2|glaze)'
+  - Regex: '^"internal'
     Priority: 4
-  - Regex: '^<(CLI11|catch2|glaze)'
+  - Regex: '^"(CLI11|catch2|glaze)'
     Priority: 5
-  - Regex: '^<.*\.h(pp)?>$'
+  - Regex: '^<(CLI11|catch2|glaze)'
     Priority: 6
-  - Regex: '(<)(.)+(>)'
+  - Regex: '^<.*\.h(pp)?>$'
     Priority: 7
+  - Regex: '(<)(.)+(>)'
+    Priority: 8
 
 # spacing
 SpaceBeforeParens: ControlStatements
