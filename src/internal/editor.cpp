@@ -11,10 +11,10 @@ namespace sontag::cli { namespace detail {
 
     using namespace std::string_view_literals;
 
-    static const char* command_completions[] = {":help",  ":clear", ":show",  ":symbols", ":decl",      ":declfile",
-                                                ":file",  ":set",   ":reset", ":mark",    ":snapshots", ":asm",
-                                                ":dump",  ":ir",    ":diag",  ":mca",     ":delta",     ":inspect",
-                                                ":graph", ":quit",  ":q",     nullptr};
+    static const char* command_completions[] = {":help",    ":clear",    ":show", ":symbols", ":decl", ":declfile",
+                                                ":file",    ":openfile", ":set",  ":reset",   ":mark", ":snapshots",
+                                                ":asm",     ":dump",     ":ir",   ":diag",    ":mca",  ":delta",
+                                                ":inspect", ":graph",    ":quit", ":q",       nullptr};
 
     static const char* clear_completions[] = {"last", nullptr};
     static const char* reset_completions[] = {"last", "snapshots", "file", nullptr};

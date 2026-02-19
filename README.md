@@ -95,10 +95,12 @@ sontag >
 - file ingestion commands:
   - `:declfile <path>` loads full file text as one declarative cell
   - `:file <path>` AST-splits a source file into declarative prefix + driver body (`main` or `__sontag_main`)
+  - `:openfile <path>` opens an editor (`VISUAL`/`EDITOR`, fallback `hx`, then `nano`), runs `clang-format -i`, then imports with `:file` semantics
 - clear/reset commands:
   - `:clear` clears the terminal screen
-  - `:reset` clears all transactions/state
+  - `:reset` clears active code state (cells + transactions) and rebinds `current` to empty
   - `:reset last` undoes the most recent mutation transaction (single line or full file import)
+  - `:reset snapshots` clears named snapshots and reinitializes snapshot storage to `current`
   - `:reset file <path>` undoes the most recent matching file import transaction from either `:file` or `:declfile`
 - generated translation unit preview (`:show all`)
 - symbol listing from compiled output (`:symbols`)
@@ -127,6 +129,7 @@ sontag >
   - one executable cell from the selected driver body
   - if both `main` and `__sontag_main` exist, import fails
   - if neither exists, import fails and suggests `:declfile`
+- `:openfile <path>` opens/edit a file in-terminal, applies repository `.clang-format`, then imports through the same pipeline as `:file`.
 - non-command input stores executable cells in synthesized `__sontag_main()`.
 - press `Shift+Tab` (or `Ctrl+Enter`) to insert a newline while composing a multi-line cell.
 - use `:show all` to inspect the full generated source in order: declarations first, then executable cells wrapped in the synthesized function.
@@ -138,8 +141,9 @@ sontag >
   - single-line mutations (`:decl ...` or plain executable input) are one transaction
   - `:file <path>` and `:declfile <path>` are import transactions
 - `:clear` is screen-only (no subcommands).
-- `:reset` clears all persisted cells, transactions, and named snapshots.
+- `:reset` clears persisted cells and transactions, keeps named snapshots, and rebinds `current` to empty state.
 - `:reset last` removes the most recent successful transaction.
+- `:reset snapshots` clears all named snapshots and reinitializes snapshot storage to `current`.
 - `:reset file <path>` removes the most recent successful import transaction matching the normalized path, whether imported with `:file` or `:declfile`.
 - successful mutation output uses:
   - `... -> state: valid`

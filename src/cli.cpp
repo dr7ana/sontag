@@ -23,6 +23,7 @@ extern "C" {
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <flat_map>
 #include <fstream>
@@ -532,6 +533,47 @@ namespace sontag::cli {
             return output;
         }
 
+        static constexpr int wait_for_child_exit_code(pid_t pid) {
+            int status = 0;
+            if (::waitpid(pid, &status, 0) < 0) {
+                throw std::runtime_error("waitpid failed");
+            }
+
+            auto exit_code = 1;
+            if (WIFEXITED(status)) {
+                exit_code = WEXITSTATUS(status);
+            }
+            else if (WIFSIGNALED(status)) {
+                exit_code = 128 + WTERMSIG(status);
+            }
+            return exit_code;
+        }
+
+        static constexpr int run_command_interactive(std::span<std::string> args) {
+            if (args.empty()) {
+                throw std::runtime_error("command args cannot be empty");
+            }
+
+            auto pid = ::fork();
+            if (pid < 0) {
+                throw std::runtime_error("fork failed");
+            }
+
+            if (pid == 0) {
+                std::vector<char*> argv{};
+                argv.reserve(args.size() + 1U);
+                for (auto& arg : args) {
+                    argv.push_back(const_cast<char*>(arg.c_str()));
+                }
+                argv.push_back(nullptr);
+
+                ::execvp(argv[0], argv.data());
+                _exit(127);
+            }
+
+            return wait_for_child_exit_code(pid);
+        }
+
         static constexpr command_capture_result run_command_capture(std::span<std::string> args) {
             if (args.empty()) {
                 throw std::runtime_error("command args cannot be empty");
@@ -574,20 +616,177 @@ namespace sontag::cli {
             auto output = read_fd_all(pipe_fds[0]);
             ::close(pipe_fds[0]);
 
-            int status = 0;
-            if (::waitpid(pid, &status, 0) < 0) {
-                throw std::runtime_error("waitpid failed");
+            return command_capture_result{.exit_code = wait_for_child_exit_code(pid), .output = std::move(output)};
+        }
+
+        static bool is_executable_file(const fs::path& path) {
+            std::error_code ec{};
+            auto status = fs::status(path, ec);
+            if (ec || !fs::exists(status) || fs::is_directory(status)) {
+                return false;
             }
 
-            auto exit_code = 1;
-            if (WIFEXITED(status)) {
-                exit_code = WEXITSTATUS(status);
-            }
-            else if (WIFSIGNALED(status)) {
-                exit_code = 128 + WTERMSIG(status);
+            auto perms = status.permissions();
+            auto has_owner = (perms & fs::perms::owner_exec) != fs::perms::none;
+            auto has_group = (perms & fs::perms::group_exec) != fs::perms::none;
+            auto has_others = (perms & fs::perms::others_exec) != fs::perms::none;
+            return has_owner || has_group || has_others;
+        }
+
+        static std::optional<fs::path> find_command_on_path(std::string_view command) {
+            auto command_name = trim_view(command);
+            if (command_name.empty()) {
+                return std::nullopt;
             }
 
-            return command_capture_result{.exit_code = exit_code, .output = std::move(output)};
+            if (command_name.find('/') != std::string_view::npos) {
+                auto explicit_path = fs::path{std::string{command_name}};
+                if (is_executable_file(explicit_path)) {
+                    return explicit_path;
+                }
+                return std::nullopt;
+            }
+
+            auto path_env = std::getenv("PATH");
+            if (path_env == nullptr || *path_env == '\0') {
+                return std::nullopt;
+            }
+
+            auto path_view = std::string_view{path_env};
+            size_t begin = 0U;
+            while (begin <= path_view.size()) {
+                auto end = path_view.find(':', begin);
+                if (end == std::string_view::npos) {
+                    end = path_view.size();
+                }
+
+                auto segment = path_view.substr(begin, end - begin);
+                auto base_dir = segment.empty() ? fs::path{"."} : fs::path{std::string{segment}};
+                auto candidate = base_dir / std::string{command_name};
+                if (is_executable_file(candidate)) {
+                    return candidate;
+                }
+
+                if (end == path_view.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+
+            return std::nullopt;
+        }
+
+        static std::optional<std::string> parse_editor_env_value(const char* key) {
+            auto value_ptr = std::getenv(key);
+            if (value_ptr == nullptr) {
+                return std::nullopt;
+            }
+
+            auto value = trim_view(std::string_view{value_ptr});
+            if (value.empty()) {
+                return std::nullopt;
+            }
+
+            auto token_end = value.find_first_of(" \t\r\n");
+            if (token_end != std::string_view::npos) {
+                value = value.substr(0U, token_end);
+            }
+            if (value.empty()) {
+                return std::nullopt;
+            }
+
+            return std::string{value};
+        }
+
+        static std::optional<std::string> resolve_editor_executable() {
+            if (auto visual = parse_editor_env_value("VISUAL")) {
+                return visual;
+            }
+            if (auto editor = parse_editor_env_value("EDITOR")) {
+                return editor;
+            }
+
+            if (find_command_on_path("hx"sv)) {
+                return std::string{"hx"};
+            }
+            if (find_command_on_path("nano"sv)) {
+                return std::string{"nano"};
+            }
+
+            return std::nullopt;
+        }
+
+        static std::optional<fs::path> find_clang_format_config_path() {
+            std::error_code ec{};
+            auto current = fs::current_path(ec);
+            if (ec) {
+                return std::nullopt;
+            }
+
+            while (true) {
+                auto candidate = current / ".clang-format";
+                if (fs::is_regular_file(candidate, ec)) {
+                    if (!ec) {
+                        return candidate;
+                    }
+                    ec.clear();
+                }
+
+                auto parent = current.parent_path();
+                if (parent.empty() || parent == current) {
+                    break;
+                }
+                current = parent;
+            }
+
+            return std::nullopt;
+        }
+
+        static bool run_clang_format_for_file(const fs::path& path, std::ostream& err) {
+            auto style_path = find_clang_format_config_path();
+            if (!style_path) {
+                err << "failed to locate repository .clang-format, state unchanged\n";
+                return false;
+            }
+
+            auto args = std::vector<std::string>{};
+            args.emplace_back("clang-format");
+            args.emplace_back("-style=file:{}"_format(style_path->string()));
+            args.emplace_back("-i");
+            args.emplace_back(path.string());
+
+            auto result = run_command_capture(args);
+            if (result.exit_code == 0) {
+                return true;
+            }
+
+            err << "clang-format failed for " << path << " (exit_code=" << result.exit_code << ")\n";
+            if (!result.output.empty()) {
+                err << result.output;
+                if (!result.output.ends_with('\n')) {
+                    err << '\n';
+                }
+            }
+            err << "state unchanged\n";
+            return false;
+        }
+
+        static bool open_path_in_editor(const fs::path& path, std::ostream& out, std::ostream& err) {
+            auto editor = resolve_editor_executable();
+            if (!editor) {
+                err << "failed to resolve editor (tried VISUAL, EDITOR, hx, nano)\n";
+                err << "state unchanged\n";
+                return false;
+            }
+
+            auto args = std::vector<std::string>{*editor, path.string()};
+            auto exit_code = run_command_interactive(args);
+            if (exit_code == 0) {
+                return true;
+            }
+
+            out << "editor exited with code " << exit_code << ", state unchanged\n";
+            return false;
         }
 
         static std::vector<std::string> build_ast_dump_command(
@@ -1532,6 +1731,7 @@ namespace sontag::cli {
   :decl <code>
   :declfile <path>
   :file <path>
+  :openfile <path>
   :set <key>=<value>
   :reset
   :reset last
@@ -1557,6 +1757,7 @@ examples:
   :decl struct point { int x; int y; };
   :declfile examples/common.hpp
   :file examples/program.cpp
+  :openfile examples/program.cpp
   :reset file examples/program.cpp
   :reset snapshots
   :set std=c++23
@@ -1933,6 +2134,27 @@ examples:
             return true;
         }
 
+        static bool load_file_into_state(const fs::path& path, startup_config& cfg, repl_state& state) {
+            auto plan = build_file_load_plan(cfg, path, std::cerr);
+            if (!plan) {
+                return true;
+            }
+
+            auto success_message = "loaded file {} (decl={}, exec={})"_format(
+                    path.string(), plan->decl_cells.size(), plan->exec_cells.size());
+            (void)append_validated_transaction(
+                    cfg,
+                    state,
+                    std::move(plan->decl_cells),
+                    std::move(plan->exec_cells),
+                    transaction_kind::file,
+                    normalize_source_key(path),
+                    success_message,
+                    std::cout,
+                    std::cerr);
+            return true;
+        }
+
         static bool process_file_command(std::string_view cmd, startup_config& cfg, repl_state& state) {
             auto arg = command_argument(cmd, ":file"sv);
             if (!arg) {
@@ -1945,25 +2167,63 @@ examples:
             }
 
             try {
-                auto plan = build_file_load_plan(cfg, *path, std::cerr);
-                if (!plan) {
+                (void)load_file_into_state(*path, cfg, state);
+            } catch (const std::exception& e) {
+                std::cerr << "file load error: " << e.what() << '\n';
+            }
+
+            return true;
+        }
+
+        static bool process_openfile_command(std::string_view cmd, startup_config& cfg, repl_state& state) {
+            auto arg = command_argument(cmd, ":openfile"sv);
+            if (!arg) {
+                return false;
+            }
+
+            auto path = parse_path_argument(":openfile"sv, *arg, std::cerr);
+            if (!path) {
+                return true;
+            }
+
+            try {
+                auto parent = path->parent_path();
+                if (!parent.empty()) {
+                    std::error_code ec{};
+                    fs::create_directories(parent, ec);
+                    if (ec) {
+                        std::cerr << "failed to create parent directory for :openfile: " << ec.message() << '\n';
+                        std::cerr << "state unchanged\n";
+                        return true;
+                    }
+                }
+
+                if (fs::exists(*path) && !fs::is_regular_file(*path)) {
+                    std::cerr << "path is not a regular file: " << *path << '\n';
+                    std::cerr << "state unchanged\n";
                     return true;
                 }
 
-                auto success_message = "loaded file {} (decl={}, exec={})"_format(
-                        path->string(), plan->decl_cells.size(), plan->exec_cells.size());
-                (void)append_validated_transaction(
-                        cfg,
-                        state,
-                        std::move(plan->decl_cells),
-                        std::move(plan->exec_cells),
-                        transaction_kind::file,
-                        normalize_source_key(*path),
-                        success_message,
-                        std::cout,
-                        std::cerr);
+                std::ofstream touch{*path, std::ios::app};
+                if (!touch.good()) {
+                    std::cerr << "failed to open file for :openfile: " << *path << '\n';
+                    std::cerr << "state unchanged\n";
+                    return true;
+                }
+                touch.close();
+
+                std::cout << "opened file " << *path << " in editor\n";
+                if (!open_path_in_editor(*path, std::cout, std::cerr)) {
+                    return true;
+                }
+                if (!run_clang_format_for_file(*path, std::cerr)) {
+                    return true;
+                }
+
+                (void)load_file_into_state(*path, cfg, state);
             } catch (const std::exception& e) {
-                std::cerr << "file load error: " << e.what() << '\n';
+                std::cerr << "openfile error: " << e.what() << '\n';
+                std::cerr << "state unchanged\n";
             }
 
             return true;
@@ -3440,6 +3700,9 @@ examples:
                 return true;
             }
             if (process_file_command(cmd, cfg, state)) {
+                return true;
+            }
+            if (process_openfile_command(cmd, cfg, state)) {
                 return true;
             }
             if (auto reset_arg = command_argument(cmd, ":reset"sv)) {

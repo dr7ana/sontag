@@ -60,6 +60,59 @@ namespace sontag::test { namespace detail {
         REQUIRE(out.good());
     }
 
+    static void make_executable_file(const fs::path& path, std::string_view content) {
+        auto parent = path.parent_path();
+        if (!parent.empty()) {
+            fs::create_directories(parent);
+        }
+
+        write_text_file(path, content);
+        fs::permissions(
+                path,
+                fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec | fs::perms::group_read |
+                        fs::perms::group_exec | fs::perms::others_read | fs::perms::others_exec,
+                fs::perm_options::replace);
+    }
+
+    static std::vector<std::string> read_lines(const fs::path& path) {
+        std::ifstream in{path};
+        REQUIRE(in.good());
+
+        std::vector<std::string> lines{};
+        std::string line{};
+        while (std::getline(in, line)) {
+            lines.push_back(line);
+        }
+        return lines;
+    }
+
+    struct scoped_env_var {
+        std::string key{};
+        std::optional<std::string> previous{};
+
+        scoped_env_var(std::string key_value, std::optional<std::string> next) : key(std::move(key_value)) {
+            if (auto* existing = std::getenv(key.c_str()); existing != nullptr) {
+                previous = std::string{existing};
+            }
+
+            if (next) {
+                REQUIRE(::setenv(key.c_str(), next->c_str(), 1) == 0);
+            }
+            else {
+                REQUIRE(::unsetenv(key.c_str()) == 0);
+            }
+        }
+
+        ~scoped_env_var() {
+            if (previous) {
+                (void)::setenv(key.c_str(), previous->c_str(), 1);
+            }
+            else {
+                (void)::unsetenv(key.c_str());
+            }
+        }
+    };
+
     static const snapshot_record* snapshot_by_name(const persisted_snapshots& snapshots, std::string_view name) {
         for (const auto& record : snapshots.snapshots) {
             if (record.name == name) {
@@ -977,6 +1030,158 @@ namespace sontag::test {
         REQUIRE(persisted_cells.decl_cells.size() == 1U);
         CHECK(persisted_cells.exec_cells.empty());
         CHECK(persisted_cells.decl_cells[0].find("int baseline = 1;") != std::string::npos);
+    }
+
+    TEST_CASE("005: openfile launches editor then imports file", "[005][session][openfile]") {
+        detail::temp_dir temp{"sontag_openfile_success"};
+        auto source_path = temp.path / "edited.cpp";
+        auto tools_path = temp.path / "tools";
+        detail::fs::create_directories(tools_path);
+
+        auto editor_args_path = temp.path / "hx.args.txt";
+        auto format_args_path = temp.path / "format.args.txt";
+        std::string hx_script{};
+        hx_script.append("#!/usr/bin/env bash\n");
+        hx_script.append("set -eu\n");
+        hx_script.append("printf '%s\\n' \"$@\" > \"");
+        hx_script.append(editor_args_path.string());
+        hx_script.append("\"\n");
+        hx_script.append("cat > \"$1\" <<'EOF'\n");
+        hx_script.append("int seed = 5;\n");
+        hx_script.append("int __sontag_main() {\n");
+        hx_script.append("    int value = seed + 2;\n");
+        hx_script.append("    return value;\n");
+        hx_script.append("}\n");
+        hx_script.append("EOF\n");
+
+        std::string clang_format_script{};
+        clang_format_script.append("#!/usr/bin/env bash\n");
+        clang_format_script.append("set -eu\n");
+        clang_format_script.append("printf '%s\\n' \"$@\" > \"");
+        clang_format_script.append(format_args_path.string());
+        clang_format_script.append("\"\n");
+        clang_format_script.append("exit 0\n");
+        detail::make_executable_file(tools_path / "hx", hx_script);
+        detail::make_executable_file(tools_path / "clang-format", clang_format_script);
+
+        auto existing_path = std::getenv("PATH");
+        auto combined_path = tools_path.string();
+        if (existing_path != nullptr && *existing_path != '\0') {
+            combined_path.append(":");
+            combined_path.append(existing_path);
+        }
+
+        auto scoped_path = detail::scoped_env_var{"PATH", combined_path};
+        auto scoped_visual = detail::scoped_env_var{"VISUAL", std::nullopt};
+        auto scoped_editor = detail::scoped_env_var{"EDITOR", std::nullopt};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":openfile {}\n:show all\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("opened file") != std::string::npos);
+        CHECK(output.out.find("loaded file") != std::string::npos);
+        CHECK(output.out.find("int seed = 5;") != std::string::npos);
+        CHECK(output.out.find("int value = seed + 2;") != std::string::npos);
+        CHECK(output.out.find("return value;") == std::string::npos);
+        CHECK(output.out.find("return 0;") != std::string::npos);
+
+        auto editor_args = detail::read_lines(editor_args_path);
+        REQUIRE(editor_args.size() == 1U);
+        CHECK(editor_args[0] == source_path.string());
+
+        auto format_args = detail::read_lines(format_args_path);
+        CHECK(std::ranges::find(format_args, "-i") != format_args.end());
+        CHECK(std::ranges::find(format_args, source_path.string()) != format_args.end());
+        CHECK(std::ranges::any_of(format_args, [](const std::string& arg) { return arg.starts_with("-style=file:"); }));
+    }
+
+    TEST_CASE("005: openfile keeps state unchanged when editor exits non-zero", "[005][session][openfile]") {
+        detail::temp_dir temp{"sontag_openfile_editor_failure"};
+        auto source_path = temp.path / "edited.cpp";
+        auto tools_path = temp.path / "tools";
+        detail::fs::create_directories(tools_path);
+
+        detail::make_executable_file(tools_path / "hx", "#!/usr/bin/env bash\nset -eu\nexit 13\n");
+
+        auto existing_path = std::getenv("PATH");
+        auto combined_path = tools_path.string();
+        if (existing_path != nullptr && *existing_path != '\0') {
+            combined_path.append(":");
+            combined_path.append(existing_path);
+        }
+
+        auto scoped_path = detail::scoped_env_var{"PATH", combined_path};
+        auto scoped_visual = detail::scoped_env_var{"VISUAL", std::nullopt};
+        auto scoped_editor = detail::scoped_env_var{"EDITOR", std::nullopt};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":openfile {}\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("editor exited with code 13, state unchanged") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        CHECK(persisted_cells.decl_cells.empty());
+        CHECK(persisted_cells.exec_cells.empty());
+    }
+
+    TEST_CASE("005: openfile keeps state unchanged when clang-format fails", "[005][session][openfile]") {
+        detail::temp_dir temp{"sontag_openfile_format_failure"};
+        auto source_path = temp.path / "edited.cpp";
+        auto tools_path = temp.path / "tools";
+        detail::fs::create_directories(tools_path);
+
+        detail::make_executable_file(
+                tools_path / "hx",
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "cat > \"$1\" <<'EOF'\n"
+                "int seed = 5;\n"
+                "int __sontag_main() {\n"
+                "    int value = seed + 2;\n"
+                "    return value;\n"
+                "}\n"
+                "EOF\n");
+        detail::make_executable_file(
+                tools_path / "clang-format",
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "echo format-error\n"
+                "exit 7\n");
+
+        auto existing_path = std::getenv("PATH");
+        auto combined_path = tools_path.string();
+        if (existing_path != nullptr && *existing_path != '\0') {
+            combined_path.append(":");
+            combined_path.append(existing_path);
+        }
+
+        auto scoped_path = detail::scoped_env_var{"PATH", combined_path};
+        auto scoped_visual = detail::scoped_env_var{"VISUAL", std::nullopt};
+        auto scoped_editor = detail::scoped_env_var{"EDITOR", std::nullopt};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":openfile {}\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.err.find("clang-format failed for") != std::string::npos);
+        CHECK(output.err.find("state unchanged") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        CHECK(persisted_cells.decl_cells.empty());
+        CHECK(persisted_cells.exec_cells.empty());
     }
 
     TEST_CASE("005: clear command rejects subcommands", "[005][session][clear]") {
