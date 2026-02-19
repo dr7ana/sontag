@@ -13,6 +13,7 @@ namespace sontag::cli {
         explicit line_editor(const startup_config& cfg);
 
         std::optional<std::string> read_line(std::string_view prompt);
+        std::optional<std::string> read_menu_line(std::string_view prompt, const char** completions);
     };
 
 }  // namespace sontag::cli

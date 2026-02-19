@@ -52,22 +52,12 @@ namespace sontag::opcode {
         constexpr size_t operator()(std::string_view value) const noexcept {
             return std::hash<std::string_view>{}(value);
         }
-
-        constexpr size_t operator()(const std::string& value) const noexcept {
-            return std::hash<std::string_view>{}(value);
-        }
     };
 
     struct transparent_string_equal {
         using is_transparent = void;
 
         constexpr bool operator()(std::string_view lhs, std::string_view rhs) const noexcept { return lhs == rhs; }
-
-        constexpr bool operator()(const std::string& lhs, const std::string& rhs) const noexcept { return lhs == rhs; }
-
-        constexpr bool operator()(const std::string& lhs, std::string_view rhs) const noexcept { return lhs == rhs; }
-
-        constexpr bool operator()(std::string_view lhs, const std::string& rhs) const noexcept { return lhs == rhs; }
     };
 
     class opcode_interner {

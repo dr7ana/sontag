@@ -50,7 +50,7 @@ values[0] = value * value;
 values[1] = value * 2;
 :show all
 :symbols
-:set opt=O0
+:config build.opt=O0
 :dump
 :asm
 :ir
@@ -95,13 +95,22 @@ sontag >
 - file ingestion commands:
   - `:declfile <path>` loads full file text as one declarative cell
   - `:file <path>` AST-splits a source file into declarative prefix + driver body (`main` or `__sontag_main`)
-  - `:openfile <path>` opens an editor (`VISUAL`/`EDITOR`, fallback `hx`, then `nano`), runs `clang-format -i`, then imports with `:file` semantics
+  - `:openfile <path>` opens an editor (configured editor or `VISUAL`/`EDITOR`, fallback `hx` -> `neovim`/`nvim` -> `vim` -> `nano`), runs `clang-format -i`, then imports with `:file` semantics
 - clear/reset commands:
   - `:clear` clears the terminal screen
   - `:reset` clears active code state (cells + transactions) and rebinds `current` to empty
   - `:reset last` undoes the most recent mutation transaction (single line or full file import)
   - `:reset snapshots` clears named snapshots and reinitializes snapshot storage to `current`
   - `:reset file <path>` undoes the most recent matching file import transaction from either `:file` or `:declfile`
+- config commands:
+  - `:config` opens an interactive category menu (`build`, `ui`, `session`, `editor`)
+    - selecting a category prints that category and opens an interactive key menu
+    - selecting a bare key (for example `output`) opens a `key=` value prompt
+    - enum-like keys support value completion in that prompt (for example `output -> table|json`, `color_scheme -> classic|vaporwave`)
+    - selecting `key=value` from the key menu applies immediately
+  - `:config <category>` prints category keys/values
+  - `:config <key>=<value>` mutates a single setting
+  - `:config reset` restores all mutable settings to defaults
 - generated translation unit preview (`:show all`)
 - symbol listing from compiled output (`:symbols`)
 - assembly output (`:asm`)
@@ -134,6 +143,18 @@ sontag >
 - press `Shift+Tab` (or `Ctrl+Enter`) to insert a newline while composing a multi-line cell.
 - use `:show all` to inspect the full generated source in order: declarations first, then executable cells wrapped in the synthesized function.
 - all mutating commands validate atomically; on failure, state is unchanged.
+
+## Config Menu Flow
+
+- `:config`:
+  - choose category (`ui`, `build`, `session`, `editor`, `q`)
+  - category values are printed
+  - choose either:
+    - a bare key, which opens a `key=` value prompt
+    - a direct `key=value` entry
+- example:
+  - `:config` -> `ui` -> `output` -> `json`
+  - result: `updated ui.output=json`
 
 ## Reset Semantics
 

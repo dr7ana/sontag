@@ -4,7 +4,7 @@ namespace sontag::test { namespace detail {
     struct temp_dir {
         fs::path path{};
 
-        explicit temp_dir(const std::string& prefix) {
+        explicit temp_dir(std::string_view prefix) {
             auto now = std::chrono::system_clock::now().time_since_epoch().count();
             std::ostringstream dir_name{};
             dir_name << prefix << "_" << static_cast<long>(::getpid()) << "_" << now;
@@ -412,6 +412,156 @@ namespace sontag::test {
         CHECK(current->cell_count == 2U);
         REQUIRE(current->decl_cells.size() == 2U);
         CHECK(current->exec_cells.empty());
+    }
+
+    TEST_CASE("005: config command lists categories and category values", "[005][session][config]") {
+        detail::temp_dir temp{"sontag_config_categories"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":config\n"
+                "build\n"
+                "q\n"
+                ":config\n"
+                "ui\n"
+                "q\n"
+                ":config\n"
+                "session\n"
+                "q\n"
+                ":config\n"
+                "editor\n"
+                "q\n"
+                ":quit\n");
+
+        CHECK(output.out.find("build:\n") != std::string::npos);
+        CHECK(output.out.find("  std=") != std::string::npos);
+        CHECK(output.out.find("  opt=") != std::string::npos);
+
+        CHECK(output.out.find("ui:\n") != std::string::npos);
+        CHECK(output.out.find("  output=") != std::string::npos);
+        CHECK(output.out.find("  color=") != std::string::npos);
+
+        CHECK(output.out.find("session:\n") != std::string::npos);
+        CHECK(output.out.find("  cache_dir=") != std::string::npos);
+        CHECK(output.out.find("  history_file=") != std::string::npos);
+
+        CHECK(output.out.find("editor:\n") != std::string::npos);
+        CHECK(output.out.find("  editor=") != std::string::npos);
+        CHECK(output.out.find("  formatter=") != std::string::npos);
+    }
+
+    TEST_CASE("005: config assignment and reset update mutable settings", "[005][session][config]") {
+        detail::temp_dir temp{"sontag_config_set_reset"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":config build.opt=O3\n"
+                ":config ui.color=always\n"
+                ":config editor.editor=vim\n"
+                ":config editor.formatter=clang-format-21\n"
+                ":config session.history_file=.sontag/test_history\n"
+                ":config build\n"
+                ":config ui\n"
+                ":config editor\n"
+                ":config session\n"
+                ":config reset\n"
+                ":config build\n"
+                ":config ui\n"
+                ":config editor\n"
+                ":config session\n"
+                ":quit\n");
+
+        CHECK(output.out.find("updated build.opt=O3") != std::string::npos);
+        CHECK(output.out.find("updated ui.color=always") != std::string::npos);
+        CHECK(output.out.find("updated editor.editor=vim") != std::string::npos);
+        CHECK(output.out.find("updated editor.formatter=clang-format-21") != std::string::npos);
+        CHECK(output.out.find("updated session.history_file=.sontag/test_history") != std::string::npos);
+
+        CHECK(output.out.find("  opt=O3") != std::string::npos);
+        CHECK(output.out.find("  color=always") != std::string::npos);
+        CHECK(output.out.find("  editor=vim") != std::string::npos);
+        CHECK(output.out.find("  formatter=clang-format-21") != std::string::npos);
+        CHECK(output.out.find("  history_file=.sontag/test_history") != std::string::npos);
+
+        CHECK(output.out.find("config reset") != std::string::npos);
+        CHECK(output.out.find("  opt=O2") != std::string::npos);
+        CHECK(output.out.find("  color=auto") != std::string::npos);
+        CHECK(output.out.find("  editor=<auto>") != std::string::npos);
+        CHECK(output.out.find("  formatter=clang-format") != std::string::npos);
+        CHECK(output.out.find("  history_file=.sontag/history") != std::string::npos);
+    }
+
+    TEST_CASE("005: config menu accepts category key=value updates", "[005][session][config]") {
+        detail::temp_dir temp{"sontag_config_menu_assignment"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":config\n"
+                "ui\n"
+                "color_scheme=vaporwave\n"
+                ":config ui\n"
+                ":quit\n");
+
+        CHECK(output.out.find("updated ui.color_scheme=vaporwave") != std::string::npos);
+        CHECK(output.out.find("  color_scheme=vaporwave") != std::string::npos);
+    }
+
+    TEST_CASE("005: config menu bare key prompts for value", "[005][session][config]") {
+        detail::temp_dir temp{"sontag_config_menu_bare_key"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":config\n"
+                "ui\n"
+                "output\n"
+                "json\n"
+                ":config ui\n"
+                ":quit\n");
+
+        CHECK(output.out.find("updated ui.output=json") != std::string::npos);
+        CHECK(output.out.find("  output=json") != std::string::npos);
+    }
+
+    TEST_CASE("005: config command reports invalid inputs", "[005][session][config]") {
+        detail::temp_dir temp{"sontag_config_invalid"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":config unknown\n"
+                ":config build.opt=Og\n"
+                ":config nope=value\n"
+                ":config build.opt=\n"
+                ":quit\n");
+
+        CHECK(output.err.find("invalid :config, expected category|key=value|reset") != std::string::npos);
+        CHECK(output.err.find("invalid build.opt: Og (expected O0|O1|O2|O3|Ofast|Oz)") != std::string::npos);
+        CHECK(output.err.find("unknown :config key: nope") != std::string::npos);
+        CHECK(output.err.find("invalid :config, key and value must be non-empty") != std::string::npos);
     }
 
     TEST_CASE("005: show all prints declarative and executable regions", "[005][session][show]") {
@@ -1096,7 +1246,7 @@ namespace sontag::test {
         auto format_args = detail::read_lines(format_args_path);
         CHECK(std::ranges::find(format_args, "-i") != format_args.end());
         CHECK(std::ranges::find(format_args, source_path.string()) != format_args.end());
-        CHECK(std::ranges::any_of(format_args, [](const std::string& arg) { return arg.starts_with("-style=file:"); }));
+        CHECK(std::ranges::any_of(format_args, [](std::string_view arg) { return arg.starts_with("-style=file:"); }));
     }
 
     TEST_CASE("005: openfile keeps state unchanged when editor exits non-zero", "[005][session][openfile]") {

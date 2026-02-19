@@ -35,9 +35,12 @@ namespace sontag::internal {
         std::optional<std::string> mca_cpu{};
         std::string mca_path{"llvm-mca"};
         std::string cache_dir{};
+        std::string history_file{".sontag/history"};
         std::string output{};
         std::string color{};
         std::string color_scheme{"classic"};
+        std::optional<std::string> editor{};
+        std::string formatter{"clang-format"};
     };
 
     struct snapshot_record {
@@ -89,12 +92,18 @@ namespace glz {
                        &T::mca_path,
                        "cache_dir",
                        &T::cache_dir,
+                       "history_file",
+                       &T::history_file,
                        "output",
                        &T::output,
                        "color",
                        &T::color,
                        "color_scheme",
-                       &T::color_scheme);
+                       &T::color_scheme,
+                       "editor",
+                       &T::editor,
+                       "formatter",
+                       &T::formatter);
     };
 
     template <>

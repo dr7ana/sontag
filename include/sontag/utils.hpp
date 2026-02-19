@@ -74,19 +74,6 @@ namespace sontag {
             }
 
             if (result.ec != std::errc{} || result.ptr != input.data() + input.size()) {
-                // only enter this block if we were unsuccessful; silent success cases
-                if (result.ec == std::errc::invalid_argument) {
-                    debug_log{"Error: invalid argument input: ", input};
-                }
-                else if (result.ec == std::errc::result_out_of_range) {
-                    debug_log{"Error: input out of range for uint64_t: ", input};
-                }
-                else if (result.ptr != input.data() + input.size()) {
-                    debug_log{"Error: trailing characters while parsing input: ", input};
-                }
-                else {
-                    debug_log{"Error: unknown error parsing input: ", input};
-                }
                 return std::nullopt;
             }
 

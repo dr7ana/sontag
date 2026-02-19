@@ -4,6 +4,7 @@ extern "C" {
 #include <isocline.h>
 }
 
+#include <array>
 #include <filesystem>
 #include <string_view>
 
@@ -11,20 +12,40 @@ namespace sontag::cli { namespace detail {
 
     using namespace std::string_view_literals;
 
-    static const char* command_completions[] = {":help",    ":clear",    ":show", ":symbols", ":decl", ":declfile",
-                                                ":file",    ":openfile", ":set",  ":reset",   ":mark", ":snapshots",
-                                                ":asm",     ":dump",     ":ir",   ":diag",    ":mca",  ":delta",
-                                                ":inspect", ":graph",    ":quit", ":q",       nullptr};
+    static std::array<const char*, 23> command_completions{
+            ":help",   ":clear", ":show",    ":symbols",   ":decl", ":declfile", ":file", ":openfile",
+            ":config", ":reset", ":mark",    ":snapshots", ":asm",  ":dump",     ":ir",   ":diag",
+            ":mca",    ":delta", ":inspect", ":graph",     ":quit", ":q",        nullptr};
 
-    static const char* clear_completions[] = {"last", nullptr};
-    static const char* reset_completions[] = {"last", "snapshots", "file", nullptr};
-    static const char* show_completions[] = {"config", "decl", "exec", "all", nullptr};
-    static const char* set_completions[] = {"std", "opt", "output", "color", "color_scheme", nullptr};
-    static const char* graph_completions[] = {"cfg", "call", "defuse", nullptr};
-    static const char* inspect_completions[] = {"asm", "mca", nullptr};
-    static const char* inspect_mca_completions[] = {"summary", "heatmap", nullptr};
-    static const char* analysis_target_completions[] = {"@last", "__sontag_main", nullptr};
-    static const char* delta_completions[] = {
+    static std::array<const char*, 2> clear_completions{"last", nullptr};
+    static std::array<const char*, 4> reset_completions{"last", "snapshots", "file", nullptr};
+    static std::array<const char*, 5> show_completions{"config", "decl", "exec", "all", nullptr};
+    static std::array<const char*, 20> config_completions{
+            "build",
+            "ui",
+            "session",
+            "editor",
+            "reset",
+            "build.std=",
+            "build.opt=",
+            "build.target=",
+            "build.cpu=",
+            "build.clang=",
+            "build.mca_cpu=",
+            "build.mca_path=",
+            "ui.output=",
+            "ui.color=",
+            "ui.color_scheme=",
+            "session.cache_dir=",
+            "session.history_file=",
+            "editor.editor=",
+            "editor.formatter=",
+            nullptr};
+    static std::array<const char*, 4> graph_completions{"cfg", "call", "defuse", nullptr};
+    static std::array<const char*, 3> inspect_completions{"asm", "mca", nullptr};
+    static std::array<const char*, 3> inspect_mca_completions{"summary", "heatmap", nullptr};
+    static std::array<const char*, 3> analysis_target_completions{"@last", "__sontag_main", nullptr};
+    static std::array<const char*, 10> delta_completions{
             "spectrum", "O0", "O1", "O2", "O3", "Ofast", "Oz", "@last", "__sontag_main", nullptr};
 
     static constexpr std::string_view trim_left(std::string_view value) {
@@ -55,43 +76,55 @@ namespace sontag::cli { namespace detail {
     }
 
     static void complete_commands(ic_completion_env_t* cenv, const char* prefix) {
-        complete_from(cenv, prefix, command_completions);
+        complete_from(cenv, prefix, command_completions.data());
     }
 
     static void complete_clear_args(ic_completion_env_t* cenv, const char* prefix) {
-        complete_from(cenv, prefix, clear_completions);
+        complete_from(cenv, prefix, clear_completions.data());
     }
 
     static void complete_reset_args(ic_completion_env_t* cenv, const char* prefix) {
-        complete_from(cenv, prefix, reset_completions);
+        complete_from(cenv, prefix, reset_completions.data());
     }
 
     static void complete_show_args(ic_completion_env_t* cenv, const char* prefix) {
-        complete_from(cenv, prefix, show_completions);
+        complete_from(cenv, prefix, show_completions.data());
     }
 
-    static void complete_set_args(ic_completion_env_t* cenv, const char* prefix) {
-        complete_from(cenv, prefix, set_completions);
+    static void complete_config_args(ic_completion_env_t* cenv, const char* prefix) {
+        complete_from(cenv, prefix, config_completions.data());
     }
 
     static void complete_graph_args(ic_completion_env_t* cenv, const char* prefix) {
-        complete_from(cenv, prefix, graph_completions);
+        complete_from(cenv, prefix, graph_completions.data());
     }
 
     static void complete_inspect_args(ic_completion_env_t* cenv, const char* prefix) {
-        complete_from(cenv, prefix, inspect_completions);
+        complete_from(cenv, prefix, inspect_completions.data());
     }
 
     static void complete_inspect_mca_args(ic_completion_env_t* cenv, const char* prefix) {
-        complete_from(cenv, prefix, inspect_mca_completions);
+        complete_from(cenv, prefix, inspect_mca_completions.data());
     }
 
     static void complete_analysis_args(ic_completion_env_t* cenv, const char* prefix) {
-        complete_from(cenv, prefix, analysis_target_completions);
+        complete_from(cenv, prefix, analysis_target_completions.data());
     }
 
     static void complete_delta_args(ic_completion_env_t* cenv, const char* prefix) {
-        complete_from(cenv, prefix, delta_completions);
+        complete_from(cenv, prefix, delta_completions.data());
+    }
+
+    static void complete_menu_word_items(ic_completion_env_t* cenv, const char* word) {
+        auto* completions = static_cast<const char**>(ic_completion_arg(cenv));
+        if (completions == nullptr) {
+            return;
+        }
+        complete_from(cenv, word, completions);
+    }
+
+    static void complete_menu_items(ic_completion_env_t* cenv, const char* prefix) {
+        ic_complete_word(cenv, prefix, complete_menu_word_items, nullptr);
     }
 
     static void complete_repl(ic_completion_env_t* cenv, const char* prefix) {
@@ -124,8 +157,8 @@ namespace sontag::cli { namespace detail {
             ic_complete_word(cenv, prefix, complete_show_args, nullptr);
             return;
         }
-        if (command == ":set"sv) {
-            ic_complete_word(cenv, prefix, complete_set_args, nullptr);
+        if (command == ":config"sv) {
+            ic_complete_word(cenv, prefix, complete_config_args, nullptr);
             return;
         }
         if (command == ":reset"sv) {
@@ -227,6 +260,23 @@ namespace sontag::cli {
     std::optional<std::string> line_editor::read_line(std::string_view prompt) {
         auto prompt_text = std::string(prompt);
         auto* raw = ic_readline(prompt_text.c_str());
+        if (raw == nullptr) {
+            return std::nullopt;
+        }
+
+        std::string line{raw};
+        ic_free(raw);
+        return line;
+    }
+
+    std::optional<std::string> line_editor::read_menu_line(std::string_view prompt, const char** completions) {
+        auto prompt_text = std::string(prompt);
+        auto previous_auto_tab = ic_enable_auto_tab(false);
+        auto previous_hint = ic_enable_hint(false);
+        (void)ic_async_tab();
+        auto* raw = ic_readline_ex(prompt_text.c_str(), detail::complete_menu_items, completions, nullptr, nullptr);
+        (void)ic_enable_hint(previous_hint);
+        (void)ic_enable_auto_tab(previous_auto_tab);
         if (raw == nullptr) {
             return std::nullopt;
         }

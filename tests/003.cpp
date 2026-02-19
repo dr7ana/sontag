@@ -5,7 +5,7 @@ namespace sontag::test {
         struct temp_dir {
             fs::path path{};
 
-            explicit temp_dir(const std::string& prefix) {
+            explicit temp_dir(std::string_view prefix) {
                 auto now = std::chrono::system_clock::now().time_since_epoch().count();
                 std::ostringstream dir_name{};
                 dir_name << prefix << "_" << static_cast<long>(::getpid()) << "_" << now;
@@ -57,7 +57,7 @@ namespace sontag::test {
         }
 
         static bool has_prefixed_arg(const std::vector<std::string>& args, std::string_view prefix) {
-            return std::ranges::any_of(args, [prefix](const std::string& arg) { return arg.starts_with(prefix); });
+            return std::ranges::any_of(args, [prefix](std::string_view arg) { return arg.starts_with(prefix); });
         }
 
         static std::string make_objdump_wrapper_script(const fs::path& args_path) {

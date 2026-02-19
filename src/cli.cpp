@@ -478,7 +478,7 @@ namespace sontag::cli {
                 std::string_view command_name, std::string_view raw_argument, std::ostream& err) {
             auto value = trim_view(raw_argument);
             if (value.empty()) {
-                err << "invalid " << command_name << ", expected path after command\n";
+                err << "invalid {}, expected path after command\n"_format(command_name);
                 return std::nullopt;
             }
 
@@ -489,13 +489,13 @@ namespace sontag::cli {
             }
 
             if (value.empty()) {
-                err << "invalid " << command_name << ", expected non-empty path\n";
+                err << "invalid {}, expected non-empty path\n"_format(command_name);
                 return std::nullopt;
             }
 
             auto path = fs::path{std::string{value}}.lexically_normal();
             if (path.empty()) {
-                err << "invalid " << command_name << ", expected non-empty path\n";
+                err << "invalid {}, expected non-empty path\n"_format(command_name);
                 return std::nullopt;
             }
 
@@ -503,7 +503,7 @@ namespace sontag::cli {
                 std::error_code ec{};
                 auto cwd = fs::current_path(ec);
                 if (ec) {
-                    err << "failed to resolve current directory for " << command_name << ": " << ec.message() << '\n';
+                    err << "failed to resolve current directory for {}: {}\n"_format(command_name, ec.message());
                     return std::nullopt;
                 }
                 path = (cwd / path).lexically_normal();
@@ -698,7 +698,11 @@ namespace sontag::cli {
             return std::string{value};
         }
 
-        static std::optional<std::string> resolve_editor_executable() {
+        static std::optional<std::string> resolve_editor_executable(const startup_config& cfg) {
+            if (cfg.editor && !trim_view(*cfg.editor).empty()) {
+                return *cfg.editor;
+            }
+
             if (auto visual = parse_editor_env_value("VISUAL")) {
                 return visual;
             }
@@ -708,6 +712,15 @@ namespace sontag::cli {
 
             if (find_command_on_path("hx"sv)) {
                 return std::string{"hx"};
+            }
+            if (find_command_on_path("neovim"sv)) {
+                return std::string{"neovim"};
+            }
+            if (find_command_on_path("nvim"sv)) {
+                return std::string{"nvim"};
+            }
+            if (find_command_on_path("vim"sv)) {
+                return std::string{"vim"};
             }
             if (find_command_on_path("nano"sv)) {
                 return std::string{"nano"};
@@ -742,7 +755,7 @@ namespace sontag::cli {
             return std::nullopt;
         }
 
-        static bool run_clang_format_for_file(const fs::path& path, std::ostream& err) {
+        static bool run_clang_format_for_file(const startup_config& cfg, const fs::path& path, std::ostream& err) {
             auto style_path = find_clang_format_config_path();
             if (!style_path) {
                 err << "failed to locate repository .clang-format, state unchanged\n";
@@ -750,7 +763,7 @@ namespace sontag::cli {
             }
 
             auto args = std::vector<std::string>{};
-            args.emplace_back("clang-format");
+            args.emplace_back(cfg.formatter.string());
             args.emplace_back("-style=file:{}"_format(style_path->string()));
             args.emplace_back("-i");
             args.emplace_back(path.string());
@@ -760,7 +773,7 @@ namespace sontag::cli {
                 return true;
             }
 
-            err << "clang-format failed for " << path << " (exit_code=" << result.exit_code << ")\n";
+            err << "{} failed for {} (exit_code={})\n"_format(cfg.formatter.string(), path.string(), result.exit_code);
             if (!result.output.empty()) {
                 err << result.output;
                 if (!result.output.ends_with('\n')) {
@@ -771,10 +784,11 @@ namespace sontag::cli {
             return false;
         }
 
-        static bool open_path_in_editor(const fs::path& path, std::ostream& out, std::ostream& err) {
-            auto editor = resolve_editor_executable();
+        static bool open_path_in_editor(
+                const startup_config& cfg, const fs::path& path, std::ostream& out, std::ostream& err) {
+            auto editor = resolve_editor_executable(cfg);
             if (!editor) {
-                err << "failed to resolve editor (tried VISUAL, EDITOR, hx, nano)\n";
+                err << "failed to resolve editor (tried configured editor, VISUAL, EDITOR, hx, neovim, vim, nano)\n";
                 err << "state unchanged\n";
                 return false;
             }
@@ -785,7 +799,7 @@ namespace sontag::cli {
                 return true;
             }
 
-            out << "editor exited with code " << exit_code << ", state unchanged\n";
+            out << "editor exited with code {}, state unchanged\n"_format(exit_code);
             return false;
         }
 
@@ -883,11 +897,11 @@ namespace sontag::cli {
         static bool check_regular_file(const fs::path& path, std::ostream& err) {
             std::error_code ec{};
             if (!fs::exists(path, ec) || ec) {
-                err << "file not found: " << path << '\n';
+                err << "file not found: {}\n"_format(path.string());
                 return false;
             }
             if (!fs::is_regular_file(path, ec) || ec) {
-                err << "path is not a regular file: " << path << '\n';
+                err << "path is not a regular file: {}\n"_format(path.string());
                 return false;
             }
             return true;
@@ -948,17 +962,17 @@ namespace sontag::cli {
             auto body_close_offset =
                     source_offset_from_location(source_text, line_offsets, selected->driver.body_range.end);
             if (!function_start_offset || !body_open_offset || !body_close_offset) {
-                err << "failed to map AST source ranges to file offsets for " << source_path << '\n';
+                err << "failed to map AST source ranges to file offsets for {}\n"_format(source_path.string());
                 return std::nullopt;
             }
             if (*function_start_offset > source_text.size() || *body_open_offset >= source_text.size() ||
                 *body_close_offset >= source_text.size()) {
-                err << "AST source ranges are out of bounds for " << source_path << '\n';
+                err << "AST source ranges are out of bounds for {}\n"_format(source_path.string());
                 return std::nullopt;
             }
             if (*body_open_offset >= *body_close_offset || source_text[*body_open_offset] != '{' ||
                 source_text[*body_close_offset] != '}') {
-                err << "failed to extract driver body from AST range for " << source_path << '\n';
+                err << "failed to extract driver body from AST range for {}\n"_format(source_path.string());
                 return std::nullopt;
             }
 
@@ -1103,9 +1117,12 @@ namespace sontag::cli {
             data.mca_cpu = cfg.mca_cpu;
             data.mca_path = cfg.mca_path.string();
             data.cache_dir = cfg.cache_dir.string();
+            data.history_file = cfg.history_file.string();
             data.output = "{}"_format(cfg.output);
             data.color = "{}"_format(cfg.color);
             data.color_scheme = "{}"_format(cfg.delta_color_scheme);
+            data.editor = cfg.editor;
+            data.formatter = cfg.formatter.string();
             return data;
         }
 
@@ -1138,6 +1155,16 @@ namespace sontag::cli {
                 cfg.mca_path = data.mca_path;
             }
             cfg.cache_dir = data.cache_dir;
+            if (!data.history_file.empty()) {
+                cfg.history_file = data.history_file;
+            }
+            cfg.editor = data.editor;
+            if (data.formatter.empty()) {
+                cfg.formatter = "clang-format";
+            }
+            else {
+                cfg.formatter = data.formatter;
+            }
         }
 
         static std::string read_text_file(const fs::path& path) {
@@ -1569,6 +1596,8 @@ namespace sontag::cli {
         static void print_config(const startup_config& cfg, std::ostream& os) {
             os << ("  language_standard={}\n"
                    "  opt_level={}\n"
+                   "  editor={}\n"
+                   "  formatter={}\n"
                    "  target={}\n"
                    "  cpu={}\n"
                    "  clang={}\n"
@@ -1581,6 +1610,8 @@ namespace sontag::cli {
                    "  color_scheme={}\n"_format(
                            cfg.language_standard,
                            cfg.opt_level,
+                           cfg.editor ? std::string_view{*cfg.editor} : "<auto>"sv,
+                           cfg.formatter.string(),
                            optional_or_default(cfg.target_triple),
                            optional_or_default(cfg.cpu),
                            cfg.clang_path.string(),
@@ -1654,71 +1685,514 @@ namespace sontag::cli {
             }
         }
 
-        static bool apply_set_command(startup_config& cfg, std::string_view assignment, std::ostream& err) {
+        static bool print_config_category(const startup_config& cfg, std::string_view category, std::ostream& os);
+        static bool print_config_category_key(
+                const startup_config& cfg, std::string_view category, std::string_view key, std::ostream& os);
+        static bool apply_config_assignment(startup_config& cfg, std::string_view assignment, std::ostream& err);
+
+        static std::array<const char*, 6> config_category_menu_completions{
+                "ui", "build", "editor", "session", "q", nullptr};
+        static std::array<const char*, 18> config_build_menu_completions{
+                "std",
+                "std=c++20",
+                "std=c++23",
+                "std=c++2c",
+                "opt",
+                "opt=O0",
+                "opt=O1",
+                "opt=O2",
+                "opt=O3",
+                "opt=Ofast",
+                "opt=Oz",
+                "target",
+                "cpu",
+                "clang",
+                "mca_cpu",
+                "mca_path",
+                "q",
+                nullptr};
+        static std::array<const char*, 12> config_ui_menu_completions{
+                "output",
+                "output=table",
+                "output=json",
+                "color",
+                "color=auto",
+                "color=always",
+                "color=never",
+                "color_scheme",
+                "color_scheme=classic",
+                "color_scheme=vaporwave",
+                "q",
+                nullptr};
+        static std::array<const char*, 4> config_session_menu_completions{"cache_dir", "history_file", "q", nullptr};
+        static std::array<const char*, 9> config_editor_menu_completions{
+                "editor",
+                "editor=auto",
+                "editor=hx",
+                "editor=nvim",
+                "editor=vim",
+                "editor=nano",
+                "formatter",
+                "q",
+                nullptr};
+
+        static std::array<const char*, 4> config_build_std_value_completions{"c++20", "c++23", "c++2c", nullptr};
+        static std::array<const char*, 7> config_build_opt_value_completions{
+                "O0", "O1", "O2", "O3", "Ofast", "Oz", nullptr};
+        static std::array<const char*, 3> config_ui_output_value_completions{"table", "json", nullptr};
+        static std::array<const char*, 4> config_ui_color_value_completions{"auto", "always", "never", nullptr};
+        static std::array<const char*, 3> config_ui_color_scheme_value_completions{"classic", "vaporwave", nullptr};
+        static std::array<const char*, 6> config_editor_editor_value_completions{
+                "auto", "hx", "nvim", "vim", "nano", nullptr};
+
+        static std::optional<std::string_view> config_menu_category_from_choice(std::string_view choice) {
+            if (utils::str_case_eq(choice, "build"sv)) {
+                return "build"sv;
+            }
+            if (utils::str_case_eq(choice, "ui"sv)) {
+                return "ui"sv;
+            }
+            if (utils::str_case_eq(choice, "session"sv)) {
+                return "session"sv;
+            }
+            if (utils::str_case_eq(choice, "editor"sv)) {
+                return "editor"sv;
+            }
+            return std::nullopt;
+        }
+
+        static const char** config_submenu_completions(std::string_view category) {
+            if (category == "build"sv) {
+                return config_build_menu_completions.data();
+            }
+            if (category == "ui"sv) {
+                return config_ui_menu_completions.data();
+            }
+            if (category == "session"sv) {
+                return config_session_menu_completions.data();
+            }
+            if (category == "editor"sv) {
+                return config_editor_menu_completions.data();
+            }
+            return nullptr;
+        }
+
+        static std::string_view config_key_without_category_prefix(std::string_view category, std::string_view key) {
+            auto trimmed = trim_view(key);
+            if (trimmed.starts_with(category) && trimmed.size() > category.size() && trimmed[category.size()] == '.') {
+                return trimmed.substr(category.size() + 1U);
+            }
+            return trimmed;
+        }
+
+        static void clear_previous_menu_line(std::ostream& os) {
+            if (!::isatty(STDOUT_FILENO)) {
+                return;
+            }
+            os << "\x1b[1A\x1b[2K\r";
+            os.flush();
+        }
+
+        static std::optional<std::string> make_category_assignment(
+                std::string_view category, std::string_view selection) {
+            auto eq = selection.find('=');
+            if (eq == std::string_view::npos) {
+                return std::nullopt;
+            }
+
+            auto key = trim_view(selection.substr(0, eq));
+            auto value = trim_view(selection.substr(eq + 1U));
+            if (key.empty() || value.empty()) {
+                return std::nullopt;
+            }
+
+            auto category_prefix_len = category.size();
+            if (key.find('.') != std::string_view::npos) {
+                if (key.size() <= category_prefix_len || !key.starts_with(category) ||
+                    key[category_prefix_len] != '.') {
+                    return std::nullopt;
+                }
+                return "{}={}"_format(key, value);
+            }
+            return "{}.{}={}"_format(category, key, value);
+        }
+
+        static bool is_config_cancel_choice(std::string_view choice) {
+            return choice.empty() || utils::str_case_eq(choice, "q"sv) || utils::str_case_eq(choice, "quit"sv) ||
+                   utils::str_case_eq(choice, "cancel"sv) || utils::str_case_eq(choice, "exit"sv);
+        }
+
+        static const char** config_value_completions(std::string_view category, std::string_view key) {
+            if (category == "build"sv) {
+                if (key == "std"sv) {
+                    return config_build_std_value_completions.data();
+                }
+                if (key == "opt"sv) {
+                    return config_build_opt_value_completions.data();
+                }
+                return nullptr;
+            }
+            if (category == "ui"sv) {
+                if (key == "output"sv) {
+                    return config_ui_output_value_completions.data();
+                }
+                if (key == "color"sv) {
+                    return config_ui_color_value_completions.data();
+                }
+                if (key == "color_scheme"sv) {
+                    return config_ui_color_scheme_value_completions.data();
+                }
+                return nullptr;
+            }
+            if (category == "editor"sv && key == "editor"sv) {
+                return config_editor_editor_value_completions.data();
+            }
+            return nullptr;
+        }
+
+        static bool is_valid_config_key_for_category(std::string_view category, std::string_view key) {
+            if (category == "build"sv) {
+                return key == "std"sv || key == "opt"sv || key == "target"sv || key == "cpu"sv || key == "clang"sv ||
+                       key == "mca_cpu"sv || key == "mca_path"sv;
+            }
+            if (category == "ui"sv) {
+                return key == "output"sv || key == "color"sv || key == "color_scheme"sv;
+            }
+            if (category == "session"sv) {
+                return key == "cache_dir"sv || key == "history_file"sv;
+            }
+            if (category == "editor"sv) {
+                return key == "editor"sv || key == "formatter"sv;
+            }
+            return false;
+        }
+
+        static std::optional<std::string> read_config_value(
+                line_editor& editor, std::string_view category, std::string_view key) {
+            auto prompt = "{}="_format(key);
+            auto value_completion = config_value_completions(category, key);
+            auto value_line = value_completion != nullptr ? editor.read_menu_line(prompt, value_completion)
+                                                          : editor.read_line(prompt);
+            if (!value_line) {
+                return std::nullopt;
+            }
+            auto value = trim_view(*value_line);
+            if (is_config_cancel_choice(value)) {
+                return std::nullopt;
+            }
+            return "{}={}"_format(key, value);
+        }
+
+        static bool run_config_menu(line_editor& editor, startup_config& cfg, std::ostream& out, std::ostream& err) {
+            auto category_line = editor.read_menu_line(""sv, config_category_menu_completions.data());
+            if (!category_line) {
+                return true;
+            }
+
+            auto category_choice = trim_view(*category_line);
+            if (is_config_cancel_choice(category_choice)) {
+                return true;
+            }
+
+            if (category_choice.starts_with(":config"sv)) {
+                category_choice = trim_view(category_choice.substr(":config"sv.size()));
+            }
+
+            auto category = config_menu_category_from_choice(category_choice);
+            if (!category) {
+                err << "invalid config category selection: {} (expected build|ui|session|editor)\n"_format(
+                        category_choice);
+                return true;
+            }
+
+            auto category_key = *category;
+            clear_previous_menu_line(out);
+            (void)print_config_category(cfg, category_key, out);
+
+            auto submenu = config_submenu_completions(category_key);
+            if (submenu == nullptr) {
+                return true;
+            }
+
+            auto key_line = editor.read_menu_line(""sv, submenu);
+            if (!key_line) {
+                return true;
+            }
+
+            auto selected_key = config_key_without_category_prefix(category_key, *key_line);
+            if (is_config_cancel_choice(selected_key)) {
+                return true;
+            }
+
+            if (selected_key.starts_with(':')) {
+                return true;
+            }
+
+            clear_previous_menu_line(out);
+            if (selected_key.contains('=')) {
+                auto assignment = make_category_assignment(category_key, selected_key);
+                if (!assignment) {
+                    err << "invalid :config, key and value must be non-empty\n";
+                    return true;
+                }
+                if (apply_config_assignment(cfg, *assignment, err)) {
+                    out << "updated {}\n"_format(*assignment);
+                }
+                return true;
+            }
+
+            if (is_valid_config_key_for_category(category_key, selected_key)) {
+                auto pending_assignment = read_config_value(editor, category_key, selected_key);
+                if (!pending_assignment) {
+                    return true;
+                }
+                auto assignment = make_category_assignment(category_key, *pending_assignment);
+                if (!assignment) {
+                    err << "invalid :config, key and value must be non-empty\n";
+                    return true;
+                }
+                if (apply_config_assignment(cfg, *assignment, err)) {
+                    out << "updated {}\n"_format(*assignment);
+                }
+                return true;
+            }
+
+            if (print_config_category_key(cfg, category_key, selected_key, out)) {
+                return true;
+            }
+
+            err << "invalid {} config key selection: {}\n"_format(category_key, selected_key);
+            return true;
+        }
+
+        static bool print_config_category(const startup_config& cfg, std::string_view category, std::ostream& os) {
+            auto key = trim_view(category);
+            if (key == "build"sv) {
+                os << "build:\n";
+                os << "  std={}\n"_format(cfg.language_standard);
+                os << "  opt={}\n"_format(cfg.opt_level);
+                os << "  target={}\n"_format(optional_or_default(cfg.target_triple));
+                os << "  cpu={}\n"_format(optional_or_default(cfg.cpu));
+                os << "  clang={}\n"_format(cfg.clang_path.string());
+                os << "  mca_cpu={}\n"_format(optional_or_default(cfg.mca_cpu));
+                os << "  mca_path={}\n"_format(cfg.mca_path.string());
+                return true;
+            }
+            if (key == "ui"sv) {
+                os << "ui:\n";
+                os << "  output={}\n"_format(cfg.output);
+                os << "  color={}\n"_format(cfg.color);
+                os << "  color_scheme={}\n"_format(cfg.delta_color_scheme);
+                return true;
+            }
+            if (key == "session"sv) {
+                os << "session:\n";
+                os << "  cache_dir={}\n"_format(cfg.cache_dir.string());
+                os << "  history_file={}\n"_format(cfg.history_file.string());
+                return true;
+            }
+            if (key == "editor"sv) {
+                os << "editor:\n";
+                os << "  editor={}\n"_format(cfg.editor ? std::string_view{*cfg.editor} : "<auto>"sv);
+                os << "  formatter={}\n"_format(cfg.formatter.string());
+                return true;
+            }
+            return false;
+        }
+
+        static bool print_config_category_key(
+                const startup_config& cfg, std::string_view category, std::string_view key, std::ostream& os) {
+            auto category_key = trim_view(category);
+            auto selected_key = trim_view(key);
+            if (category_key == "build"sv) {
+                if (selected_key == "std"sv) {
+                    os << "build:\n  std={}\n"_format(cfg.language_standard);
+                    return true;
+                }
+                if (selected_key == "opt"sv) {
+                    os << "build:\n  opt={}\n"_format(cfg.opt_level);
+                    return true;
+                }
+                if (selected_key == "target"sv) {
+                    os << "build:\n  target={}\n"_format(optional_or_default(cfg.target_triple));
+                    return true;
+                }
+                if (selected_key == "cpu"sv) {
+                    os << "build:\n  cpu={}\n"_format(optional_or_default(cfg.cpu));
+                    return true;
+                }
+                if (selected_key == "clang"sv) {
+                    os << "build:\n  clang={}\n"_format(cfg.clang_path.string());
+                    return true;
+                }
+                if (selected_key == "mca_cpu"sv) {
+                    os << "build:\n  mca_cpu={}\n"_format(optional_or_default(cfg.mca_cpu));
+                    return true;
+                }
+                if (selected_key == "mca_path"sv) {
+                    os << "build:\n  mca_path={}\n"_format(cfg.mca_path.string());
+                    return true;
+                }
+                return false;
+            }
+            if (category_key == "ui"sv) {
+                if (selected_key == "output"sv) {
+                    os << "ui:\n  output={}\n"_format(cfg.output);
+                    return true;
+                }
+                if (selected_key == "color"sv) {
+                    os << "ui:\n  color={}\n"_format(cfg.color);
+                    return true;
+                }
+                if (selected_key == "color_scheme"sv) {
+                    os << "ui:\n  color_scheme={}\n"_format(cfg.delta_color_scheme);
+                    return true;
+                }
+                return false;
+            }
+            if (category_key == "session"sv) {
+                if (selected_key == "cache_dir"sv) {
+                    os << "session:\n  cache_dir={}\n"_format(cfg.cache_dir.string());
+                    return true;
+                }
+                if (selected_key == "history_file"sv) {
+                    os << "session:\n  history_file={}\n"_format(cfg.history_file.string());
+                    return true;
+                }
+                return false;
+            }
+            if (category_key == "editor"sv) {
+                if (selected_key == "editor"sv) {
+                    os << "editor:\n  editor={}\n"_format(cfg.editor ? std::string_view{*cfg.editor} : "<auto>"sv);
+                    return true;
+                }
+                if (selected_key == "formatter"sv) {
+                    os << "editor:\n  formatter={}\n"_format(cfg.formatter.string());
+                    return true;
+                }
+                return false;
+            }
+            return false;
+        }
+
+        static void reset_config_defaults(startup_config& cfg) {
+            auto defaults = startup_config{};
+            cfg.language_standard = defaults.language_standard;
+            cfg.opt_level = defaults.opt_level;
+            cfg.target_triple = defaults.target_triple;
+            cfg.cpu = defaults.cpu;
+            cfg.clang_path = defaults.clang_path;
+            cfg.mca_cpu = defaults.mca_cpu;
+            cfg.mca_path = defaults.mca_path;
+            cfg.output = defaults.output;
+            cfg.color = defaults.color;
+            cfg.delta_color_scheme = defaults.delta_color_scheme;
+            cfg.cache_dir = defaults.cache_dir;
+            cfg.history_file = defaults.history_file;
+            cfg.editor = defaults.editor;
+            cfg.formatter = defaults.formatter;
+        }
+
+        static std::optional<std::string> parse_optional_config_value(std::string_view value) {
+            auto trimmed = trim_view(value);
+            if (trimmed.empty()) {
+                return std::nullopt;
+            }
+            if (utils::str_case_eq(trimmed, "<default>"sv) || utils::str_case_eq(trimmed, "default"sv) ||
+                utils::str_case_eq(trimmed, "none"sv) || utils::str_case_eq(trimmed, "null"sv) ||
+                utils::str_case_eq(trimmed, "auto"sv)) {
+                return std::nullopt;
+            }
+            return std::string{trimmed};
+        }
+
+        static bool apply_config_assignment(startup_config& cfg, std::string_view assignment, std::ostream& err) {
             auto eq = assignment.find('=');
             if (eq == std::string_view::npos) {
-                err << "invalid :set, expected key=value\n";
+                err << "invalid :config, expected key=value\n";
                 return false;
             }
 
             auto key = trim_view(assignment.substr(0, eq));
             auto value = trim_view(assignment.substr(eq + 1U));
             if (key.empty() || value.empty()) {
-                err << "invalid :set, key and value must be non-empty\n";
+                err << "invalid :config, key and value must be non-empty\n";
                 return false;
             }
 
-            if (key == "std"sv || key == "lang.std"sv) {
+            if (key == "build.std"sv) {
                 if (!try_parse_cxx_standard(value, cfg.language_standard)) {
-                    err << "invalid std: " << value << " (expected c++20|c++23|c++2c)\n";
+                    err << "invalid build.std: {} (expected c++20|c++23|c++2c)\n"_format(value);
                     return false;
                 }
                 return true;
             }
-
-            if (key == "opt"sv || key == "build.opt"sv) {
+            if (key == "build.opt"sv) {
                 if (!try_parse_optimization_level(value, cfg.opt_level)) {
-                    err << "invalid opt: " << value << " (expected O0|O1|O2|O3|Ofast|Oz)\n";
+                    err << "invalid build.opt: {} (expected O0|O1|O2|O3|Ofast|Oz)\n"_format(value);
                     return false;
                 }
                 return true;
             }
-
-            if (key == "target"sv || key == "build.target"sv) {
-                cfg.target_triple = std::string(value);
+            if (key == "build.target"sv) {
+                cfg.target_triple = parse_optional_config_value(value);
                 return true;
             }
-
-            if (key == "cpu"sv || key == "build.cpu"sv) {
-                cfg.cpu = std::string(value);
+            if (key == "build.cpu"sv) {
+                cfg.cpu = parse_optional_config_value(value);
                 return true;
             }
-
-            if (key == "output"sv) {
+            if (key == "build.clang"sv) {
+                cfg.clang_path = fs::path{std::string{value}};
+                return true;
+            }
+            if (key == "build.mca_cpu"sv) {
+                cfg.mca_cpu = parse_optional_config_value(value);
+                return true;
+            }
+            if (key == "build.mca_path"sv) {
+                cfg.mca_path = fs::path{std::string{value}};
+                return true;
+            }
+            if (key == "ui.output"sv) {
                 if (!try_parse_output_mode(value, cfg.output)) {
-                    err << "invalid output: " << value << " (expected table|json)\n";
+                    err << "invalid ui.output: {} (expected table|json)\n"_format(value);
                     return false;
                 }
                 return true;
             }
-
-            if (key == "color"sv) {
+            if (key == "ui.color"sv) {
                 if (!try_parse_color_mode(value, cfg.color)) {
-                    err << "invalid color: " << value << " (expected auto|always|never)\n";
+                    err << "invalid ui.color: {} (expected auto|always|never)\n"_format(value);
                     return false;
                 }
                 return true;
             }
-
-            if (key == "color_scheme"sv || key == "delta.color_scheme"sv) {
+            if (key == "ui.color_scheme"sv) {
                 if (!try_parse_color_scheme(value, cfg.delta_color_scheme)) {
-                    err << "invalid color_scheme: " << value << " (expected classic|vaporwave)\n";
+                    err << "invalid ui.color_scheme: {} (expected classic|vaporwave)\n"_format(value);
                     return false;
                 }
                 return true;
             }
+            if (key == "session.cache_dir"sv) {
+                cfg.cache_dir = fs::path{std::string{value}};
+                return true;
+            }
+            if (key == "session.history_file"sv) {
+                cfg.history_file = fs::path{std::string{value}};
+                return true;
+            }
+            if (key == "editor.editor"sv) {
+                cfg.editor = parse_optional_config_value(value);
+                return true;
+            }
+            if (key == "editor.formatter"sv) {
+                cfg.formatter = fs::path{std::string{value}};
+                return true;
+            }
 
-            err << "unknown :set key: " << key << '\n';
+            err << "unknown :config key: {}\n"_format(key);
             return false;
         }
 
@@ -1732,7 +2206,10 @@ namespace sontag::cli {
   :declfile <path>
   :file <path>
   :openfile <path>
-  :set <key>=<value>
+  :config
+  :config <category>
+  :config <key>=<value>
+  :config reset
   :reset
   :reset last
   :reset snapshots
@@ -1758,12 +2235,12 @@ examples:
   :declfile examples/common.hpp
   :file examples/program.cpp
   :openfile examples/program.cpp
+  :config
+  :config build
+  :config build.opt=O3
+  :config reset
   :reset file examples/program.cpp
   :reset snapshots
-  :set std=c++23
-  :set opt=O3
-  :set output=json
-  :set color_scheme=classic
   :show all
   :symbols
   :mark baseline
@@ -1910,7 +2387,7 @@ examples:
                     return false;
                 }
             } catch (const std::exception& e) {
-                err << "state validation error: " << e.what() << '\n';
+                err << "state validation error: {}\n"_format(e.what());
                 return false;
             }
 
@@ -2017,7 +2494,7 @@ examples:
                     return false;
                 }
             } catch (const std::exception& e) {
-                err << "state validation error: " << e.what() << '\n';
+                err << "state validation error: {}\n"_format(e.what());
                 return false;
             }
 
@@ -2087,7 +2564,7 @@ examples:
             }
 
             if (!found) {
-                out << "no matching file import found for " << *path << '\n';
+                out << "no matching file import found for {}\n"_format(path->string());
                 return true;
             }
 
@@ -2113,7 +2590,7 @@ examples:
             try {
                 auto content = read_text_file(*path);
                 if (content.empty()) {
-                    std::cerr << "declfile is empty: " << *path << '\n';
+                    std::cerr << "declfile is empty: {}\n"_format(path->string());
                     return true;
                 }
                 auto success_message = "loaded declfile {} (decl=1, exec=0)"_format(path->string());
@@ -2128,7 +2605,7 @@ examples:
                         std::cout,
                         std::cerr);
             } catch (const std::exception& e) {
-                std::cerr << "declfile error: " << e.what() << '\n';
+                std::cerr << "declfile error: {}\n"_format(e.what());
             }
 
             return true;
@@ -2169,7 +2646,7 @@ examples:
             try {
                 (void)load_file_into_state(*path, cfg, state);
             } catch (const std::exception& e) {
-                std::cerr << "file load error: " << e.what() << '\n';
+                std::cerr << "file load error: {}\n"_format(e.what());
             }
 
             return true;
@@ -2192,37 +2669,37 @@ examples:
                     std::error_code ec{};
                     fs::create_directories(parent, ec);
                     if (ec) {
-                        std::cerr << "failed to create parent directory for :openfile: " << ec.message() << '\n';
+                        std::cerr << "failed to create parent directory for :openfile: {}\n"_format(ec.message());
                         std::cerr << "state unchanged\n";
                         return true;
                     }
                 }
 
                 if (fs::exists(*path) && !fs::is_regular_file(*path)) {
-                    std::cerr << "path is not a regular file: " << *path << '\n';
+                    std::cerr << "path is not a regular file: {}\n"_format(path->string());
                     std::cerr << "state unchanged\n";
                     return true;
                 }
 
                 std::ofstream touch{*path, std::ios::app};
                 if (!touch.good()) {
-                    std::cerr << "failed to open file for :openfile: " << *path << '\n';
+                    std::cerr << "failed to open file for :openfile: {}\n"_format(path->string());
                     std::cerr << "state unchanged\n";
                     return true;
                 }
                 touch.close();
 
-                std::cout << "opened file " << *path << " in editor\n";
-                if (!open_path_in_editor(*path, std::cout, std::cerr)) {
+                std::cout << "opened file {} in editor\n"_format(path->string());
+                if (!open_path_in_editor(cfg, *path, std::cout, std::cerr)) {
                     return true;
                 }
-                if (!run_clang_format_for_file(*path, std::cerr)) {
+                if (!run_clang_format_for_file(cfg, *path, std::cerr)) {
                     return true;
                 }
 
                 (void)load_file_into_state(*path, cfg, state);
             } catch (const std::exception& e) {
-                std::cerr << "openfile error: " << e.what() << '\n';
+                std::cerr << "openfile error: {}\n"_format(e.what());
                 std::cerr << "state unchanged\n";
             }
 
@@ -3476,7 +3953,7 @@ examples:
                 }
                 render_delta_report(report, cfg.output, cfg.verbose, cfg.color, cfg.delta_color_scheme, out);
             } catch (const std::exception& e) {
-                err << "delta analysis error: " << e.what() << '\n';
+                err << "delta analysis error: {}\n"_format(e.what());
             }
 
             return true;
@@ -3631,14 +4108,14 @@ examples:
                 auto result = run_analysis(request, kind);
                 render_analysis_result(result, cfg.output, cfg.verbose, out);
             } catch (const std::exception& e) {
-                err << "analysis error: " << e.what() << '\n';
+                err << "analysis error: {}\n"_format(e.what());
             }
 
             return true;
         }
 
         static bool process_command(
-                const std::string& line, startup_config& cfg, repl_state& state, bool& should_quit) {
+                std::string_view line, startup_config& cfg, repl_state& state, line_editor& editor, bool& should_quit) {
             auto cmd = trim_view(line);
             if (cmd == ":quit"sv || cmd == ":q"sv) {
                 should_quit = true;
@@ -3685,7 +4162,34 @@ examples:
                     return true;
                 }
 
-                std::cerr << "unknown :show value: " << *show_arg << " (expected config|decl|exec|all)\n";
+                std::cerr << "unknown :show value: {} (expected config|decl|exec|all)\n"_format(*show_arg);
+                return true;
+            }
+            if (auto config_arg = command_argument(cmd, ":config"sv)) {
+                if (config_arg->empty()) {
+                    (void)run_config_menu(editor, cfg, std::cout, std::cerr);
+                    return true;
+                }
+
+                auto argument = trim_view(*config_arg);
+                if (argument == "reset"sv) {
+                    reset_config_defaults(cfg);
+                    std::cout << "config reset\n";
+                    return true;
+                }
+
+                if (argument.contains('=')) {
+                    if (apply_config_assignment(cfg, argument, std::cerr)) {
+                        std::cout << "updated {}\n"_format(argument);
+                    }
+                    return true;
+                }
+
+                if (print_config_category(cfg, argument, std::cout)) {
+                    return true;
+                }
+
+                std::cerr << "invalid :config, expected category|key=value|reset\n";
                 return true;
             }
             if (auto decl_arg = command_argument(cmd, ":decl"sv)) {
@@ -3753,7 +4257,7 @@ examples:
                     auto symbols = list_symbols(request);
                     print_symbols(symbols, cfg.verbose, std::cout);
                 } catch (const std::exception& e) {
-                    std::cerr << "symbol listing error: " << e.what() << '\n';
+                    std::cerr << "symbol listing error: {}\n"_format(e.what());
                 }
                 return true;
             }
@@ -3767,14 +4271,7 @@ examples:
                 auto exec_cells = collect_cells_by_kind(state, cell_kind::exec);
                 upsert_snapshot(state.snapshot_data, name, decl_cells, exec_cells);
                 persist_snapshots(state);
-                std::cout << "marked snapshot '" << name << "' at cell_count=" << total_cell_count(state) << '\n';
-                return true;
-            }
-            if (auto set_arg = command_argument(cmd, ":set"sv)) {
-                auto assignment = trim_view(*set_arg);
-                if (apply_set_command(cfg, assignment, std::cerr)) {
-                    std::cout << "updated " << assignment << '\n';
-                }
+                std::cout << "marked snapshot '{}' at cell_count={}\n"_format(name, total_cell_count(state));
                 return true;
             }
             if (process_delta_command(cmd, cfg, state, std::cout, std::cerr)) {
@@ -3836,7 +4333,7 @@ examples:
                 return true;
             }
             if (cmd.starts_with(":"sv)) {
-                std::cerr << "unknown command: " << cmd << '\n';
+                std::cerr << "unknown command: {}\n"_format(cmd);
                 return true;
             }
             return false;
@@ -3889,10 +4386,10 @@ examples:
             std::cout << banner << '\n';
         }
         if (resumed_session) {
-            std::cout << "resumed session from: " << *resumed_session << '\n';
+            std::cout << "resumed session from: {}\n"_format(*resumed_session);
         }
-        std::cout << "session: " << state.session_id << '\n';
-        std::cout << "session dir: " << state.session_dir.string() << '\n';
+        std::cout << "session: {}\n"_format(state.session_id);
+        std::cout << "session dir: {}\n"_format(state.session_dir.string());
         std::cout << "type :help for commands\n";
 
         while (!should_quit) {
@@ -3914,7 +4411,7 @@ examples:
                 continue;
             }
 
-            if (pending_cell.empty() && detail::process_command(line, cfg, state, should_quit)) {
+            if (pending_cell.empty() && detail::process_command(line, cfg, state, editor, should_quit)) {
                 continue;
             }
 
@@ -3992,27 +4489,27 @@ examples:
         }
 
         if (!try_parse_cxx_standard(std_arg, cfg.language_standard)) {
-            std::cerr << "invalid --std value: " << std_arg << " (expected c++20|c++23|c++2c)\n";
+            std::cerr << "invalid --std value: {} (expected c++20|c++23|c++2c)\n"_format(std_arg);
             return std::optional<int>{2};
         }
         if (!try_parse_optimization_level(opt_arg, cfg.opt_level)) {
-            std::cerr << "invalid --opt value: " << opt_arg << " (expected O0|O1|O2|O3|Ofast|Oz)\n";
+            std::cerr << "invalid --opt value: {} (expected O0|O1|O2|O3|Ofast|Oz)\n"_format(opt_arg);
             return std::optional<int>{2};
         }
         if (!try_parse_output_mode(output_arg, cfg.output)) {
-            std::cerr << "invalid --output value: " << output_arg << " (expected table|json)\n";
+            std::cerr << "invalid --output value: {} (expected table|json)\n"_format(output_arg);
             return std::optional<int>{2};
         }
         if (!try_parse_color_mode(color_arg, cfg.color)) {
-            std::cerr << "invalid --color value: " << color_arg << " (expected auto|always|never)\n";
+            std::cerr << "invalid --color value: {} (expected auto|always|never)\n"_format(color_arg);
             return std::optional<int>{2};
         }
         if (!try_parse_color_scheme(color_scheme_arg, cfg.delta_color_scheme)) {
-            std::cerr << "invalid --color-scheme value: " << color_scheme_arg << " (expected classic|vaporwave)\n";
+            std::cerr << "invalid --color-scheme value: {} (expected classic|vaporwave)\n"_format(color_scheme_arg);
             return std::optional<int>{2};
         }
         if (!detail::try_parse_bool(banner_arg, cfg.banner_enabled)) {
-            std::cerr << "invalid --banner value: " << banner_arg << " (expected true|false)\n";
+            std::cerr << "invalid --banner value: {} (expected true|false)\n"_format(banner_arg);
             return std::optional<int>{2};
         }
 

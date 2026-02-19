@@ -4,7 +4,7 @@ namespace sontag::test { namespace detail {
     struct temp_dir {
         fs::path path{};
 
-        explicit temp_dir(const std::string& prefix) {
+        explicit temp_dir(std::string_view prefix) {
             auto now = std::chrono::system_clock::now().time_since_epoch().count();
             std::ostringstream dir_name{};
             dir_name << prefix << "_" << static_cast<long>(::getpid()) << "_" << now;

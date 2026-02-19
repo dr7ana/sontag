@@ -259,6 +259,8 @@ namespace sontag {
         std::filesystem::path cache_dir{".sontag"};
         std::filesystem::path history_file{".sontag/history"};
         bool history_enabled{true};
+        std::optional<std::string> editor{};
+        std::filesystem::path formatter{"clang-format"};
         bool banner_enabled{true};
         color_mode color{color_mode::automatic};
         color_scheme delta_color_scheme{color_scheme::classic};
