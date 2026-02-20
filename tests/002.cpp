@@ -22,8 +22,6 @@ namespace sontag::test {
                 "znver4",
                 "--mca-cpu",
                 "znver4",
-                "--mca-path",
-                "/usr/bin/llvm-mca",
                 "--mca",
                 "--resume",
                 "latest",
@@ -51,7 +49,6 @@ namespace sontag::test {
         CHECK(*cfg.cpu == "znver4");
         REQUIRE(cfg.mca_cpu);
         CHECK(*cfg.mca_cpu == "znver4");
-        CHECK(cfg.mca_path == "/usr/bin/llvm-mca");
         CHECK(cfg.mca_enabled);
         REQUIRE(cfg.resume_session);
         CHECK(*cfg.resume_session == "latest");

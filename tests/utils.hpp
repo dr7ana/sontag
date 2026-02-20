@@ -8,6 +8,7 @@
 #include "../src/internal/delta.hpp"
 #include "../src/internal/metrics.hpp"
 #include "../src/internal/opcode.hpp"
+#include "../src/internal/platform.hpp"
 #include "../src/internal/types.hpp"
 
 extern "C" {

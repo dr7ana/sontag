@@ -34,6 +34,7 @@ namespace sontag::internal {
         std::optional<std::string> cpu{};
         std::optional<std::string> mca_cpu{};
         std::string mca_path{"llvm-mca"};
+        std::string nm_path{"nm"};
         std::string cache_dir{};
         std::string history_file{".sontag/history"};
         std::string output{};
@@ -90,6 +91,8 @@ namespace glz {
                        &T::mca_cpu,
                        "mca_path",
                        &T::mca_path,
+                       "nm_path",
+                       &T::nm_path,
                        "cache_dir",
                        &T::cache_dir,
                        "history_file",

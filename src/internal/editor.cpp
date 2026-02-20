@@ -23,7 +23,7 @@ namespace sontag::cli { namespace detail {
     static std::array<const char*, 2> clear_completions{"last", nullptr};
     static std::array<const char*, 4> reset_completions{"last", "snapshots", "file", nullptr};
     static std::array<const char*, 5> show_completions{"config", "decl", "exec", "all", nullptr};
-    static std::array<const char*, 20> config_completions{
+    static std::array<const char*, 18> config_completions{
             "build",
             "ui",
             "session",
@@ -33,9 +33,7 @@ namespace sontag::cli { namespace detail {
             "build.opt=",
             "build.target=",
             "build.cpu=",
-            "build.clang=",
             "build.mca_cpu=",
-            "build.mca_path=",
             "ui.output=",
             "ui.color=",
             "ui.color_scheme=",

@@ -6,6 +6,7 @@
 #include "internal/delta.hpp"
 #include "internal/editor.hpp"
 #include "internal/opcode.hpp"
+#include "internal/platform.hpp"
 #include "internal/types.hpp"
 
 #include <glaze/glaze.hpp>
@@ -55,6 +56,12 @@ namespace sontag::cli { namespace detail {
     using internal::persisted_snapshots;
     using internal::snapshot_record;
     using internal::transaction_kind;
+
+    static void apply_build_tool_paths(startup_config& cfg) {
+        cfg.clang_path = fs::path{internal::platform::tool::clangxx_path};
+        cfg.mca_path = fs::path{internal::platform::tool::llvm_mca_path};
+        cfg.nm_path = fs::path{internal::platform::tool::llvm_nm_path};
+    }
 
     struct repl_state {
         std::flat_map<uint64_t, cell_record> cells{};
@@ -300,14 +307,70 @@ namespace sontag::cli {
 
     namespace detail {
 
-        static constexpr auto default_value = "<default>"sv;
+        static std::optional<std::string> resolve_editor_executable(const startup_config& cfg);
         static std::string read_text_file(const fs::path& path);
 
-        static std::string_view optional_or_default(const std::optional<std::string>& value) {
-            if (value) {
-                return *value;
+        static constexpr std::string_view host_cpu_literal() {
+            if constexpr (internal::platform::is_x86_64) {
+                return "x86_64"sv;
             }
-            return default_value;
+            if constexpr (internal::platform::is_arm64) {
+                return "arm64"sv;
+            }
+            return "unknown"sv;
+        }
+
+        static constexpr std::string_view host_target_literal() {
+            if constexpr (internal::platform::is_linux && internal::platform::is_x86_64) {
+                return "x86_64-pc-linux-gnu"sv;
+            }
+            if constexpr (internal::platform::is_linux && internal::platform::is_arm64) {
+                return "aarch64-pc-linux-gnu"sv;
+            }
+            if constexpr (internal::platform::is_macos && internal::platform::is_x86_64) {
+                return "x86_64-apple-darwin"sv;
+            }
+            if constexpr (internal::platform::is_macos && internal::platform::is_arm64) {
+                return "arm64-apple-darwin"sv;
+            }
+            return "unknown-target"sv;
+        }
+
+        static std::string_view effective_target_value(const startup_config& cfg) {
+            if (cfg.target_triple) {
+                return *cfg.target_triple;
+            }
+            return host_target_literal();
+        }
+
+        static std::string_view effective_cpu_value(const startup_config& cfg) {
+            if (cfg.cpu) {
+                return *cfg.cpu;
+            }
+            return host_cpu_literal();
+        }
+
+        static std::string_view effective_mca_cpu_value(const startup_config& cfg) {
+            if (cfg.mca_cpu) {
+                return *cfg.mca_cpu;
+            }
+            return effective_cpu_value(cfg);
+        }
+
+        static std::string effective_editor_value(const startup_config& cfg) {
+            if (auto editor = resolve_editor_executable(cfg)) {
+                return *editor;
+            }
+            return "unavailable";
+        }
+
+        static std::string display_absolute_path(const fs::path& path) {
+            std::error_code ec{};
+            auto absolute = fs::absolute(path, ec);
+            if (ec) {
+                return path.string();
+            }
+            return absolute.lexically_normal().string();
         }
 
         static constexpr std::string_view trim_view(std::string_view value) {
@@ -493,7 +556,7 @@ namespace sontag::cli {
                 return std::nullopt;
             }
 
-            auto path = fs::path{std::string{value}}.lexically_normal();
+            auto path = fs::path{value}.lexically_normal();
             if (path.empty()) {
                 err << "invalid {}, expected non-empty path\n"_format(command_name);
                 return std::nullopt;
@@ -640,7 +703,7 @@ namespace sontag::cli {
             }
 
             if (command_name.find('/') != std::string_view::npos) {
-                auto explicit_path = fs::path{std::string{command_name}};
+                auto explicit_path = fs::path{command_name};
                 if (is_executable_file(explicit_path)) {
                     return explicit_path;
                 }
@@ -661,7 +724,7 @@ namespace sontag::cli {
                 }
 
                 auto segment = path_view.substr(begin, end - begin);
-                auto base_dir = segment.empty() ? fs::path{"."} : fs::path{std::string{segment}};
+                auto base_dir = segment.empty() ? fs::path{"."} : fs::path{segment};
                 auto candidate = base_dir / std::string{command_name};
                 if (is_executable_file(candidate)) {
                     return candidate;
@@ -1116,6 +1179,7 @@ namespace sontag::cli {
             data.cpu = cfg.cpu;
             data.mca_cpu = cfg.mca_cpu;
             data.mca_path = cfg.mca_path.string();
+            data.nm_path = cfg.nm_path.string();
             data.cache_dir = cfg.cache_dir.string();
             data.history_file = cfg.history_file.string();
             data.output = "{}"_format(cfg.output);
@@ -1127,8 +1191,6 @@ namespace sontag::cli {
         }
 
         static void apply_persisted_config(const persisted_config& data, startup_config& cfg) {
-            cfg.clang_path = data.clang;
-
             if (!try_parse_cxx_standard(data.cxx_standard, cfg.language_standard)) {
                 throw std::runtime_error("invalid cxx_standard in persisted config: " + data.cxx_standard);
             }
@@ -1148,12 +1210,7 @@ namespace sontag::cli {
             cfg.target_triple = data.target;
             cfg.cpu = data.cpu;
             cfg.mca_cpu = data.mca_cpu;
-            if (data.mca_path.empty()) {
-                cfg.mca_path = "llvm-mca";
-            }
-            else {
-                cfg.mca_path = data.mca_path;
-            }
+            apply_build_tool_paths(cfg);
             cfg.cache_dir = data.cache_dir;
             if (!data.history_file.empty()) {
                 cfg.history_file = data.history_file;
@@ -1594,15 +1651,15 @@ namespace sontag::cli {
         }
 
         static void print_config(const startup_config& cfg, std::ostream& os) {
+            auto editor_value = effective_editor_value(cfg);
             os << ("  language_standard={}\n"
                    "  opt_level={}\n"
                    "  editor={}\n"
                    "  formatter={}\n"
                    "  target={}\n"
                    "  cpu={}\n"
-                   "  clang={}\n"
+                   "  toolchain_dir={}\n"
                    "  mca_cpu={}\n"
-                   "  mca_path={}\n"
                    "  cache_dir={}\n"
                    "  output={}\n"
                    "  banner={}\n"
@@ -1610,14 +1667,13 @@ namespace sontag::cli {
                    "  color_scheme={}\n"_format(
                            cfg.language_standard,
                            cfg.opt_level,
-                           cfg.editor ? std::string_view{*cfg.editor} : "<auto>"sv,
+                           editor_value,
                            cfg.formatter.string(),
-                           optional_or_default(cfg.target_triple),
-                           optional_or_default(cfg.cpu),
-                           cfg.clang_path.string(),
-                           optional_or_default(cfg.mca_cpu),
-                           cfg.mca_path.string(),
-                           cfg.cache_dir.string(),
+                           effective_target_value(cfg),
+                           effective_cpu_value(cfg),
+                           internal::platform::toolchain_bin_prefix,
+                           effective_mca_cpu_value(cfg),
+                           display_absolute_path(cfg.cache_dir),
                            cfg.output,
                            cfg.banner_enabled,
                            cfg.color,
@@ -1692,7 +1748,7 @@ namespace sontag::cli {
 
         static std::array<const char*, 6> config_category_menu_completions{
                 "ui", "build", "editor", "session", "q", nullptr};
-        static std::array<const char*, 18> config_build_menu_completions{
+        static std::array<const char*, 17> config_build_menu_completions{
                 "std",
                 "std=c++20",
                 "std=c++23",
@@ -1706,9 +1762,8 @@ namespace sontag::cli {
                 "opt=Oz",
                 "target",
                 "cpu",
-                "clang",
+                "toolchain_dir",
                 "mca_cpu",
-                "mca_path",
                 "q",
                 nullptr};
         static std::array<const char*, 12> config_ui_menu_completions{
@@ -1852,8 +1907,7 @@ namespace sontag::cli {
 
         static bool is_valid_config_key_for_category(std::string_view category, std::string_view key) {
             if (category == "build"sv) {
-                return key == "std"sv || key == "opt"sv || key == "target"sv || key == "cpu"sv || key == "clang"sv ||
-                       key == "mca_cpu"sv || key == "mca_path"sv;
+                return key == "std"sv || key == "opt"sv || key == "target"sv || key == "cpu"sv || key == "mca_cpu"sv;
             }
             if (category == "ui"sv) {
                 return key == "output"sv || key == "color"sv || key == "color_scheme"sv;
@@ -1971,11 +2025,10 @@ namespace sontag::cli {
                 os << "build:\n";
                 os << "  std={}\n"_format(cfg.language_standard);
                 os << "  opt={}\n"_format(cfg.opt_level);
-                os << "  target={}\n"_format(optional_or_default(cfg.target_triple));
-                os << "  cpu={}\n"_format(optional_or_default(cfg.cpu));
-                os << "  clang={}\n"_format(cfg.clang_path.string());
-                os << "  mca_cpu={}\n"_format(optional_or_default(cfg.mca_cpu));
-                os << "  mca_path={}\n"_format(cfg.mca_path.string());
+                os << "  target={}\n"_format(effective_target_value(cfg));
+                os << "  cpu={}\n"_format(effective_cpu_value(cfg));
+                os << "  toolchain_dir={}\n"_format(internal::platform::toolchain_bin_prefix);
+                os << "  mca_cpu={}\n"_format(effective_mca_cpu_value(cfg));
                 return true;
             }
             if (key == "ui"sv) {
@@ -1987,13 +2040,14 @@ namespace sontag::cli {
             }
             if (key == "session"sv) {
                 os << "session:\n";
-                os << "  cache_dir={}\n"_format(cfg.cache_dir.string());
+                os << "  cache_dir={}\n"_format(display_absolute_path(cfg.cache_dir));
                 os << "  history_file={}\n"_format(cfg.history_file.string());
                 return true;
             }
             if (key == "editor"sv) {
+                auto editor_value = effective_editor_value(cfg);
                 os << "editor:\n";
-                os << "  editor={}\n"_format(cfg.editor ? std::string_view{*cfg.editor} : "<auto>"sv);
+                os << "  editor={}\n"_format(editor_value);
                 os << "  formatter={}\n"_format(cfg.formatter.string());
                 return true;
             }
@@ -2014,23 +2068,19 @@ namespace sontag::cli {
                     return true;
                 }
                 if (selected_key == "target"sv) {
-                    os << "build:\n  target={}\n"_format(optional_or_default(cfg.target_triple));
+                    os << "build:\n  target={}\n"_format(effective_target_value(cfg));
                     return true;
                 }
                 if (selected_key == "cpu"sv) {
-                    os << "build:\n  cpu={}\n"_format(optional_or_default(cfg.cpu));
+                    os << "build:\n  cpu={}\n"_format(effective_cpu_value(cfg));
                     return true;
                 }
-                if (selected_key == "clang"sv) {
-                    os << "build:\n  clang={}\n"_format(cfg.clang_path.string());
+                if (selected_key == "toolchain_dir"sv) {
+                    os << "build:\n  toolchain_dir={}\n"_format(internal::platform::toolchain_bin_prefix);
                     return true;
                 }
                 if (selected_key == "mca_cpu"sv) {
-                    os << "build:\n  mca_cpu={}\n"_format(optional_or_default(cfg.mca_cpu));
-                    return true;
-                }
-                if (selected_key == "mca_path"sv) {
-                    os << "build:\n  mca_path={}\n"_format(cfg.mca_path.string());
+                    os << "build:\n  mca_cpu={}\n"_format(effective_mca_cpu_value(cfg));
                     return true;
                 }
                 return false;
@@ -2052,7 +2102,7 @@ namespace sontag::cli {
             }
             if (category_key == "session"sv) {
                 if (selected_key == "cache_dir"sv) {
-                    os << "session:\n  cache_dir={}\n"_format(cfg.cache_dir.string());
+                    os << "session:\n  cache_dir={}\n"_format(display_absolute_path(cfg.cache_dir));
                     return true;
                 }
                 if (selected_key == "history_file"sv) {
@@ -2063,7 +2113,8 @@ namespace sontag::cli {
             }
             if (category_key == "editor"sv) {
                 if (selected_key == "editor"sv) {
-                    os << "editor:\n  editor={}\n"_format(cfg.editor ? std::string_view{*cfg.editor} : "<auto>"sv);
+                    auto editor_value = effective_editor_value(cfg);
+                    os << "editor:\n  editor={}\n"_format(editor_value);
                     return true;
                 }
                 if (selected_key == "formatter"sv) {
@@ -2081,9 +2132,8 @@ namespace sontag::cli {
             cfg.opt_level = defaults.opt_level;
             cfg.target_triple = defaults.target_triple;
             cfg.cpu = defaults.cpu;
-            cfg.clang_path = defaults.clang_path;
             cfg.mca_cpu = defaults.mca_cpu;
-            cfg.mca_path = defaults.mca_path;
+            apply_build_tool_paths(cfg);
             cfg.output = defaults.output;
             cfg.color = defaults.color;
             cfg.delta_color_scheme = defaults.delta_color_scheme;
@@ -2142,16 +2192,8 @@ namespace sontag::cli {
                 cfg.cpu = parse_optional_config_value(value);
                 return true;
             }
-            if (key == "build.clang"sv) {
-                cfg.clang_path = fs::path{std::string{value}};
-                return true;
-            }
             if (key == "build.mca_cpu"sv) {
                 cfg.mca_cpu = parse_optional_config_value(value);
-                return true;
-            }
-            if (key == "build.mca_path"sv) {
-                cfg.mca_path = fs::path{std::string{value}};
                 return true;
             }
             if (key == "ui.output"sv) {
@@ -2176,11 +2218,11 @@ namespace sontag::cli {
                 return true;
             }
             if (key == "session.cache_dir"sv) {
-                cfg.cache_dir = fs::path{std::string{value}};
+                cfg.cache_dir = fs::path{value};
                 return true;
             }
             if (key == "session.history_file"sv) {
-                cfg.history_file = fs::path{std::string{value}};
+                cfg.history_file = fs::path{value};
                 return true;
             }
             if (key == "editor.editor"sv) {
@@ -2188,7 +2230,7 @@ namespace sontag::cli {
                 return true;
             }
             if (key == "editor.formatter"sv) {
-                cfg.formatter = fs::path{std::string{value}};
+                cfg.formatter = fs::path{value};
                 return true;
             }
 
@@ -2304,6 +2346,8 @@ examples:
             request.asm_syntax = cfg.asm_syntax;
             request.mca_cpu = cfg.mca_cpu;
             request.mca_path = cfg.mca_path;
+            request.objdump_path = fs::path{internal::platform::tool::llvm_objdump_path};
+            request.nm_path = cfg.nm_path;
             request.graph_format = cfg.graph_format;
             request.dot_path = cfg.dot_path;
             request.verbose = cfg.verbose;
@@ -4374,6 +4418,7 @@ examples:
 )";
 
     void run_repl(startup_config& cfg) {
+        detail::apply_build_tool_paths(cfg);
         auto resumed_session = cfg.resume_session;
         auto state = detail::start_session(cfg);
         line_editor editor{cfg};
@@ -4434,6 +4479,7 @@ examples:
     }
 
     std::optional<int> parse_cli(int argc, char** argv, startup_config& cfg) {
+        detail::apply_build_tool_paths(cfg);
         CLI::App app{"sontag"};
 
         bool show_version = false;
@@ -4446,8 +4492,6 @@ examples:
         std::string cpu_arg{};
         std::string mca_cpu_arg{};
         std::string resume_arg{};
-        std::string clang_arg{cfg.clang_path.string()};
-        std::string mca_path_arg{cfg.mca_path.string()};
         std::string cache_dir_arg{cfg.cache_dir.string()};
         std::string history_file_arg{cfg.history_file.string()};
         std::string banner_arg{cfg.banner_enabled ? "true" : "false"};
@@ -4460,10 +4504,8 @@ examples:
         app.add_option("--target", target_arg, "LLVM target triple");
         app.add_option("--cpu", cpu_arg, "Target CPU");
         app.add_option("--mca-cpu", mca_cpu_arg, "CPU model override for llvm-mca");
-        app.add_option("--mca-path", mca_path_arg, "llvm-mca executable path");
         app.add_flag("--mca", cfg.mca_enabled, "Enable llvm-mca command support");
         app.add_option("--resume", resume_arg, "Resume session id or latest");
-        app.add_option("--clang", clang_arg, "clang++ executable path");
         app.add_option("--cache-dir", cache_dir_arg, "Cache/artifact directory");
         app.add_option("--history-file", history_file_arg, "Persistent REPL history path");
         app.add_flag("--no-history", no_history, "Disable persistent REPL history");
@@ -4517,8 +4559,6 @@ examples:
         cfg.cpu = detail::normalize_optional(cpu_arg);
         cfg.mca_cpu = detail::normalize_optional(mca_cpu_arg);
         cfg.resume_session = detail::normalize_optional(resume_arg);
-        cfg.clang_path = clang_arg;
-        cfg.mca_path = mca_path_arg;
         cfg.cache_dir = cache_dir_arg;
         cfg.history_file = history_file_arg;
         if (no_history) {

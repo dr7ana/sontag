@@ -27,6 +27,7 @@ namespace sontag::test { namespace detail {
         std::optional<std::string> cpu{};
         std::optional<std::string> mca_cpu{};
         std::string mca_path{};
+        std::string nm_path{};
         std::string cache_dir{};
         std::string output{};
         std::string color{};
@@ -69,6 +70,7 @@ namespace sontag::test { namespace detail {
         json << "\"cpu\":null,";
         json << "\"mca_cpu\":null,";
         json << "\"mca_path\":\"llvm-mca\",";
+        json << "\"nm_path\":\"nm\",";
         json << "\"cache_dir\":\"" << path.parent_path().parent_path().parent_path().string() << "\",";
         json << "\"output\":\"table\",";
         json << "\"color\":\"auto\",";
@@ -160,6 +162,8 @@ namespace glz {
                        &T::mca_cpu,
                        "mca_path",
                        &T::mca_path,
+                       "nm_path",
+                       &T::nm_path,
                        "cache_dir",
                        &T::cache_dir,
                        "output",

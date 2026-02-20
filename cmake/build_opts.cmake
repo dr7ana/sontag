@@ -133,10 +133,30 @@ function(configure_build_opts)
     string(REPLACE "\\" "\\\\" sontag_toolchain_bin_dir_resolved_escaped "${sontag_toolchain_bin_dir_resolved_escaped}")
     string(REPLACE "\"" "\\\"" sontag_toolchain_bin_dir_resolved_escaped "${sontag_toolchain_bin_dir_resolved_escaped}")
 
+    set(sontag_clang_candidate_escaped "${sontag_clang_candidate}")
+    string(REPLACE "\\" "\\\\" sontag_clang_candidate_escaped "${sontag_clang_candidate_escaped}")
+    string(REPLACE "\"" "\\\"" sontag_clang_candidate_escaped "${sontag_clang_candidate_escaped}")
+
+    set(sontag_llvm_mca_candidate_escaped "${sontag_llvm_mca_candidate}")
+    string(REPLACE "\\" "\\\\" sontag_llvm_mca_candidate_escaped "${sontag_llvm_mca_candidate_escaped}")
+    string(REPLACE "\"" "\\\"" sontag_llvm_mca_candidate_escaped "${sontag_llvm_mca_candidate_escaped}")
+
+    set(sontag_llvm_objdump_candidate_escaped "${sontag_llvm_objdump_candidate}")
+    string(REPLACE "\\" "\\\\" sontag_llvm_objdump_candidate_escaped "${sontag_llvm_objdump_candidate_escaped}")
+    string(REPLACE "\"" "\\\"" sontag_llvm_objdump_candidate_escaped "${sontag_llvm_objdump_candidate_escaped}")
+
+    set(sontag_llvm_nm_candidate_escaped "${sontag_llvm_nm_candidate}")
+    string(REPLACE "\\" "\\\\" sontag_llvm_nm_candidate_escaped "${sontag_llvm_nm_candidate_escaped}")
+    string(REPLACE "\"" "\\\"" sontag_llvm_nm_candidate_escaped "${sontag_llvm_nm_candidate_escaped}")
+
     add_compile_definitions(
         SONTAG_COMPILER_CLANG=1
         SONTAG_CLANG_VERSION_MAJOR=${sontag_clang_version_major}
         SONTAG_TOOLCHAIN_BIN_PREFIX="${sontag_toolchain_bin_dir_resolved_escaped}"
+        SONTAG_CLANG_EXECUTABLE_PATH="${sontag_clang_candidate_escaped}"
+        SONTAG_LLVM_MCA_EXECUTABLE_PATH="${sontag_llvm_mca_candidate_escaped}"
+        SONTAG_LLVM_OBJDUMP_EXECUTABLE_PATH="${sontag_llvm_objdump_candidate_escaped}"
+        SONTAG_LLVM_NM_EXECUTABLE_PATH="${sontag_llvm_nm_candidate_escaped}"
     )
 
     message(STATUS

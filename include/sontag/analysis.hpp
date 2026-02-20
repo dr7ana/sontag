@@ -85,6 +85,7 @@ namespace sontag {
         std::optional<std::string> mca_cpu{};
         std::filesystem::path mca_path{"llvm-mca"};
         std::filesystem::path objdump_path{"llvm-objdump"};
+        std::filesystem::path nm_path{"nm"};
         std::string graph_format{"png"};
         std::optional<std::filesystem::path> dot_path{};
         bool verbose{false};

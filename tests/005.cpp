@@ -275,7 +275,8 @@ namespace sontag::test {
         CHECK(persisted_cfg.cxx_standard == "c++20");
         CHECK(persisted_cfg.opt_level == "O1");
         CHECK_FALSE(persisted_cfg.mca_cpu.has_value());
-        CHECK(persisted_cfg.mca_path == "llvm-mca");
+        CHECK(persisted_cfg.mca_path == SONTAG_LLVM_MCA_EXECUTABLE_PATH);
+        CHECK(persisted_cfg.nm_path == SONTAG_LLVM_NM_EXECUTABLE_PATH);
         CHECK(persisted_cfg.cache_dir == cfg.cache_dir.string());
         CHECK(persisted_cfg.output == "json");
         CHECK(persisted_cfg.color == "never");
@@ -441,6 +442,9 @@ namespace sontag::test {
         CHECK(output.out.find("build:\n") != std::string::npos);
         CHECK(output.out.find("  std=") != std::string::npos);
         CHECK(output.out.find("  opt=") != std::string::npos);
+        CHECK(output.out.find("  toolchain_dir=") != std::string::npos);
+        CHECK(output.out.find("  clang=") == std::string::npos);
+        CHECK(output.out.find("  mca_path=") == std::string::npos);
 
         CHECK(output.out.find("ui:\n") != std::string::npos);
         CHECK(output.out.find("  output=") != std::string::npos);
@@ -496,7 +500,8 @@ namespace sontag::test {
         CHECK(output.out.find("config reset") != std::string::npos);
         CHECK(output.out.find("  opt=O0") != std::string::npos);
         CHECK(output.out.find("  color=auto") != std::string::npos);
-        CHECK(output.out.find("  editor=<auto>") != std::string::npos);
+        CHECK(output.out.find("  editor=") != std::string::npos);
+        CHECK(output.out.find("  editor=auto") == std::string::npos);
         CHECK(output.out.find("  formatter=clang-format") != std::string::npos);
         CHECK(output.out.find("  history_file=.sontag/history") != std::string::npos);
     }

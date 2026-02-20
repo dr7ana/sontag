@@ -6,6 +6,7 @@
 #include "internal/delta.hpp"
 #include "internal/metrics.hpp"
 #include "internal/opcode.hpp"
+#include "internal/platform.hpp"
 
 #include <glaze/glaze.hpp>
 
@@ -639,6 +640,8 @@ namespace sontag {
             static constexpr auto objdump_demangle = "--demangle"sv;
             static constexpr auto objdump_x86_intel_syntax = "--x86-asm-syntax=intel"sv;
             static constexpr auto objdump_x86_att_syntax = "--x86-asm-syntax=att"sv;
+            static constexpr auto objdump_disassembler_options_prefix = "--disassembler-options="sv;
+            static constexpr auto objdump_no_aliases = "no-aliases"sv;
             static constexpr auto objdump_symbolize_operands = "--symbolize-operands"sv;
             static constexpr auto objdump_show_all_symbols = "--show-all-symbols"sv;
             static constexpr auto objdump_disassemble_symbols_prefix = "--disassemble-symbols="sv;
@@ -666,6 +669,51 @@ namespace sontag {
             if (value) {
                 args.emplace_back("{}{}"_format(prefix, *value));
             }
+        }
+
+        enum class objdump_isa : uint8_t {
+            x86,
+            arm,
+            unknown,
+        };
+
+        static constexpr objdump_isa classify_objdump_isa(std::string_view arch_hint) noexcept {
+            if (arch_hint.find("x86_64"sv) != std::string_view::npos ||
+                arch_hint.find("amd64"sv) != std::string_view::npos ||
+                arch_hint.find("i386"sv) != std::string_view::npos ||
+                arch_hint.find("i486"sv) != std::string_view::npos ||
+                arch_hint.find("i586"sv) != std::string_view::npos ||
+                arch_hint.find("i686"sv) != std::string_view::npos) {
+                return objdump_isa::x86;
+            }
+
+            if (arch_hint.find("aarch64"sv) != std::string_view::npos ||
+                arch_hint.find("arm64"sv) != std::string_view::npos || arch_hint == "arm"sv ||
+                arch_hint.starts_with("arm"sv) || arch_hint.find("-arm"sv) != std::string_view::npos) {
+                return objdump_isa::arm;
+            }
+
+            return objdump_isa::unknown;
+        }
+
+        static constexpr objdump_isa host_objdump_isa() noexcept {
+            if constexpr (internal::platform::is_x86_64) {
+                return objdump_isa::x86;
+            }
+            if constexpr (internal::platform::is_arm64) {
+                return objdump_isa::arm;
+            }
+            return objdump_isa::unknown;
+        }
+
+        static objdump_isa resolve_objdump_isa(const analysis_request& request) noexcept {
+            if (request.target_triple && !request.target_triple->empty()) {
+                return classify_objdump_isa(*request.target_triple);
+            }
+            if (request.cpu && !request.cpu->empty()) {
+                return classify_objdump_isa(*request.cpu);
+            }
+            return host_objdump_isa();
         }
 
         static std::vector<std::string> base_clang_args(const analysis_request& request) {
@@ -767,11 +815,18 @@ namespace sontag {
             base_args.emplace_back(objdump_executable);
             base_args.emplace_back(arg_tokens::objdump_disassemble);
             base_args.emplace_back(arg_tokens::objdump_demangle);
-            if (request.asm_syntax == "intel"sv) {
-                base_args.emplace_back(arg_tokens::objdump_x86_intel_syntax);
+            auto isa = resolve_objdump_isa(request);
+            if (isa == objdump_isa::x86) {
+                if (request.asm_syntax == "intel"sv) {
+                    base_args.emplace_back(arg_tokens::objdump_x86_intel_syntax);
+                }
+                else {
+                    base_args.emplace_back(arg_tokens::objdump_x86_att_syntax);
+                }
             }
-            else {
-                base_args.emplace_back(arg_tokens::objdump_x86_att_syntax);
+            else if (isa == objdump_isa::arm) {
+                append_prefixed_arg(
+                        base_args, arg_tokens::objdump_disassembler_options_prefix, arg_tokens::objdump_no_aliases);
             }
             base_args.emplace_back(arg_tokens::objdump_symbolize_operands);
 
@@ -1130,7 +1185,7 @@ namespace sontag {
             }
 
             std::vector<std::string> nm_args{};
-            nm_args.emplace_back("nm");
+            nm_args.push_back(request.nm_path.string());
             nm_args.emplace_back(arg_tokens::nm_defined_only);
             nm_args.emplace_back(arg_tokens::nm_posix_format);
             nm_args.push_back(object_path.string());

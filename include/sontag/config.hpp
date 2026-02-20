@@ -30,7 +30,7 @@ namespace sontag {
      * - quiet/verbose: Coarse output verbosity knobs for app logs.
      *
      * Toolchain and language mode
-     * - clang_path: clang++ executable path.
+     * - clang_path: clang++ executable path (resolved from build config).
      * - cxx_standard: Language standard enum selected from accepted tokens.
      * - opt_level: Optimization level used for compilation/analysis.
      * - debug_info: Debug info policy for generated objects/IR.
@@ -65,7 +65,8 @@ namespace sontag {
      * - asm_syntax: Disassembly syntax flavor (intel or att).
      * - mca_enabled: Enable llvm-mca checks/commands by default.
      * - mca_cpu: Optional CPU override specifically for llvm-mca.
-     * - mca_path: llvm-mca executable path override.
+     * - mca_path: llvm-mca executable path (resolved from build config).
+     * - nm_path: nm/llvm-nm executable path for symbol indexing (resolved from build config).
      *
      * Graph defaults
      * - graph_format: Default render format (dot/svg/png).
@@ -302,6 +303,7 @@ namespace sontag {
         bool mca_enabled{false};
         std::optional<std::string> mca_cpu{};
         std::filesystem::path mca_path{"llvm-mca"};
+        std::filesystem::path nm_path{"nm"};
 
         std::string graph_format{"png"};
         std::optional<std::filesystem::path> dot_path{};

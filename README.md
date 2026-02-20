@@ -15,7 +15,7 @@ a C++ interpreter and analysis-focused code execution harness
 - CMake
 - Ninja
 - Latest stable LLVM toolchain (>= 20), including:
-  - `clang++` (C++23 compiler; available in `PATH` or set via `--clang`)
+  - `clang++` (C++23 compiler; resolved via build config)
   - `llvm-mca` (for `:mca`)
   - `llvm-objdump`
 - `nm` (binutils) for symbol discovery

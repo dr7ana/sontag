@@ -60,6 +60,17 @@ namespace sontag::test {
             return std::ranges::any_of(args, [prefix](std::string_view arg) { return arg.starts_with(prefix); });
         }
 
+        static void check_default_dump_arch_args(const std::vector<std::string>& args) {
+            if constexpr (internal::platform::is_x86_64) {
+                CHECK(has_exact_arg(args, "--x86-asm-syntax=intel"));
+                CHECK_FALSE(has_prefixed_arg(args, "--disassembler-options="));
+            }
+            else if constexpr (internal::platform::is_arm64) {
+                CHECK(has_exact_arg(args, "--disassembler-options=no-aliases"));
+                CHECK_FALSE(has_prefixed_arg(args, "--x86-asm-syntax="));
+            }
+        }
+
         static std::string make_objdump_wrapper_script(const fs::path& args_path) {
             std::ostringstream script{};
             script << "#!/usr/bin/env bash\n";
@@ -220,7 +231,7 @@ namespace sontag::test {
         auto args = detail::read_lines(args_path);
         CHECK(detail::has_exact_arg(args, "--disassemble"));
         CHECK(detail::has_exact_arg(args, "--demangle"));
-        CHECK(detail::has_exact_arg(args, "--x86-asm-syntax=intel"));
+        detail::check_default_dump_arch_args(args);
         CHECK(detail::has_exact_arg(args, "--symbolize-operands"));
         CHECK(detail::has_exact_arg(args, "--show-all-symbols"));
         CHECK_FALSE(detail::has_prefixed_arg(args, "--disassemble-symbols="));
@@ -255,10 +266,40 @@ namespace sontag::test {
         auto args = detail::read_lines(args_path);
         CHECK(detail::has_exact_arg(args, "--disassemble"));
         CHECK(detail::has_exact_arg(args, "--demangle"));
-        CHECK(detail::has_exact_arg(args, "--x86-asm-syntax=intel"));
+        detail::check_default_dump_arch_args(args);
         CHECK(detail::has_exact_arg(args, "--symbolize-operands"));
         CHECK_FALSE(detail::has_exact_arg(args, "--show-all-symbols"));
         CHECK(detail::has_prefixed_arg(args, "--disassemble-symbols="));
+    }
+
+    TEST_CASE("003: dump analysis uses no-aliases for explicit aarch64 target", "[003][analysis][dump][aarch64]") {
+        detail::temp_dir temp{"sontag_m1_dump_aarch64"};
+
+        auto args_path = temp.path / "objdump.args.txt";
+        auto wrapper_path = temp.path / "tools" / "llvm-objdump";
+        auto wrapper_script = detail::make_objdump_wrapper_script(args_path);
+        detail::make_executable_file(wrapper_path, wrapper_script);
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.objdump_path = wrapper_path;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.target_triple = "aarch64-unknown-linux-gnu";
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+
+        auto dump_result = run_analysis(request, analysis_kind::dump);
+        CHECK(dump_result.success);
+        CHECK(dump_result.exit_code == 0);
+
+        auto args = detail::read_lines(args_path);
+        CHECK(detail::has_exact_arg(args, "--disassemble"));
+        CHECK(detail::has_exact_arg(args, "--demangle"));
+        CHECK(detail::has_exact_arg(args, "--disassembler-options=no-aliases"));
+        CHECK_FALSE(detail::has_prefixed_arg(args, "--x86-asm-syntax="));
+        CHECK(detail::has_exact_arg(args, "--symbolize-operands"));
+        CHECK(detail::has_exact_arg(args, "--show-all-symbols"));
     }
 
     TEST_CASE("003: graph cfg emits dot artifact and summary", "[003][analysis][graph]") {
