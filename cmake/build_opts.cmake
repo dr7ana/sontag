@@ -3,6 +3,8 @@ function(configure_build_opts)
     option(SONTAG_BUILD_TESTS "Build sontag test suite" ${SONTAG_IS_TOPLEVEL_PROJECT})
     option(SONTAG_SMOKE "Build sontag smoke tests" OFF)
     option(SONTAG_USE_LIBCXX "Build C++ targets with libc++ instead of libstdc++ when using clang" ON)
+    set(SONTAG_TOOLCHAIN_BIN_DIR "" CACHE PATH
+        "Optional override for LLVM toolchain bin directory (used to resolve llvm-* tools)")
 
     set(SONTAG_PLATFORM_LINUX 0)
     set(SONTAG_PLATFORM_MACOS 0)
@@ -58,10 +60,31 @@ function(configure_build_opts)
     list(GET sontag_clang_version_parts 0 sontag_clang_version_major)
 
     get_filename_component(sontag_clang_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    set(sontag_tool_hint_dirs "${sontag_clang_bin_dir}")
+    set(sontag_toolchain_bin_dir_resolved "")
+    if(SONTAG_TOOLCHAIN_BIN_DIR)
+        if(EXISTS "${SONTAG_TOOLCHAIN_BIN_DIR}")
+            set(sontag_toolchain_bin_dir_resolved "${SONTAG_TOOLCHAIN_BIN_DIR}")
+        else()
+            message(FATAL_ERROR
+                "SONTAG_TOOLCHAIN_BIN_DIR does not exist: ${SONTAG_TOOLCHAIN_BIN_DIR}")
+        endif()
+    endif()
+
+    if(NOT sontag_toolchain_bin_dir_resolved)
+        if(SONTAG_PLATFORM_MACOS AND EXISTS "/opt/homebrew/opt/llvm/bin")
+            set(sontag_toolchain_bin_dir_resolved "/opt/homebrew/opt/llvm/bin")
+        elseif(SONTAG_PLATFORM_MACOS AND EXISTS "/usr/local/opt/llvm/bin")
+            set(sontag_toolchain_bin_dir_resolved "/usr/local/opt/llvm/bin")
+        else()
+            set(sontag_toolchain_bin_dir_resolved "${sontag_clang_bin_dir}")
+        endif()
+    endif()
+
+    set(sontag_tool_hint_dirs "${sontag_toolchain_bin_dir_resolved}" "${sontag_clang_bin_dir}")
     if(SONTAG_PLATFORM_MACOS)
         list(APPEND sontag_tool_hint_dirs "/opt/homebrew/opt/llvm/bin" "/usr/local/opt/llvm/bin")
     endif()
+    list(REMOVE_DUPLICATES sontag_tool_hint_dirs)
 
     find_program(
         sontag_llvm_mca_candidate
@@ -94,8 +117,8 @@ function(configure_build_opts)
         set(sontag_llvm_nm_candidate "llvm-nm-${sontag_clang_version_major}")
     endif()
 
-    set(SONTAG_TOOLCHAIN_BIN_DIR "${sontag_clang_bin_dir}" CACHE PATH
-        "toolchain binary directory derived from selected C++ compiler" FORCE)
+    set(SONTAG_TOOLCHAIN_BIN_DIR_RESOLVED "${sontag_toolchain_bin_dir_resolved}" CACHE PATH
+        "resolved LLVM toolchain binary directory used by sontag" FORCE)
     set(SONTAG_CLANG_EXECUTABLE "${CMAKE_CXX_COMPILER}" CACHE FILEPATH
         "clang++ executable path used by sontag" FORCE)
     set(SONTAG_CLANG_VERSION_MAJOR "${sontag_clang_version_major}" CACHE STRING
@@ -114,7 +137,10 @@ function(configure_build_opts)
 
     message(STATUS
         "Using ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} at ${CMAKE_CXX_COMPILER}")
-    message(STATUS "sontag toolchain bin dir: ${SONTAG_TOOLCHAIN_BIN_DIR}")
+    if(SONTAG_TOOLCHAIN_BIN_DIR)
+        message(STATUS "sontag toolchain bin dir override: ${SONTAG_TOOLCHAIN_BIN_DIR}")
+    endif()
+    message(STATUS "sontag toolchain bin dir resolved: ${SONTAG_TOOLCHAIN_BIN_DIR_RESOLVED}")
     message(STATUS "sontag clang executable: ${SONTAG_CLANG_EXECUTABLE}")
     message(STATUS "sontag llvm-mca executable: ${SONTAG_LLVM_MCA_EXECUTABLE}")
     message(STATUS "sontag llvm-objdump executable: ${SONTAG_LLVM_OBJDUMP_EXECUTABLE}")
