@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sontag/format.hpp"
+#include "sontag/utils.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -110,10 +111,6 @@ namespace sontag::opcode {
         return lower >= 'a' && lower <= 'z';
     }
 
-    constexpr char ascii_tolower(char c) noexcept {
-        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
-    }
-
     constexpr std::string_view trim_ascii(std::string_view value) noexcept {
         auto first = value.find_first_not_of(" \t\r\n");
         if (first == std::string_view::npos) {
@@ -176,7 +173,7 @@ namespace sontag::opcode {
 
         std::string out{};
         out.reserve(token.size());
-        std::ranges::transform(token, std::back_inserter(out), [](char c) { return ascii_tolower(c); });
+        std::ranges::transform(token, std::back_inserter(out), [](char c) { return utils::char_tolower(c); });
         return out;
     }
 
@@ -209,7 +206,7 @@ namespace sontag::opcode {
                 previous_space = true;
                 continue;
             }
-            collapsed.push_back(ascii_tolower(c));
+            collapsed.push_back(utils::char_tolower(c));
             previous_space = false;
         }
 
@@ -253,7 +250,7 @@ namespace sontag::opcode {
         auto token_lower = normalize_opcode(token);
         if (token_lower.empty()) {
             token_lower.assign(token.begin(), token.end());
-            std::ranges::transform(token_lower, token_lower.begin(), [](char c) { return ascii_tolower(c); });
+            std::ranges::transform(token_lower, token_lower.begin(), [](char c) { return utils::char_tolower(c); });
         }
 
         static constexpr auto memory_sizes = {

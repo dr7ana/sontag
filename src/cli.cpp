@@ -2,6 +2,7 @@
 
 #include "sontag/analysis.hpp"
 #include "sontag/format.hpp"
+#include "sontag/utils.hpp"
 
 #include "internal/delta.hpp"
 #include "internal/editor.hpp"
@@ -355,6 +356,18 @@ namespace sontag::cli {
                 return *cfg.mca_cpu;
             }
             return effective_cpu_value(cfg);
+        }
+
+        static constexpr bool analysis_uses_mca_backend(analysis_kind kind) noexcept {
+            return kind == analysis_kind::mca || kind == analysis_kind::inspect_mca_summary ||
+                   kind == analysis_kind::inspect_mca_heatmap;
+        }
+
+        static std::string_view command_display_name(std::string_view command_name) noexcept {
+            if (command_name.starts_with(':')) {
+                return command_name.substr(1U);
+            }
+            return command_name;
         }
 
         static std::string effective_editor_value(const startup_config& cfg) {
@@ -2937,10 +2950,6 @@ examples:
             bool valid{false};
         };
 
-        static constexpr char ascii_tolower(char c) noexcept {
-            return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
-        }
-
         static constexpr bool ascii_is_space(char c) noexcept {
             return c == ' ' || c == '\t' || c == '\r' || c == '\n';
         }
@@ -2987,7 +2996,7 @@ examples:
 
             auto count = std::min(trimmed.size(), scratch.size());
             for (size_t i = 0U; i < count; ++i) {
-                scratch[i] = ascii_tolower(trimmed[i]);
+                scratch[i] = utils::char_tolower(trimmed[i]);
             }
             return std::string_view{scratch.data(), count};
         }
@@ -4137,6 +4146,15 @@ examples:
             auto arg = command_argument(cmd, command_name);
             if (!arg) {
                 return false;
+            }
+
+            if constexpr (!internal::platform::mca_supported) {
+                if (analysis_uses_mca_backend(kind)) {
+                    out << "{}: unavailable\n"_format(command_display_name(command_name));
+                    out << "llvm-mca is temporarily disabled on macOS arm64 due to a known crash while parsing "
+                           "Darwin assembly directives.\n";
+                    return true;
+                }
             }
 
             if (state.cells.empty()) {

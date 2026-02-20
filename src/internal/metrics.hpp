@@ -3,6 +3,8 @@
 #include "delta.hpp"
 #include "opcode.hpp"
 
+#include "sontag/utils.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -173,7 +175,7 @@ namespace sontag::metrics {
         auto lowered = opcode::normalize_opcode(token);
         if (lowered.empty()) {
             lowered.assign(token.begin(), token.end());
-            std::ranges::transform(lowered, lowered.begin(), opcode::ascii_tolower);
+            std::ranges::transform(lowered, lowered.begin(), utils::char_tolower);
         }
 
         static constexpr auto memory_prefixes =
@@ -293,7 +295,7 @@ namespace sontag::metrics {
             if (!trimmed.empty()) {
                 if (trimmed.starts_with("*"sv) && trimmed.find("Register File"sv) != std::string_view::npos) {
                     auto lower = std::string{trimmed};
-                    std::ranges::transform(lower, lower.begin(), opcode::ascii_tolower);
+                    std::ranges::transform(lower, lower.begin(), utils::char_tolower);
                     if (lower.find("integer"sv) != std::string::npos) {
                         active = active_register_file::integer;
                     }

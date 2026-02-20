@@ -2,6 +2,7 @@
 
 #include "sontag/config.hpp"
 #include "sontag/graph.hpp"
+#include "sontag/utils.hpp"
 
 #include "internal/delta.hpp"
 #include "internal/metrics.hpp"
@@ -25,6 +26,7 @@ extern "C" {
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -1311,7 +1313,6 @@ namespace sontag {
                     return candidate.mangled;
                 }
             }
-
             return std::nullopt;
         }
 
@@ -1383,13 +1384,17 @@ namespace sontag {
         }
 
         static constexpr std::optional<std::string_view> parse_asm_begin_symbol(std::string_view line) {
-            static constexpr auto prefix = "# -- Begin function "sv;
-            auto pos = line.find(prefix);
+            static constexpr auto marker = "Begin function "sv;
+            auto pos = line.find(marker);
             if (pos == std::string_view::npos) {
                 return std::nullopt;
             }
-            auto symbol = line.substr(pos + prefix.size());
+            auto symbol = line.substr(pos + marker.size());
             symbol = trim_ascii(symbol);
+            auto end = symbol.find_first_of(" \t\r\n");
+            if (end != std::string_view::npos) {
+                symbol = symbol.substr(0U, end);
+            }
             if (symbol.empty()) {
                 return std::nullopt;
             }
@@ -1398,15 +1403,15 @@ namespace sontag {
 
         static constexpr std::optional<std::string_view> parse_asm_label_symbol(std::string_view line) {
             auto trimmed = trim_ascii(line);
-            if (!trimmed.ends_with(':')) {
+            auto colon = trimmed.find(':');
+            if (colon == std::string_view::npos || colon == 0U) {
                 return std::nullopt;
             }
-            trimmed.remove_suffix(1U);
-            trimmed = trim_ascii(trimmed);
-            if (trimmed.empty()) {
+            auto symbol = trim_ascii(trimmed.substr(0U, colon));
+            if (symbol.empty()) {
                 return std::nullopt;
             }
-            return trimmed;
+            return symbol;
         }
 
         static constexpr std::optional<std::string_view> parse_asm_size_symbol(std::string_view line) {
@@ -1430,6 +1435,11 @@ namespace sontag {
             return symbol;
         }
 
+        static constexpr bool ascii_is_alnum(char c) noexcept {
+            auto lower = static_cast<char>(c | 0x20);
+            return (c >= '0' && c <= '9') || (lower >= 'a' && lower <= 'z');
+        }
+
         static std::string extract_asm_for_symbol(std::string_view asm_text, std::string_view mangled_symbol) {
             auto lines = split_lines(asm_text);
             std::ostringstream extracted{};
@@ -1449,7 +1459,7 @@ namespace sontag {
                 }
 
                 extracted << line << '\n';
-                if (contains_token(line, "# -- End function"sv)) {
+                if (contains_token(line, "End function"sv)) {
                     break;
                 }
                 if (auto size_symbol = parse_asm_size_symbol(line);
@@ -1458,7 +1468,8 @@ namespace sontag {
                 }
             }
 
-            return extracted.str();
+            auto extracted_text = extracted.str();
+            return extracted_text;
         }
 
         static std::optional<std::string_view> parse_objdump_symbol_header_name(std::string_view line) {
@@ -1477,6 +1488,48 @@ namespace sontag {
             return trimmed.substr(left + 1U, (right - left) - 1U);
         }
 
+        static constexpr bool starts_with_case_insensitive(std::string_view value, std::string_view prefix) noexcept {
+            if (value.size() < prefix.size()) {
+                return false;
+            }
+            for (size_t i = 0U; i < prefix.size(); ++i) {
+                if (utils::char_tolower(value[i]) != utils::char_tolower(prefix[i])) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static constexpr bool is_objdump_local_label(std::string_view label) noexcept {
+            label = trim_ascii(label);
+            if (label.empty()) {
+                return false;
+            }
+
+            if (label.starts_with(".L"sv) || starts_with_case_insensitive(label, "ltmp"sv) ||
+                starts_with_case_insensitive(label, "lbb"sv)) {
+                return true;
+            }
+
+            if ((label.front() == 'L' || label.front() == 'l') && label.size() > 1U) {
+                auto second = label[1];
+                if (second >= '0' && second <= '9') {
+                    return true;
+                }
+            }
+
+            if (label.find('(') != std::string_view::npos || label.find("::"sv) != std::string_view::npos) {
+                return false;
+            }
+
+            if ((label.front() == 'L' || label.front() == 'l') &&
+                std::ranges::all_of(label, [](char c) { return ascii_is_alnum(c) || c == '_' || c == '.'; })) {
+                return true;
+            }
+
+            return false;
+        }
+
         static std::string extract_objdump_for_symbol(
                 std::string_view dump_text, std::string_view mangled_symbol, std::string_view display_symbol) {
             auto lines = split_lines(dump_text);
@@ -1486,10 +1539,16 @@ namespace sontag {
             for (const auto& line : lines) {
                 auto header_name = parse_objdump_symbol_header_name(line);
                 if (header_name) {
+                    auto demangled_header = demangle_symbol_name(*header_name);
+                    auto local_header =
+                            is_objdump_local_label(*header_name) || is_objdump_local_label(demangled_header);
                     if (in_symbol) {
+                        if (local_header) {
+                            extracted << line << '\n';
+                            continue;
+                        }
                         break;
                     }
-                    auto demangled_header = demangle_symbol_name(*header_name);
                     if (symbol_names_equivalent(*header_name, mangled_symbol) ||
                         symbol_names_equivalent(*header_name, display_symbol) ||
                         symbol_names_equivalent(demangled_header, display_symbol)) {
@@ -1894,7 +1953,7 @@ namespace sontag {
                 std::string_view symbol_disassembly,
                 double compile_time_ms) {
             std::vector<delta_metric_entry> metrics{};
-            metrics.reserve(14U);
+            metrics.reserve(internal::platform::mca_supported ? 14U : 9U);
 
             auto has_disassembly = !symbol_disassembly.empty();
 
@@ -1940,6 +1999,10 @@ namespace sontag {
             }
             else {
                 metrics.push_back(make_na_metric("build.compile_time_ms"sv, "ms"sv));
+            }
+
+            if constexpr (!internal::platform::mca_supported) {
+                return metrics;
             }
 
             auto missing_symbol = !symbol_resolution.mangled.has_value();

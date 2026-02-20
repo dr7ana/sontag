@@ -20,7 +20,10 @@ namespace sontag::test { namespace detail {
 
     static analysis_request make_request(const fs::path& session_dir, std::string decl_cell, std::string exec_cell) {
         auto request = analysis_request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = fs::path{internal::platform::tool::clangxx_path};
+        request.objdump_path = fs::path{internal::platform::tool::llvm_objdump_path};
+        request.mca_path = fs::path{internal::platform::tool::llvm_mca_path};
+        request.nm_path = fs::path{internal::platform::tool::llvm_nm_path};
         request.session_dir = session_dir;
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -196,7 +199,7 @@ namespace sontag::test {
                 request, delta_request{.mode = delta_mode::spectrum, .target = optimization_level::o2});
         REQUIRE(report.levels.size() == 3U);
 
-        static constexpr auto expected_metric_names = std::array{
+        auto expected_metric_names = std::vector<std::string_view>{
                 "size.symbol_text_bytes"sv,
                 "asm.insn_total"sv,
                 "asm.mem_ops_ratio"sv,
@@ -205,12 +208,14 @@ namespace sontag::test {
                 "asm.bb_count"sv,
                 "asm.stack_frame_bytes"sv,
                 "asm.spill_fill_count"sv,
-                "build.compile_time_ms"sv,
-                "mca.block_rthroughput"sv,
-                "mca.ipc"sv,
-                "mca.total_uops"sv,
-                "mca.rf_integer_max_mappings"sv,
-                "mca.rf_fp_max_mappings"sv};
+                "build.compile_time_ms"sv};
+#if !(SONTAG_PLATFORM_MACOS && SONTAG_ARCH_ARM64)
+        expected_metric_names.push_back("mca.block_rthroughput"sv);
+        expected_metric_names.push_back("mca.ipc"sv);
+        expected_metric_names.push_back("mca.total_uops"sv);
+        expected_metric_names.push_back("mca.rf_integer_max_mappings"sv);
+        expected_metric_names.push_back("mca.rf_fp_max_mappings"sv);
+#endif
 
         for (const auto& level : report.levels) {
             REQUIRE(level.metrics.size() == expected_metric_names.size());
