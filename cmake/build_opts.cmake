@@ -46,6 +46,16 @@ function(configure_build_opts)
         message(FATAL_ERROR "sontag requires clang >= 20")
     endif()
 
+    if(SONTAG_PLATFORM_MACOS)
+        if(EXISTS "/usr/bin/ar")
+            set(CMAKE_AR "/usr/bin/ar" CACHE FILEPATH "Archive tool for static libraries" FORCE)
+        endif()
+        if(EXISTS "/usr/bin/ranlib")
+            set(CMAKE_RANLIB "/usr/bin/ranlib" CACHE FILEPATH "ranlib tool for static libraries" FORCE)
+        endif()
+        message(STATUS "sontag archive tools: ar=${CMAKE_AR}, ranlib=${CMAKE_RANLIB}")
+    endif()
+
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 20.0)
         if(SONTAG_PLATFORM_MACOS)
             message(FATAL_ERROR
