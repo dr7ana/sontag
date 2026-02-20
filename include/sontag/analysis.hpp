@@ -77,7 +77,7 @@ namespace sontag {
         std::vector<std::string> decl_cells{};
         std::vector<std::string> exec_cells{};
         cxx_standard language_standard{cxx_standard::cxx23};
-        optimization_level opt_level{optimization_level::o2};
+        optimization_level opt_level{optimization_level::o0};
         std::optional<std::string> target_triple{};
         std::optional<std::string> cpu{};
         std::string asm_syntax{"intel"};

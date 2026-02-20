@@ -134,7 +134,7 @@ namespace sontag {
             case optimization_level::oz:
                 return "Oz"sv;
         }
-        return "O2"sv;
+        return "O0"sv;
     }
 
     inline constexpr std::string_view to_string(cxx_standard standard) {
@@ -271,7 +271,7 @@ namespace sontag {
 
         std::filesystem::path clang_path{"clang++"};
         cxx_standard language_standard{cxx_standard::cxx23};
-        optimization_level opt_level{optimization_level::o2};
+        optimization_level opt_level{optimization_level::o0};
         debug_info_level debug_info{debug_info_level::line};
         std::optional<std::string> target_triple{};
         std::optional<std::string> cpu{};

@@ -494,7 +494,7 @@ namespace sontag::test {
         CHECK(output.out.find("  history_file=.sontag/test_history") != std::string::npos);
 
         CHECK(output.out.find("config reset") != std::string::npos);
-        CHECK(output.out.find("  opt=O2") != std::string::npos);
+        CHECK(output.out.find("  opt=O0") != std::string::npos);
         CHECK(output.out.find("  color=auto") != std::string::npos);
         CHECK(output.out.find("  editor=<auto>") != std::string::npos);
         CHECK(output.out.find("  formatter=clang-format") != std::string::npos);

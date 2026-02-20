@@ -297,7 +297,7 @@ namespace sontag::interpreter {
     struct variant_record {
         std::string variant_id{};
         cxx_standard language_standard{cxx_standard::cxx23};
-        optimization_level opt_level{optimization_level::o2};
+        optimization_level opt_level{optimization_level::o0};
         std::optional<std::string> target_triple{};
         std::optional<std::string> cpu{};
     };
@@ -362,7 +362,7 @@ namespace sontag::interpreter {
         std::string clang_version{};
         std::string llvm_version{};
         cxx_standard language_standard{cxx_standard::cxx23};
-        optimization_level opt_level{optimization_level::o2};
+        optimization_level opt_level{optimization_level::o0};
         std::optional<std::string> target_triple{};
         std::optional<std::string> cpu{};
         std::vector<tool_invocation_record> tool_invocations{};

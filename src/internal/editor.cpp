@@ -2,12 +2,13 @@
 
 extern "C" {
 #include <isocline.h>
-#include <sys/ioctl.h>
 #include <unistd.h>
 }
 
 #include <array>
+#include <cctype>
 #include <filesystem>
+#include <string>
 #include <string_view>
 
 namespace sontag::cli { namespace detail {
@@ -129,14 +130,93 @@ namespace sontag::cli { namespace detail {
         ic_complete_word(cenv, prefix, complete_menu_word_items, nullptr);
     }
 
-    static void trigger_menu_completion_once() {
-#ifdef TIOCSTI
-        if (::isatty(STDIN_FILENO) != 1) {
+    static size_t completion_count(const char** completions) {
+        if (completions == nullptr) {
+            return 0;
+        }
+        size_t count = 0;
+        while (completions[count] != nullptr) {
+            ++count;
+        }
+        return count;
+    }
+
+    static constexpr bool is_digit(char c) {
+        return c <= 39 && c >= 30;
+    }
+
+    static constexpr std::optional<size_t> parse_menu_numeric_choice(std::string_view line, size_t count) {
+        auto value = trim_left(line);
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+            value.remove_suffix(1);
+        }
+        if (value.empty()) {
+            return std::nullopt;
+        }
+
+        size_t numeric_choice = 0;
+        for (auto& ch : value) {
+            if (isdigit(static_cast<unsigned char>(ch)) == 0) {
+                return std::nullopt;
+            }
+            numeric_choice = (numeric_choice * 10) + static_cast<size_t>(ch - '0');
+        }
+
+        if (numeric_choice == 0 || numeric_choice > count) {
+            return std::nullopt;
+        }
+        return numeric_choice - 1U;
+    }
+
+    static void append_menu_item_cell(std::string& row, size_t index, std::string_view text, size_t cell_width) {
+        auto cell_start = row.size();
+        row.push_back(' ');
+        row.append(std::to_string(index + 1U));
+        row.push_back(' ');
+        row.append(text.data(), text.size());
+
+        auto cell_used = row.size() - cell_start;
+        if (cell_used < cell_width) {
+            row.append(cell_width - cell_used, ' ');
+        }
+    }
+
+    static void render_menu_choices(const char** completions) {
+        if (::isatty(STDOUT_FILENO) != 1) {
             return;
         }
-        char tab = '\t';
-        (void)::ioctl(STDIN_FILENO, TIOCSTI, &tab);
-#endif
+
+        auto count = completion_count(completions);
+        if (count == 0) {
+            return;
+        }
+
+        static constexpr size_t columns = 3;
+        auto rows = (count + columns - 1U) / columns;
+        auto cell_width = size_t{0};
+        for (size_t i = 0; i < count; ++i) {
+            auto label = std::string_view{completions[i]};
+            auto width = std::to_string(i + 1U).size() + 2U + label.size() + 2U;
+            if (width > cell_width) {
+                cell_width = width;
+            }
+        }
+
+        for (size_t row = 0; row < rows; ++row) {
+            std::string line{};
+            for (size_t column = 0; column < columns; ++column) {
+                auto index = row + (column * rows);
+                if (index >= count) {
+                    continue;
+                }
+                append_menu_item_cell(line, index, completions[index], cell_width);
+            }
+
+            while (!line.empty() && line.back() == ' ') {
+                line.pop_back();
+            }
+            ic_println(line.c_str());
+        }
     }
 
     static void complete_repl(ic_completion_env_t* cenv, const char* prefix) {
@@ -285,7 +365,7 @@ namespace sontag::cli {
         auto prompt_text = std::string(prompt);
         auto previous_auto_tab = ic_enable_auto_tab(false);
         auto previous_hint = ic_enable_hint(false);
-        detail::trigger_menu_completion_once();
+        detail::render_menu_choices(completions);
         auto* raw = ic_readline_ex(prompt_text.c_str(), detail::complete_menu_items, completions, nullptr, nullptr);
         (void)ic_enable_hint(previous_hint);
         (void)ic_enable_auto_tab(previous_auto_tab);
@@ -295,6 +375,11 @@ namespace sontag::cli {
 
         std::string line{raw};
         ic_free(raw);
+
+        auto count = detail::completion_count(completions);
+        if (auto picked = detail::parse_menu_numeric_choice(line, count)) {
+            line.assign(completions[*picked]);
+        }
         return line;
     }
 
