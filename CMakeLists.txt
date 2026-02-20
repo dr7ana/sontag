@@ -21,21 +21,7 @@ project(sontag
     DESCRIPTION "the C++ interpreter against simply interpreting"
     LANGUAGES ${LANGS})
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    message(FATAL_ERROR "sontag supports Linux only")
-endif()
-
-if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    message(FATAL_ERROR "sontag requires clang >= 20")
-endif()
-
-if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 20.0)
-    message(FATAL_ERROR
-        "sontag requires clang >= 20, found ${CMAKE_CXX_COMPILER_VERSION}")
-endif()
-
-message(STATUS
-    "Using ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} at ${CMAKE_CXX_COMPILER}")
+include(build_opts)
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     set(SONTAG_IS_TOPLEVEL_PROJECT TRUE)
@@ -43,24 +29,11 @@ else()
     set(SONTAG_IS_TOPLEVEL_PROJECT FALSE)
 endif()
 
-# TODO: not configured yet for shared vs static
-#option(BUILD_SHARED_LIBS "Build as shared library" OFF)
-#option(BUILD_STATIC_DEPS "Build and link against static dependencies" OFF)
-option(WARNINGS_AS_ERRORS "Treat all warnings as errors. turn off for development, on for release" OFF)
-option(SONTAG_BUILD_TESTS "Build sontag test suite" ${SONTAG_IS_TOPLEVEL_PROJECT})
-option(SONTAG_SMOKE "Build sontag smoke tests" OFF)
-option(SONTAG_USE_LIBCXX "Build C++ targets with libc++ instead of libstdc++ when using clang" ON)
-
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(SONTAG_USE_LIBCXX)
-    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>")
-    add_link_options("$<$<LINK_LANGUAGE:CXX>:-stdlib=libc++>")
-else()
-    message(FATAL_ERROR "sontag currently requires libc++; set -DSONTAG_USE_LIBCXX=ON")
-endif()
+configure_build_opts()
 
 add_library(sontag
     src/analysis.cpp
