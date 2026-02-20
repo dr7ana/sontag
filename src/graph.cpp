@@ -4,6 +4,7 @@
 
 #include <cxxabi.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <optional>
@@ -99,6 +100,22 @@ namespace sontag::graph {
 
         static constexpr bool contains_token(std::string_view haystack, std::string_view needle) {
             return haystack.find(needle) != std::string_view::npos;
+        }
+
+        static constexpr std::string_view strip_one_leading_underscore(std::string_view symbol) noexcept {
+            if (!symbol.empty() && symbol.front() == '_') {
+                symbol.remove_prefix(1U);
+            }
+            return symbol;
+        }
+
+        static constexpr bool symbol_names_equivalent(std::string_view lhs, std::string_view rhs) noexcept {
+            if (lhs == rhs) {
+                return true;
+            }
+            auto lhs_stripped = strip_one_leading_underscore(lhs);
+            auto rhs_stripped = strip_one_leading_underscore(rhs);
+            return lhs_stripped == rhs || lhs == rhs_stripped || lhs_stripped == rhs_stripped;
         }
 
         static void append_unique(std::vector<std::string>& values, std::string value) {
@@ -331,6 +348,16 @@ namespace sontag::graph {
             edges.push_back(std::move(edge));
         }
 
+        static std::optional<std::string> find_equivalent_function_name(
+                const std::vector<std::string>& function_order, std::string_view wanted_name) {
+            for (const auto& function_name : function_order) {
+                if (symbol_names_equivalent(function_name, wanted_name)) {
+                    return function_name;
+                }
+            }
+            return std::nullopt;
+        }
+
         static std::vector<cfg_edge> parse_cfg_edges_for_block(const cfg_block& block) {
             std::vector<cfg_edge> edges{};
 
@@ -425,7 +452,7 @@ namespace sontag::graph {
                         continue;
                     }
                     auto name = parse_ir_function_name(trimmed);
-                    if (!name || *name != function_name) {
+                    if (!name || !symbol_names_equivalent(*name, function_name)) {
                         continue;
                     }
                     graph.function_name = *name;
@@ -565,10 +592,11 @@ namespace sontag::graph {
             std::string root{};
             bool whole_snapshot = false;
             if (!root_name.empty()) {
-                root = std::string{root_name};
-                if (!defined.contains(root)) {
+                auto resolved_root = find_equivalent_function_name(function_order, root_name);
+                if (!resolved_root) {
                     return std::nullopt;
                 }
+                root = *resolved_root;
             }
             else {
                 whole_snapshot = true;
@@ -871,7 +899,7 @@ namespace sontag::graph {
                         continue;
                     }
                     auto name = parse_ir_function_name(trimmed);
-                    if (!name || *name != function_name) {
+                    if (!name || !symbol_names_equivalent(*name, function_name)) {
                         continue;
                     }
                     graph.function_name = *name;

@@ -296,8 +296,15 @@ namespace sontag::test {
         auto args = detail::read_lines(args_path);
         CHECK(detail::has_exact_arg(args, "--disassemble"));
         CHECK(detail::has_exact_arg(args, "--demangle"));
+#if SONTAG_ARCH_ARM64
         CHECK(detail::has_exact_arg(args, "--disassembler-options=no-aliases"));
         CHECK_FALSE(detail::has_prefixed_arg(args, "--x86-asm-syntax="));
+#elif SONTAG_ARCH_X86_64
+        CHECK_FALSE(detail::has_exact_arg(args, "--disassembler-options=no-aliases"));
+        CHECK(detail::has_prefixed_arg(args, "--x86-asm-syntax="));
+#else
+#error "unsupported architecture for dump argument checks"
+#endif
         CHECK(detail::has_exact_arg(args, "--symbolize-operands"));
         CHECK(detail::has_exact_arg(args, "--show-all-symbols"));
     }
