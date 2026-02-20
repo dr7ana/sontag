@@ -11,21 +11,36 @@ a C++ interpreter and analysis-focused code execution harness
 
 ## Requirements
 
-- Linux
+- Linux or macOS
 - CMake
 - Ninja
 - Latest stable LLVM toolchain (>= 20), including:
   - `clang++` (C++23 compiler; resolved via build config)
-  - `llvm-mca` (for `:mca`)
+  - `llvm-mca` (for `:mca`; currently unavailable on macOS arm64)
   - `llvm-objdump`
-- `nm` (binutils) for symbol discovery
+  - `llvm-nm` (for symbol discovery/indexing)
+  - macOS install: `brew install llvm@21`
 
 ## Build
+
+### Linux
+Note: compiler paths may need to be adjusted per your local configuration
 
 ```bash
 mkdir -p build
 cd build
-cmake ..
+cmake .. -G Ninja \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++
+ninja -v
+```
+
+### MacOS
+
+```bash
+mkdir -p build
+cd build
+cmake .. -G Ninja
 ninja -v
 ```
 
@@ -117,7 +132,7 @@ sontag >
 - object disassembly via `llvm-objdump` (`:dump`)
 - LLVM IR output (`:ir`)
 - compiler diagnostics output (`:diag`)
-- microarchitecture analysis via `llvm-mca` (`:mca`)
+- microarchitecture analysis via `llvm-mca` (`:mca`, unavailable on macOS arm64)
 - optimization delta analysis (`:delta`) with:
   - pairwise `O0 -> target` and spectrum `O0..target` opcode-aligned operation comparison (default target: `O2`)
   - snapshot pairwise comparison (`:delta <snapshot>`) with `current` as baseline and the snapshot label as target
@@ -187,6 +202,7 @@ sontag >
 - `:diag [symbol|@last]` runs compile diagnostics on the current snapshot and prints compiler errors/warnings (optionally filtered by symbol).
 - `:mca [symbol|@last]` compiles to assembly, runs microarchitecture analysis, and prints throughput/latency/resource-pressure analysis text.
 - `:mca` does not operate on data symbols (for example `[D]`/`[B]` entries from `:symbols`).
+- `:mca` and `:inspect mca ...` are currently unavailable on macOS arm64 due to an upstream `llvm-mca` crash while parsing Darwin assembly directives.
 - `:delta [spectrum] [target_opt] [symbol|@last]` runs either pairwise (`O0 -> target_opt`) or spectrum (`O0..target_opt`) optimization comparison, reports opcode UID mapping, and prints per-level operation streams.
 - `:delta <snapshot> [target_opt]` runs pairwise current-vs-snapshot comparison at one optimization level (default: current `opt_level`), with labels `current` and `<snapshot>`.
 - `:inspect asm [symbol|@last]` emits structured JSON containing aligned source/IR/asm line records for downstream tooling.
@@ -209,6 +225,7 @@ Output summary fields:
 - `baseline` / `target`: range endpoints (`O*` labels in optimization mode, `current`/snapshot labels in snapshot mode)
 - `changes`: unchanged/modified/inserted/removed/moved counters
 - `levels`: per-level success, exit code, operation count, opcode counts
+- `metrics`: canonical per-level metric table; on macOS arm64, `mca.*` rows are omitted.
 
 Side-by-side row markers:
 - `=` unchanged opcode UID relative to baseline
@@ -357,4 +374,5 @@ Examples:
 Notes:
 - `:inspect` commands emit JSON artifacts under `artifacts/inspect/...` and print a compact terminal summary.
 - `:inspect` commands do not generate rendered image files.
+- `:inspect mca ...` is currently unavailable on macOS arm64 (same `llvm-mca` upstream crash as `:mca`).
 - `color_scheme` config options currently supported are `classic` (default) and `vaporwave`.
