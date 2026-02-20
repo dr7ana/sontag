@@ -129,9 +129,14 @@ function(configure_build_opts)
     set(SONTAG_LLVM_NM_EXECUTABLE "${sontag_llvm_nm_candidate}" CACHE FILEPATH
         "llvm-nm executable path used by sontag" FORCE)
 
+    set(sontag_toolchain_bin_dir_resolved_escaped "${sontag_toolchain_bin_dir_resolved}")
+    string(REPLACE "\\" "\\\\" sontag_toolchain_bin_dir_resolved_escaped "${sontag_toolchain_bin_dir_resolved_escaped}")
+    string(REPLACE "\"" "\\\"" sontag_toolchain_bin_dir_resolved_escaped "${sontag_toolchain_bin_dir_resolved_escaped}")
+
     add_compile_definitions(
         SONTAG_COMPILER_CLANG=1
         SONTAG_CLANG_VERSION_MAJOR=${sontag_clang_version_major}
+        SONTAG_TOOLCHAIN_BIN_PREFIX="${sontag_toolchain_bin_dir_resolved_escaped}"
     )
 
     message(STATUS

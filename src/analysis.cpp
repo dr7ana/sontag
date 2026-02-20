@@ -644,6 +644,8 @@ namespace sontag {
             static constexpr auto objdump_disassemble_symbols_prefix = "--disassemble-symbols="sv;
             static constexpr auto objdump_line_numbers = "--line-numbers"sv;
             static constexpr auto objdump_source = "--source"sv;
+            static constexpr auto nm_defined_only = "--defined-only"sv;
+            static constexpr auto nm_posix_format = "-P"sv;
 
             static constexpr auto dot_output_format_prefix = "-T"sv;
         }  // namespace arg_tokens
@@ -986,6 +988,25 @@ namespace sontag {
             return lines;
         }
 
+        static std::vector<std::string_view> split_whitespace_tokens(std::string_view line) {
+            std::vector<std::string_view> tokens{};
+            size_t i = 0U;
+            while (i < line.size()) {
+                while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) {
+                    ++i;
+                }
+                if (i >= line.size()) {
+                    break;
+                }
+                auto start = i;
+                while (i < line.size() && !std::isspace(static_cast<unsigned char>(line[i]))) {
+                    ++i;
+                }
+                tokens.push_back(line.substr(start, i - start));
+            }
+            return tokens;
+        }
+
         static constexpr bool contains_token(std::string_view haystack, std::string_view needle) {
             return haystack.find(needle) != std::string_view::npos;
         }
@@ -1012,31 +1033,44 @@ namespace sontag {
                 return std::nullopt;
             }
 
-            auto name_start = trimmed.find_last_of(" \t");
-            if (name_start == std::string_view::npos || name_start + 1U >= trimmed.size()) {
+            auto tokens = split_whitespace_tokens(trimmed);
+            if (tokens.size() < 2U) {
                 return std::nullopt;
             }
-            auto mangled = trim_ascii(trimmed.substr(name_start + 1U));
+
+            auto kind_token = trim_ascii(tokens[1]);
+            if (kind_token.size() != 1U) {
+                return std::nullopt;
+            }
+            auto kind = kind_token.front();
+
+            // POSIX nm format (-P): <name> <type> <value> <size>
+            if (tokens.size() >= 4U) {
+                auto mangled = trim_ascii(tokens[0]);
+                if (mangled.empty()) {
+                    return std::nullopt;
+                }
+                return analysis_symbol{
+                        .kind = kind, .mangled = std::string{mangled}, .demangled = demangle_symbol_name(mangled)};
+            }
+
+            // Legacy/default nm format: <value> <type> <name>
+            if (tokens.size() >= 3U) {
+                auto mangled = trim_ascii(tokens[2]);
+                if (mangled.empty()) {
+                    return std::nullopt;
+                }
+                return analysis_symbol{
+                        .kind = kind, .mangled = std::string{mangled}, .demangled = demangle_symbol_name(mangled)};
+            }
+
+            auto mangled = trim_ascii(tokens[0]);
             if (mangled.empty()) {
                 return std::nullopt;
             }
 
-            auto prefix = trim_ascii(trimmed.substr(0U, name_start));
-            if (prefix.empty()) {
-                return std::nullopt;
-            }
-
-            auto kind_start = prefix.find_last_of(" \t");
-            auto kind_token =
-                    kind_start == std::string_view::npos ? prefix : trim_ascii(prefix.substr(kind_start + 1U));
-            if (kind_token.size() != 1U) {
-                return std::nullopt;
-            }
-
             return analysis_symbol{
-                    .kind = kind_token.front(),
-                    .mangled = std::string{mangled},
-                    .demangled = demangle_symbol_name(mangled)};
+                    .kind = kind, .mangled = std::string{mangled}, .demangled = demangle_symbol_name(mangled)};
         }
 
         static std::vector<analysis_symbol> parse_nm_symbols(std::string_view nm_output) {
@@ -1095,7 +1129,11 @@ namespace sontag {
                 return std::nullopt;
             }
 
-            std::vector<std::string> nm_args{"nm", "--defined-only", object_path.string()};
+            std::vector<std::string> nm_args{};
+            nm_args.emplace_back("nm");
+            nm_args.emplace_back(arg_tokens::nm_defined_only);
+            nm_args.emplace_back(arg_tokens::nm_posix_format);
+            nm_args.push_back(object_path.string());
             auto nm_exit = run_process(nm_args, nm_stdout_path, nm_stderr_path);
             if (nm_exit != 0) {
                 return std::nullopt;
@@ -1490,25 +1528,6 @@ namespace sontag {
                     }
                 }
             }
-        }
-
-        static std::vector<std::string_view> split_whitespace_tokens(std::string_view line) {
-            std::vector<std::string_view> tokens{};
-            size_t i = 0U;
-            while (i < line.size()) {
-                while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) {
-                    ++i;
-                }
-                if (i >= line.size()) {
-                    break;
-                }
-                auto start = i;
-                while (i < line.size() && !std::isspace(static_cast<unsigned char>(line[i]))) {
-                    ++i;
-                }
-                tokens.push_back(line.substr(start, i - start));
-            }
-            return tokens;
         }
 
         static std::vector<inspect_mca_heatmap_row> parse_mca_heatmap_rows(std::string_view mca_text) {

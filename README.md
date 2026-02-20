@@ -7,7 +7,7 @@
 ╚══════╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝
 ```
 
-a C++ interpreter focused on analysis, not just execution
+a C++ interpreter and analysis-focused code execution harness
 
 ## Requirements
 

@@ -6,7 +6,7 @@
 #include "internal/delta.hpp"
 #include "internal/editor.hpp"
 #include "internal/opcode.hpp"
-#include "internal/session_types.hpp"
+#include "internal/types.hpp"
 
 #include <glaze/glaze.hpp>
 
