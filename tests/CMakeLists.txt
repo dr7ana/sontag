@@ -8,6 +8,9 @@ target_link_libraries(
     PUBLIC
     sontag
     sontag_warnings
+
+    PRIVATE
+    Catch2::Catch2
 )
     
 
