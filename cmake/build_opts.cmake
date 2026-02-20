@@ -49,11 +49,19 @@ function(configure_build_opts)
     if(SONTAG_PLATFORM_MACOS)
         if(EXISTS "/usr/bin/ar")
             set(CMAKE_AR "/usr/bin/ar" CACHE FILEPATH "Archive tool for static libraries" FORCE)
+            set(CMAKE_C_COMPILER_AR "/usr/bin/ar" CACHE FILEPATH "C archive tool" FORCE)
+            set(CMAKE_CXX_COMPILER_AR "/usr/bin/ar" CACHE FILEPATH "CXX archive tool" FORCE)
         endif()
         if(EXISTS "/usr/bin/ranlib")
             set(CMAKE_RANLIB "/usr/bin/ranlib" CACHE FILEPATH "ranlib tool for static libraries" FORCE)
+            set(CMAKE_C_COMPILER_RANLIB "/usr/bin/ranlib" CACHE FILEPATH "C ranlib tool" FORCE)
+            set(CMAKE_CXX_COMPILER_RANLIB "/usr/bin/ranlib" CACHE FILEPATH "CXX ranlib tool" FORCE)
         endif()
-        message(STATUS "sontag archive tools: ar=${CMAKE_AR}, ranlib=${CMAKE_RANLIB}")
+        message(STATUS
+            "sontag archive tools: "
+            "ar=${CMAKE_AR}, ranlib=${CMAKE_RANLIB}, "
+            "c_ar=${CMAKE_C_COMPILER_AR}, cxx_ar=${CMAKE_CXX_COMPILER_AR}, "
+            "c_ranlib=${CMAKE_C_COMPILER_RANLIB}, cxx_ranlib=${CMAKE_CXX_COMPILER_RANLIB}")
     endif()
 
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 20.0)
