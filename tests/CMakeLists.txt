@@ -1,15 +1,13 @@
 add_subdirectory(Catch2)
 
-add_library(tests_common STATIC utils.cpp)
+add_library(tests_common INTERFACE)
 
 target_link_libraries(
     tests_common
 
-    PUBLIC
+    INTERFACE
     sontag
     sontag_warnings
-
-    PRIVATE
     Catch2::Catch2
 )
     
