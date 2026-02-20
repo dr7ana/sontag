@@ -14,7 +14,13 @@
 extern "C" {
 #include <fcntl.h>
 #include <poll.h>
+#if SONTAG_PLATFORM_MACOS
+#include <util.h>
+#elif SONTAG_PLATFORM_LINUX
 #include <pty.h>
+#else
+#error "unsupported platform for PTY test headers"
+#endif
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
