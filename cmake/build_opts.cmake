@@ -35,27 +35,48 @@ function(configure_build_opts)
     )
 
     if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        if(SONTAG_PLATFORM_MACOS AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+            message(FATAL_ERROR
+                "sontag requires Homebrew clang >= 20 (AppleClang is unsupported). "
+                "Configure with -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang "
+                "-DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++")
+        endif()
         message(FATAL_ERROR "sontag requires clang >= 20")
     endif()
 
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 20.0)
-        message(FATAL_ERROR
-            "sontag requires clang >= 20, found ${CMAKE_CXX_COMPILER_VERSION}")
+        if(SONTAG_PLATFORM_MACOS)
+            message(FATAL_ERROR
+                "sontag requires clang >= 20, found ${CMAKE_CXX_COMPILER_VERSION}. "
+                "Use Homebrew LLVM: -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang "
+                "-DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++")
+        endif()
+        message(FATAL_ERROR "sontag requires clang >= 20, found ${CMAKE_CXX_COMPILER_VERSION}")
     endif()
 
     string(REPLACE "." ";" sontag_clang_version_parts "${CMAKE_CXX_COMPILER_VERSION}")
     list(GET sontag_clang_version_parts 0 sontag_clang_version_major)
 
     get_filename_component(sontag_clang_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set(sontag_tool_hint_dirs "${sontag_clang_bin_dir}")
+    if(SONTAG_PLATFORM_MACOS)
+        list(APPEND sontag_tool_hint_dirs "/opt/homebrew/opt/llvm/bin" "/usr/local/opt/llvm/bin")
+    endif()
+
     find_program(
         sontag_llvm_mca_candidate
         NAMES "llvm-mca-${sontag_clang_version_major}" "llvm-mca"
-        HINTS "${sontag_clang_bin_dir}"
+        HINTS ${sontag_tool_hint_dirs}
     )
     find_program(
         sontag_llvm_objdump_candidate
         NAMES "llvm-objdump-${sontag_clang_version_major}" "llvm-objdump"
-        HINTS "${sontag_clang_bin_dir}"
+        HINTS ${sontag_tool_hint_dirs}
+    )
+    find_program(
+        sontag_llvm_nm_candidate
+        NAMES "llvm-nm-${sontag_clang_version_major}" "llvm-nm"
+        HINTS ${sontag_tool_hint_dirs}
     )
 
     if(NOT sontag_llvm_mca_candidate)
@@ -68,14 +89,23 @@ function(configure_build_opts)
         set(sontag_llvm_objdump_candidate "llvm-objdump-${sontag_clang_version_major}")
     endif()
 
+    if(NOT sontag_llvm_nm_candidate)
+        message(WARNING "could not resolve llvm-nm in PATH/toolchain; defaulting to llvm-nm-${sontag_clang_version_major}")
+        set(sontag_llvm_nm_candidate "llvm-nm-${sontag_clang_version_major}")
+    endif()
+
+    set(SONTAG_TOOLCHAIN_BIN_DIR "${sontag_clang_bin_dir}" CACHE PATH
+        "toolchain binary directory derived from selected C++ compiler" FORCE)
     set(SONTAG_CLANG_EXECUTABLE "${CMAKE_CXX_COMPILER}" CACHE FILEPATH
-        "clang++ executable path used by sontag")
+        "clang++ executable path used by sontag" FORCE)
     set(SONTAG_CLANG_VERSION_MAJOR "${sontag_clang_version_major}" CACHE STRING
-        "clang major version used by sontag")
+        "clang major version used by sontag" FORCE)
     set(SONTAG_LLVM_MCA_EXECUTABLE "${sontag_llvm_mca_candidate}" CACHE FILEPATH
-        "llvm-mca executable path used by sontag")
+        "llvm-mca executable path used by sontag" FORCE)
     set(SONTAG_LLVM_OBJDUMP_EXECUTABLE "${sontag_llvm_objdump_candidate}" CACHE FILEPATH
-        "llvm-objdump executable path used by sontag")
+        "llvm-objdump executable path used by sontag" FORCE)
+    set(SONTAG_LLVM_NM_EXECUTABLE "${sontag_llvm_nm_candidate}" CACHE FILEPATH
+        "llvm-nm executable path used by sontag" FORCE)
 
     add_compile_definitions(
         SONTAG_COMPILER_CLANG=1
@@ -84,9 +114,11 @@ function(configure_build_opts)
 
     message(STATUS
         "Using ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} at ${CMAKE_CXX_COMPILER}")
+    message(STATUS "sontag toolchain bin dir: ${SONTAG_TOOLCHAIN_BIN_DIR}")
     message(STATUS "sontag clang executable: ${SONTAG_CLANG_EXECUTABLE}")
     message(STATUS "sontag llvm-mca executable: ${SONTAG_LLVM_MCA_EXECUTABLE}")
     message(STATUS "sontag llvm-objdump executable: ${SONTAG_LLVM_OBJDUMP_EXECUTABLE}")
+    message(STATUS "sontag llvm-nm executable: ${SONTAG_LLVM_NM_EXECUTABLE}")
 
     if(SONTAG_USE_LIBCXX)
         add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>")
