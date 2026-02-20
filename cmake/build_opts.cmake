@@ -173,6 +173,23 @@ function(configure_build_opts)
     if(SONTAG_USE_LIBCXX)
         add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>")
         add_link_options("$<$<LINK_LANGUAGE:CXX>:-stdlib=libc++>")
+
+        if(SONTAG_PLATFORM_MACOS)
+            get_filename_component(sontag_toolchain_root "${sontag_toolchain_bin_dir_resolved}" DIRECTORY)
+            set(sontag_libcxx_lib_dir "${sontag_toolchain_root}/lib/c++")
+
+            if(EXISTS "${sontag_libcxx_lib_dir}/libc++.dylib")
+                add_link_options(
+                    "$<$<LINK_LANGUAGE:CXX>:-L${sontag_libcxx_lib_dir}>"
+                    "$<$<LINK_LANGUAGE:CXX>:-Wl,-rpath,${sontag_libcxx_lib_dir}>"
+                )
+                message(STATUS "sontag libc++ runtime dir: ${sontag_libcxx_lib_dir}")
+            else()
+                message(WARNING
+                    "Homebrew libc++ runtime not found at ${sontag_libcxx_lib_dir}; "
+                    "linking will fall back to system default runtime paths.")
+            endif()
+        endif()
     else()
         message(FATAL_ERROR "sontag currently requires libc++; set -DSONTAG_USE_LIBCXX=ON")
     endif()
