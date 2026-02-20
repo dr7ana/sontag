@@ -5,6 +5,45 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# macOS defaults: prefer Homebrew LLVM toolchain when compilers are not explicitly provided.
+if(APPLE)
+    if(NOT DEFINED CMAKE_C_COMPILER)
+        find_program(
+            sontag_default_clang
+            NAMES clang
+            HINTS /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin
+            NO_DEFAULT_PATH
+        )
+        if(sontag_default_clang)
+            set(CMAKE_C_COMPILER "${sontag_default_clang}" CACHE FILEPATH "Default C compiler for sontag" FORCE)
+        endif()
+    endif()
+
+    if(NOT DEFINED CMAKE_CXX_COMPILER)
+        find_program(
+            sontag_default_clangxx
+            NAMES clang++
+            HINTS /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin
+            NO_DEFAULT_PATH
+        )
+        if(sontag_default_clangxx)
+            set(CMAKE_CXX_COMPILER "${sontag_default_clangxx}" CACHE FILEPATH "Default CXX compiler for sontag" FORCE)
+        endif()
+    endif()
+endif()
+
+# If Ninja generator is selected explicitly, try to resolve ninja binary automatically.
+if(CMAKE_GENERATOR STREQUAL "Ninja" AND NOT CMAKE_MAKE_PROGRAM)
+    find_program(
+        sontag_ninja_program
+        NAMES ninja ninja-build
+        HINTS /opt/homebrew/bin /usr/local/bin
+    )
+    if(sontag_ninja_program)
+        set(CMAKE_MAKE_PROGRAM "${sontag_ninja_program}" CACHE FILEPATH "Ninja build tool" FORCE)
+    endif()
+endif()
+
 set(LANGS C CXX)
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
