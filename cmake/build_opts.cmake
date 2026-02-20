@@ -62,11 +62,11 @@ function(configure_build_opts)
     get_filename_component(sontag_clang_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
     set(sontag_toolchain_bin_dir_resolved "")
     if(SONTAG_TOOLCHAIN_BIN_DIR)
-        if(EXISTS "${SONTAG_TOOLCHAIN_BIN_DIR}")
+        if(EXISTS "${SONTAG_TOOLCHAIN_BIN_DIR}" AND IS_DIRECTORY "${SONTAG_TOOLCHAIN_BIN_DIR}")
             set(sontag_toolchain_bin_dir_resolved "${SONTAG_TOOLCHAIN_BIN_DIR}")
         else()
             message(FATAL_ERROR
-                "SONTAG_TOOLCHAIN_BIN_DIR does not exist: ${SONTAG_TOOLCHAIN_BIN_DIR}")
+                "SONTAG_TOOLCHAIN_BIN_DIR is not a valid directory: ${SONTAG_TOOLCHAIN_BIN_DIR}")
         endif()
     endif()
 
@@ -80,46 +80,45 @@ function(configure_build_opts)
         endif()
     endif()
 
-    set(sontag_tool_hint_dirs "${sontag_toolchain_bin_dir_resolved}" "${sontag_clang_bin_dir}")
-    if(SONTAG_PLATFORM_MACOS)
-        list(APPEND sontag_tool_hint_dirs "/opt/homebrew/opt/llvm/bin" "/usr/local/opt/llvm/bin")
+    set(sontag_clang_candidate "${sontag_toolchain_bin_dir_resolved}/clang++")
+    if(NOT EXISTS "${sontag_clang_candidate}")
+        set(sontag_clang_candidate "${sontag_toolchain_bin_dir_resolved}/clang++-${sontag_clang_version_major}")
     endif()
-    list(REMOVE_DUPLICATES sontag_tool_hint_dirs)
-
-    find_program(
-        sontag_llvm_mca_candidate
-        NAMES "llvm-mca-${sontag_clang_version_major}" "llvm-mca"
-        HINTS ${sontag_tool_hint_dirs}
-    )
-    find_program(
-        sontag_llvm_objdump_candidate
-        NAMES "llvm-objdump-${sontag_clang_version_major}" "llvm-objdump"
-        HINTS ${sontag_tool_hint_dirs}
-    )
-    find_program(
-        sontag_llvm_nm_candidate
-        NAMES "llvm-nm-${sontag_clang_version_major}" "llvm-nm"
-        HINTS ${sontag_tool_hint_dirs}
-    )
-
-    if(NOT sontag_llvm_mca_candidate)
-        message(WARNING "could not resolve llvm-mca in PATH/toolchain; defaulting to llvm-mca-${sontag_clang_version_major}")
-        set(sontag_llvm_mca_candidate "llvm-mca-${sontag_clang_version_major}")
+    if(NOT EXISTS "${sontag_clang_candidate}")
+        message(FATAL_ERROR
+            "required clang++ executable not found in toolchain bin dir: ${sontag_toolchain_bin_dir_resolved}")
     endif()
 
-    if(NOT sontag_llvm_objdump_candidate)
-        message(WARNING "could not resolve llvm-objdump in PATH/toolchain; defaulting to llvm-objdump-${sontag_clang_version_major}")
-        set(sontag_llvm_objdump_candidate "llvm-objdump-${sontag_clang_version_major}")
+    set(sontag_llvm_mca_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-mca-${sontag_clang_version_major}")
+    if(NOT EXISTS "${sontag_llvm_mca_candidate}")
+        set(sontag_llvm_mca_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-mca")
+    endif()
+    if(NOT EXISTS "${sontag_llvm_mca_candidate}")
+        message(FATAL_ERROR
+            "required llvm-mca executable not found in toolchain bin dir: ${sontag_toolchain_bin_dir_resolved}")
     endif()
 
-    if(NOT sontag_llvm_nm_candidate)
-        message(WARNING "could not resolve llvm-nm in PATH/toolchain; defaulting to llvm-nm-${sontag_clang_version_major}")
-        set(sontag_llvm_nm_candidate "llvm-nm-${sontag_clang_version_major}")
+    set(sontag_llvm_objdump_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-objdump-${sontag_clang_version_major}")
+    if(NOT EXISTS "${sontag_llvm_objdump_candidate}")
+        set(sontag_llvm_objdump_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-objdump")
+    endif()
+    if(NOT EXISTS "${sontag_llvm_objdump_candidate}")
+        message(FATAL_ERROR
+            "required llvm-objdump executable not found in toolchain bin dir: ${sontag_toolchain_bin_dir_resolved}")
+    endif()
+
+    set(sontag_llvm_nm_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-nm-${sontag_clang_version_major}")
+    if(NOT EXISTS "${sontag_llvm_nm_candidate}")
+        set(sontag_llvm_nm_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-nm")
+    endif()
+    if(NOT EXISTS "${sontag_llvm_nm_candidate}")
+        message(FATAL_ERROR
+            "required llvm-nm executable not found in toolchain bin dir: ${sontag_toolchain_bin_dir_resolved}")
     endif()
 
     set(SONTAG_TOOLCHAIN_BIN_DIR_RESOLVED "${sontag_toolchain_bin_dir_resolved}" CACHE PATH
         "resolved LLVM toolchain binary directory used by sontag" FORCE)
-    set(SONTAG_CLANG_EXECUTABLE "${CMAKE_CXX_COMPILER}" CACHE FILEPATH
+    set(SONTAG_CLANG_EXECUTABLE "${sontag_clang_candidate}" CACHE FILEPATH
         "clang++ executable path used by sontag" FORCE)
     set(SONTAG_CLANG_VERSION_MAJOR "${sontag_clang_version_major}" CACHE STRING
         "clang major version used by sontag" FORCE)
