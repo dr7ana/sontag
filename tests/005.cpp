@@ -643,6 +643,27 @@ namespace sontag::test {
         CHECK(output.err.empty());
     }
 
+    TEST_CASE("005: asm explore falls back on non-interactive terminals", "[005][session][asm][explore]") {
+        detail::temp_dir temp{"sontag_asm_explore_fallback"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int zeta_explore_probe(int x) { return x + 9; }\n"
+                ":asm explore\n"
+                ":quit\n");
+
+        CHECK(output.out.find("asm explore: requires an interactive tty") != std::string::npos);
+        CHECK(output.out.find("asm:") != std::string::npos);
+        CHECK(output.out.find("symbol: __sontag_main") != std::string::npos);
+        CHECK(output.out.find("assembly:") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
     TEST_CASE("005: delta command renders pairwise summary and opcode table info", "[005][session][delta]") {
         detail::temp_dir temp{"sontag_delta_command_table"};
 

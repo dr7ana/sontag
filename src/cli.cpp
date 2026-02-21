@@ -6,6 +6,7 @@
 
 #include "internal/delta.hpp"
 #include "internal/editor.hpp"
+#include "internal/explorer.hpp"
 #include "internal/opcode.hpp"
 #include "internal/platform.hpp"
 #include "internal/types.hpp"
@@ -2273,6 +2274,7 @@ namespace sontag::cli {
   :mark <name>
   :snapshots
   :asm [symbol|@last] (default: __sontag_main)
+  :asm explore [symbol|@last]
   :dump [symbol|@last]
   :ir [symbol|@last]
   :diag [symbol|@last]
@@ -2301,6 +2303,7 @@ examples:
   :symbols
   :mark baseline
   :asm
+  :asm explore
   :dump
   :delta
   :delta spectrum
@@ -4415,6 +4418,67 @@ examples:
             return true;
         }
 
+        static bool process_asm_explore_command(
+                std::string_view cmd, startup_config& cfg, repl_state& state, std::ostream& out, std::ostream& err) {
+            auto arg = command_argument(cmd, ":asm"sv);
+            if (!arg) {
+                return false;
+            }
+
+            auto tail = trim_view(*arg);
+            if (!tail.starts_with("explore"sv) ||
+                (tail.size() > "explore"sv.size() && !is_command_separator(tail["explore"sv.size()]))) {
+                return false;
+            }
+
+            if (state.cells.empty()) {
+                err << "no stored cells available for analysis\n";
+                return true;
+            }
+
+            auto symbol_arg = trim_view(tail.substr("explore"sv.size()));
+            std::optional<std::string> symbol{};
+            if (!symbol_arg.empty()) {
+                auto split = symbol_arg.find_first_of(" \t\r\n");
+                auto token = split == std::string_view::npos ? symbol_arg : trim_view(symbol_arg.substr(0U, split));
+                auto extra =
+                        split == std::string_view::npos ? std::string_view{} : trim_view(symbol_arg.substr(split + 1U));
+                if (!extra.empty()) {
+                    err << "invalid :asm explore, expected :asm explore [symbol|@last]\n";
+                    return true;
+                }
+                if (!token.empty() && token != "@last"sv) {
+                    symbol = std::string{token};
+                }
+            }
+
+            try {
+                auto request = make_analysis_request(cfg, state);
+                request.symbol = symbol.has_value() ? symbol : std::optional<std::string>{"__sontag_main"};
+                auto result = run_analysis(request, analysis_kind::asm_text);
+                if (!result.success) {
+                    render_analysis_result(result, cfg.output, cfg.verbose, out);
+                    return true;
+                }
+
+                auto summary = summarize_asm_artifact(result.artifact_text);
+                auto model = internal::explorer::model{
+                        .symbol_display = extract_asm_display_symbol(result.artifact_text).value_or("__sontag_main()"),
+                        .operations_total = summary.operations,
+                        .opcode_counts = summary.opcode_counts,
+                        .instructions = summary.instruction_rows};
+                auto launch = internal::explorer::run(model, out);
+                if (launch.status == internal::explorer::launch_status::fallback) {
+                    out << "{}\n"_format(launch.message);
+                    render_asm_artifact_summary_and_body(result, out);
+                }
+            } catch (const std::exception& e) {
+                err << "analysis error: {}\n"_format(e.what());
+            }
+
+            return true;
+        }
+
         static bool process_command(
                 std::string_view line, startup_config& cfg, repl_state& state, line_editor& editor, bool& should_quit) {
             auto cmd = trim_view(line);
@@ -4576,6 +4640,9 @@ examples:
                 return true;
             }
             if (process_delta_command(cmd, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
+            if (process_asm_explore_command(cmd, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
             if (process_analysis_command(cmd, ":asm"sv, analysis_kind::asm_text, cfg, state, std::cout, std::cerr)) {
