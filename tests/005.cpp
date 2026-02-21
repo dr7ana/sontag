@@ -615,6 +615,34 @@ namespace sontag::test {
         CHECK(output.out.find("foo(") != std::string::npos);
     }
 
+    TEST_CASE("005: asm command defaults to __sontag_main when no symbol is provided", "[005][session][asm]") {
+        detail::temp_dir temp{"sontag_asm_default_symbol"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int zeta_default_asm_visibility_probe(int x) { return x + 7; }\n"
+                ":asm\n"
+                ":quit\n");
+
+        CHECK(output.out.find("symbol: ") != std::string::npos);
+        CHECK(output.out.find("__sontag_main") != std::string::npos);
+        CHECK(output.out.find("zeta_default_asm_visibility_probe") == std::string::npos);
+        CHECK(output.out.find("asm:") != std::string::npos);
+        CHECK(output.out.find("operations: ") != std::string::npos);
+        CHECK(output.out.find("  opcode") != std::string::npos);
+        CHECK(output.out.find("assembly:") != std::string::npos);
+        CHECK(output.out.find("  line") != std::string::npos);
+        CHECK(output.out.find("  [0] ") != std::string::npos);
+        CHECK(output.out.find("summary:") == std::string::npos);
+        CHECK(output.out.find("instructions:") == std::string::npos);
+        CHECK(output.err.empty());
+    }
+
     TEST_CASE("005: delta command renders pairwise summary and opcode table info", "[005][session][delta]") {
         detail::temp_dir temp{"sontag_delta_command_table"};
 

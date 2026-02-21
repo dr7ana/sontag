@@ -13,6 +13,7 @@
 #include <glaze/glaze.hpp>
 
 #include <CLI/CLI.hpp>
+#include <cxxabi.h>
 
 extern "C" {
 #include <sys/wait.h>
@@ -2271,7 +2272,7 @@ namespace sontag::cli {
   :reset file <path>
   :mark <name>
   :snapshots
-  :asm [symbol|@last]
+  :asm [symbol|@last] (default: __sontag_main)
   :dump [symbol|@last]
   :ir [symbol|@last]
   :diag [symbol|@last]
@@ -2886,6 +2887,231 @@ examples:
                 summary.append(" ...");
             }
             return summary;
+        }
+
+        struct asm_summary {
+            size_t operations{};
+            std::vector<std::pair<std::string, size_t>> opcode_counts{};
+            std::vector<std::string> instruction_rows{};
+        };
+
+        static void append_opcode_count(
+                std::vector<std::pair<std::string, size_t>>& opcode_counts, std::string_view opcode) {
+            for (auto& entry : opcode_counts) {
+                if (entry.first == opcode) {
+                    ++entry.second;
+                    return;
+                }
+            }
+            opcode_counts.push_back({std::string{opcode}, 1U});
+        }
+
+        static constexpr bool is_symbol_token_char(char c) noexcept {
+            auto lower = utils::char_tolower(c);
+            return (c >= '0' && c <= '9') || (lower >= 'a' && lower <= 'z') || c == '_' || c == '$' || c == '.';
+        }
+
+        static constexpr bool looks_like_itanium_symbol(std::string_view token) noexcept {
+            if (token.size() >= 2U && token[0] == '_' && (token[1] == 'Z' || token[1] == 'z')) {
+                return true;
+            }
+            return token.size() >= 3U && token[0] == '_' && token[1] == '_' && (token[2] == 'Z' || token[2] == 'z');
+        }
+
+        static std::string canonicalize_itanium_symbol(std::string_view token) {
+            std::string canonical{token};
+            if (canonical.size() >= 2U && canonical[0] == '_' && canonical[1] == 'z') {
+                canonical[1] = 'Z';
+                return canonical;
+            }
+            if (canonical.size() >= 3U && canonical[0] == '_' && canonical[1] == '_' && canonical[2] == 'z') {
+                canonical[2] = 'Z';
+            }
+            return canonical;
+        }
+
+        static std::optional<std::string> demangle_itanium_name(const char* name) {
+            auto status = 0;
+            auto* demangled_ptr = abi::__cxa_demangle(name, nullptr, nullptr, &status);
+            if (demangled_ptr == nullptr || status != 0) {
+                std::free(demangled_ptr);
+                return std::nullopt;
+            }
+            std::string demangled{demangled_ptr};
+            std::free(demangled_ptr);
+            return demangled;
+        }
+
+        static std::optional<std::string> demangle_itanium_token(std::string_view token) {
+            if (!looks_like_itanium_symbol(token)) {
+                return std::nullopt;
+            }
+            auto canonical = canonicalize_itanium_symbol(token);
+            if (auto demangled = demangle_itanium_name(canonical.c_str())) {
+                return demangled;
+            }
+            if (!canonical.empty() && canonical.front() == '_') {
+                if (auto demangled = demangle_itanium_name(canonical.c_str() + 1U)) {
+                    return demangled;
+                }
+            }
+            return std::nullopt;
+        }
+
+        static std::string demangle_symbols_in_signature(std::string_view signature) {
+            std::string demangled_signature{};
+            demangled_signature.reserve(signature.size());
+            size_t i = 0U;
+            while (i < signature.size()) {
+                if (signature[i] != '_') {
+                    demangled_signature.push_back(signature[i]);
+                    ++i;
+                    continue;
+                }
+
+                auto end = i + 1U;
+                while (end < signature.size() && is_symbol_token_char(signature[end])) {
+                    ++end;
+                }
+
+                auto token = signature.substr(i, end - i);
+                if (auto demangled = demangle_itanium_token(token)) {
+                    demangled_signature.append(*demangled);
+                }
+                else {
+                    demangled_signature.append(token);
+                }
+                i = end;
+            }
+            return demangled_signature;
+        }
+
+        static std::string format_asm_instruction_text(const opcode::operation_node& operation) {
+            return demangle_symbols_in_signature(operation.signature);
+        }
+
+        static std::optional<std::string> extract_asm_display_symbol(std::string_view asm_text) {
+            static constexpr auto marker = "Begin function "sv;
+            size_t begin = 0U;
+            while (begin <= asm_text.size()) {
+                auto end = asm_text.find('\n', begin);
+                if (end == std::string_view::npos) {
+                    end = asm_text.size();
+                }
+                auto line = trim_view(asm_text.substr(begin, end - begin));
+                if (auto marker_pos = line.find(marker); marker_pos != std::string_view::npos) {
+                    auto symbol = trim_view(line.substr(marker_pos + marker.size()));
+                    auto symbol_end = symbol.find_first_of(" \t\r\n");
+                    if (symbol_end != std::string_view::npos) {
+                        symbol = symbol.substr(0U, symbol_end);
+                    }
+                    if (!symbol.empty()) {
+                        if (auto demangled = demangle_itanium_token(symbol)) {
+                            return demangled;
+                        }
+                        return std::string{symbol};
+                    }
+                }
+                if (end == asm_text.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+            return std::nullopt;
+        }
+
+        static std::string pad_asm_cell(std::string_view text, size_t width) {
+            std::string cell{text};
+            if (cell.size() < width) {
+                cell.append(width - cell.size(), ' ');
+            }
+            return cell;
+        }
+
+        static asm_summary summarize_asm_artifact(std::string_view asm_text) {
+            auto summary = asm_summary{};
+            if (asm_text.empty()) {
+                return summary;
+            }
+
+            auto streams = std::array{opcode::operation_stream_input{.name = "asm", .disassembly = asm_text}};
+            auto mapped = opcode::map_operation_streams(streams);
+            if (mapped.streams.empty()) {
+                return summary;
+            }
+
+            auto& operations = mapped.streams.front().operations;
+            summary.operations = operations.size();
+            summary.opcode_counts.reserve(mapped.opcode_table.size());
+            summary.instruction_rows.reserve(operations.size());
+            for (const auto& operation : operations) {
+                append_opcode_count(summary.opcode_counts, operation.mnemonic);
+                summary.instruction_rows.push_back(format_asm_instruction_text(operation));
+            }
+            return summary;
+        }
+
+        static void render_asm_opcode_table(const asm_summary& summary, std::ostream& os) {
+            constexpr auto diff_indent = "\t"sv;
+            auto opcode_width = std::string_view{"  opcode"}.size();
+            auto count_width = std::string_view{"count"}.size();
+
+            for (const auto& [opcode, count] : summary.opcode_counts) {
+                opcode_width = std::max(opcode_width, opcode.size() + 2U);
+                count_width = std::max(count_width, "{}"_format(count).size());
+            }
+
+            os << diff_indent << pad_asm_cell("  opcode", opcode_width) << " | " << pad_asm_cell("count", count_width)
+               << '\n';
+            os << diff_indent << std::string(opcode_width, '-') << "-+-" << std::string(count_width, '-') << '\n';
+
+            if (summary.opcode_counts.empty()) {
+                os << diff_indent << pad_asm_cell("  <none>", opcode_width) << " | " << pad_asm_cell("0", count_width)
+                   << '\n';
+                return;
+            }
+
+            for (const auto& [opcode, count] : summary.opcode_counts) {
+                os << diff_indent << pad_asm_cell("  {}"_format(opcode), opcode_width) << " | "
+                   << pad_asm_cell("{}"_format(count), count_width) << '\n';
+            }
+        }
+
+        static void render_asm_instruction_rows(const asm_summary& summary, std::ostream& os) {
+            constexpr auto diff_indent = "\t"sv;
+            auto line_width = std::string_view{"  line"}.size();
+            auto instruction_width = std::string_view{"instruction"}.size();
+            for (size_t i = 0U; i < summary.instruction_rows.size(); ++i) {
+                line_width = std::max(line_width, "  [{}]"_format(i).size());
+                instruction_width = std::max(instruction_width, summary.instruction_rows[i].size());
+            }
+
+            os << "assembly:\n";
+            os << diff_indent << pad_asm_cell("  line", line_width) << " | "
+               << pad_asm_cell("instruction", instruction_width) << '\n';
+            os << diff_indent << std::string(line_width, '-') << "-+-" << std::string(instruction_width, '-') << '\n';
+
+            if (summary.instruction_rows.empty()) {
+                os << diff_indent << pad_asm_cell("  <none>", line_width) << " | "
+                   << pad_asm_cell("", instruction_width) << '\n';
+                return;
+            }
+
+            for (size_t i = 0U; i < summary.instruction_rows.size(); ++i) {
+                os << diff_indent << pad_asm_cell("  [{}]"_format(i), line_width) << " | "
+                   << pad_asm_cell(summary.instruction_rows[i], instruction_width) << '\n';
+            }
+        }
+
+        static void render_asm_artifact_summary_and_body(const analysis_result& result, std::ostream& os) {
+            auto summary = summarize_asm_artifact(result.artifact_text);
+            os << "asm:\n";
+            if (auto symbol = extract_asm_display_symbol(result.artifact_text)) {
+                os << "symbol: {}\n"_format(*symbol);
+            }
+            os << "operations: {}\n"_format(summary.operations);
+            render_asm_opcode_table(summary, os);
+            render_asm_instruction_rows(summary, os);
         }
 
         static std::string format_delta_level_summary_line(const delta_level_record& level) {
@@ -4045,6 +4271,11 @@ examples:
                 return;
             }
 
+            if (result.kind == analysis_kind::asm_text) {
+                render_asm_artifact_summary_and_body(result, os);
+                return;
+            }
+
             os << result.artifact_text;
             if (!result.artifact_text.ends_with('\n')) {
                 os << '\n';
@@ -4092,6 +4323,11 @@ examples:
 
             if (result.artifact_text.empty()) {
                 os << "artifact is empty\n";
+                return;
+            }
+
+            if (result.kind == analysis_kind::asm_text) {
+                render_asm_artifact_summary_and_body(result, os);
                 return;
             }
 
@@ -4166,6 +4402,9 @@ examples:
                 auto request = make_analysis_request(cfg, state);
                 if (!arg->empty() && *arg != "@last"sv) {
                     request.symbol = std::string(*arg);
+                }
+                else if (kind == analysis_kind::asm_text && arg->empty()) {
+                    request.symbol = std::string{"__sontag_main"};
                 }
                 auto result = run_analysis(request, kind);
                 render_analysis_result(result, cfg.output, cfg.verbose, out);
