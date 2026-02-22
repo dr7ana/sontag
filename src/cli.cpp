@@ -5072,50 +5072,63 @@ examples:
             }
 
             try {
-                auto request = make_analysis_request(cfg, state);
-                request.symbol = symbol.has_value() ? symbol : std::optional<std::string>{"__sontag_main"};
-                auto asm_result = run_analysis(request, analysis_kind::asm_text);
-                if (!asm_result.success) {
-                    render_analysis_result(asm_result, cfg.output, cfg.verbose, out);
-                    return true;
-                }
+                auto active_symbol = symbol.has_value() ? *symbol : std::string{"__sontag_main"};
+                while (true) {
+                    auto request = make_analysis_request(cfg, state);
+                    request.symbol = active_symbol;
 
-                auto dump_result = run_analysis(request, analysis_kind::dump);
-                auto dump_text = dump_result.success ? std::string_view{dump_result.artifact_text} : std::string_view{};
-                auto summary = summarize_asm_artifact(asm_result.artifact_text, dump_text);
-                std::vector<internal::explorer::instruction_info> row_info{};
-                auto resource_pressure = internal::explorer::resource_pressure_table{};
+                    auto asm_result = run_analysis(request, analysis_kind::asm_text);
+                    if (!asm_result.success) {
+                        render_analysis_result(asm_result, cfg.output, cfg.verbose, out);
+                        return true;
+                    }
 
-                auto mca_result = run_analysis(request, analysis_kind::mca);
-                if (mca_result.success) {
-                    row_info = parse_mca_instruction_info_rows(mca_result.artifact_text);
-                    resource_pressure = parse_mca_resource_pressure_rows(mca_result.artifact_text);
-                }
-                overlay_rows_with_mca_instruction_text(summary.rows, row_info);
+                    auto dump_result = run_analysis(request, analysis_kind::dump);
+                    auto dump_text =
+                            dump_result.success ? std::string_view{dump_result.artifact_text} : std::string_view{};
+                    auto summary = summarize_asm_artifact(asm_result.artifact_text, dump_text);
+                    std::vector<internal::explorer::instruction_info> row_info{};
+                    auto resource_pressure = internal::explorer::resource_pressure_table{};
 
-                auto instruction_definitions = build_instruction_definitions(summary.rows);
-                std::string_view selected_line_color{};
-                std::string_view selected_definition_color{};
-                if (should_use_color(cfg.color)) {
-                    auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
-                    selected_line_color = palette.inserted;
-                    selected_definition_color = palette.modified;
-                }
-                auto model = internal::explorer::model{
-                        .symbol_display =
-                                extract_asm_display_symbol(asm_result.artifact_text).value_or("__sontag_main()"),
-                        .operations_total = summary.operations,
-                        .opcode_counts = summary.opcode_counts,
-                        .rows = summary.rows,
-                        .row_info = std::move(row_info),
-                        .resource_pressure = std::move(resource_pressure),
-                        .instruction_definitions = std::move(instruction_definitions),
-                        .selected_line_color = selected_line_color,
-                        .selected_definition_color = selected_definition_color};
-                auto launch = internal::explorer::run(model, out);
-                if (launch.status == internal::explorer::launch_status::fallback) {
-                    out << "{}\n"_format(launch.message);
-                    render_asm_artifact_summary_and_body(asm_result, dump_text, row_info, out);
+                    auto mca_result = run_analysis(request, analysis_kind::mca);
+                    if (mca_result.success) {
+                        row_info = parse_mca_instruction_info_rows(mca_result.artifact_text);
+                        resource_pressure = parse_mca_resource_pressure_rows(mca_result.artifact_text);
+                    }
+                    overlay_rows_with_mca_instruction_text(summary.rows, row_info);
+
+                    auto instruction_definitions = build_instruction_definitions(summary.rows);
+                    std::string_view selected_line_color{};
+                    std::string_view selected_definition_color{};
+                    std::string_view call_target_color{};
+                    if (should_use_color(cfg.color)) {
+                        auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                        selected_line_color = palette.inserted;
+                        selected_definition_color = palette.modified;
+                        call_target_color = palette.unchanged;
+                    }
+                    auto model = internal::explorer::model{
+                            .symbol_display =
+                                    extract_asm_display_symbol(asm_result.artifact_text).value_or("__sontag_main()"),
+                            .operations_total = summary.operations,
+                            .opcode_counts = summary.opcode_counts,
+                            .rows = summary.rows,
+                            .row_info = row_info,
+                            .resource_pressure = std::move(resource_pressure),
+                            .instruction_definitions = std::move(instruction_definitions),
+                            .selected_line_color = selected_line_color,
+                            .selected_definition_color = selected_definition_color,
+                            .call_target_color = call_target_color};
+                    auto launch = internal::explorer::run(model, out);
+                    if (launch.status == internal::explorer::launch_status::fallback) {
+                        out << "{}\n"_format(launch.message);
+                        render_asm_artifact_summary_and_body(asm_result, dump_text, row_info, out);
+                        return true;
+                    }
+                    if (!launch.next_symbol.has_value() || launch.next_symbol->empty()) {
+                        return true;
+                    }
+                    active_symbol = *launch.next_symbol;
                 }
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());

@@ -39,7 +39,7 @@ namespace sontag::internal {
         std::string history_file{".sontag/history"};
         std::string output{};
         std::string color{};
-        std::string color_scheme{"classic"};
+        std::string color_scheme{"vaporwave"};
         std::optional<std::string> editor{};
         std::string formatter{"clang-format"};
     };

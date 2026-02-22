@@ -374,4 +374,4 @@ Examples:
 Notes:
 - `:inspect` commands emit JSON artifacts under `artifacts/inspect/...` and print a compact terminal summary.
 - `:inspect` commands do not generate rendered image files.
-- `color_scheme` config options currently supported are `classic` (default) and `vaporwave`.
+- `color_scheme` config options currently supported are `classic` and `vaporwave` (default).

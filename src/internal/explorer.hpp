@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sontag/format.hpp"
+#include "sontag/utils.hpp"
 
 extern "C" {
 #include <poll.h>
@@ -57,6 +58,7 @@ namespace sontag::internal::explorer {
         std::vector<std::string> instruction_definitions{};
         std::string_view selected_line_color{};
         std::string_view selected_definition_color{};
+        std::string_view call_target_color{};
     };
 
     enum class launch_status : uint8_t { completed, fallback };
@@ -64,6 +66,7 @@ namespace sontag::internal::explorer {
     struct launch_result {
         launch_status status{launch_status::completed};
         std::string message{};
+        std::optional<std::string> next_symbol{};
     };
 
     namespace detail {
@@ -117,6 +120,7 @@ namespace sontag::internal::explorer {
             none,
             up,
             down,
+            enter,
             quit,
         };
 
@@ -134,6 +138,9 @@ namespace sontag::internal::explorer {
                     return key_event::up;
                 case 'j':
                     return key_event::down;
+                case '\r':
+                case '\n':
+                    return key_event::enter;
                 case 27:
                 {
                     auto second = read_byte_with_timeout(fd, 20);
@@ -292,6 +299,57 @@ namespace sontag::internal::explorer {
             return {mnemonic, operands};
         }
 
+        static bool ascii_iequals(std::string_view lhs, std::string_view rhs) {
+            if (lhs.size() != rhs.size()) {
+                return false;
+            }
+            for (size_t i = 0U; i < lhs.size(); ++i) {
+                if (utils::char_tolower(lhs[i]) != utils::char_tolower(rhs[i])) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static bool is_call_like_mnemonic(std::string_view mnemonic) {
+            return ascii_iequals(mnemonic, "call"sv) || ascii_iequals(mnemonic, "bl"sv);
+        }
+
+        static std::optional<std::string_view> extract_call_target_symbol(std::string_view instruction) {
+            auto [mnemonic, operands] = split_instruction_parts(instruction);
+            if (!is_call_like_mnemonic(mnemonic) || operands.empty()) {
+                return std::nullopt;
+            }
+
+            auto candidate = operands;
+            while (!candidate.empty() && (candidate.front() == ' ' || candidate.front() == '\t')) {
+                candidate.remove_prefix(1U);
+            }
+            while (!candidate.empty() &&
+                   (candidate.back() == ' ' || candidate.back() == '\t' || candidate.back() == ',')) {
+                candidate.remove_suffix(1U);
+            }
+            if (candidate.empty()) {
+                return std::nullopt;
+            }
+
+            if (candidate.front() == '<' || candidate.front() == '*' || candidate.front() == '[' ||
+                candidate[0] == '-') {
+                return std::nullopt;
+            }
+            if (candidate.size() >= 2U && candidate[0] == '0' && (candidate[1] == 'x' || candidate[1] == 'X')) {
+                return std::nullopt;
+            }
+            if (candidate.front() >= '0' && candidate.front() <= '9') {
+                return std::nullopt;
+            }
+            if (candidate.find('[') != std::string_view::npos || candidate.find(']') != std::string_view::npos) {
+                return std::nullopt;
+            }
+
+            return candidate;
+        }
+
         static std::string format_aligned_instruction(std::string_view instruction, size_t mnemonic_width) {
             auto [mnemonic, operands] = split_instruction_parts(instruction);
             if (mnemonic.empty()) {
@@ -317,21 +375,53 @@ namespace sontag::internal::explorer {
                 size_t mnemonic_length,
                 size_t instruction_width,
                 std::string_view mnemonic_color,
+                std::optional<std::pair<size_t, size_t>> call_target_span,
+                std::string_view call_target_color,
                 std::string_view restore_color) {
             std::string out{};
-            out.reserve(aligned_instruction.size() + instruction_width + 32U);
+            out.reserve(aligned_instruction.size() + instruction_width + 96U);
+
+            auto append_colored = [&](std::string_view value, std::string_view color) {
+                if (value.empty()) {
+                    return;
+                }
+                if (color.empty()) {
+                    out.append(value);
+                    return;
+                }
+                out.append(color);
+                out.append(value);
+                out.append("\x1b[0m");
+                if (!restore_color.empty()) {
+                    out.append(restore_color);
+                }
+            };
 
             if (mnemonic_length == 0U || mnemonic_color.empty()) {
                 out.append(aligned_instruction);
             }
             else {
-                out.append(mnemonic_color);
-                out.append(aligned_instruction.substr(0U, mnemonic_length));
-                out.append("\x1b[0m");
-                if (!restore_color.empty()) {
-                    out.append(restore_color);
+                auto safe_mnemonic_len = std::min(mnemonic_length, aligned_instruction.size());
+                append_colored(aligned_instruction.substr(0U, safe_mnemonic_len), mnemonic_color);
+
+                auto tail = aligned_instruction.substr(safe_mnemonic_len);
+                if (!call_target_span.has_value() || call_target_span->first < safe_mnemonic_len ||
+                    call_target_span->first >= aligned_instruction.size()) {
+                    out.append(tail);
                 }
-                out.append(aligned_instruction.substr(mnemonic_length));
+                else {
+                    auto span_start = call_target_span->first;
+                    auto span_len = call_target_span->second;
+                    auto span_end = std::min(span_start + span_len, aligned_instruction.size());
+
+                    if (span_start > safe_mnemonic_len) {
+                        out.append(aligned_instruction.substr(safe_mnemonic_len, span_start - safe_mnemonic_len));
+                    }
+                    append_colored(aligned_instruction.substr(span_start, span_end - span_start), call_target_color);
+                    if (span_end < aligned_instruction.size()) {
+                        out.append(aligned_instruction.substr(span_end));
+                    }
+                }
             }
 
             if (aligned_instruction.size() < instruction_width) {
@@ -499,11 +589,20 @@ namespace sontag::internal::explorer {
                     auto offset = format_offset(data.rows[i].offset);
                     auto aligned_instruction = format_aligned_instruction(data.rows[i].instruction, mnemonic_width);
                     auto [mnemonic, _] = split_instruction_parts(aligned_instruction);
+                    auto call_target_span = std::optional<std::pair<size_t, size_t>>{};
+                    if (auto call_target = extract_call_target_symbol(aligned_instruction); call_target.has_value()) {
+                        if (auto position = aligned_instruction.find(*call_target);
+                            position != std::string_view::npos) {
+                            call_target_span = std::pair<size_t, size_t>{position, call_target->size()};
+                        }
+                    }
                     auto instruction_cell = colorize_instruction_mnemonic(
                             aligned_instruction,
                             mnemonic.size(),
                             instruction_width,
                             data.selected_definition_color,
+                            call_target_span,
+                            data.call_target_color,
                             i == cursor ? data.selected_line_color : std::string_view{});
                     auto row_prefix = "{} | {} | {} | {}"_format(
                             pad_cell("  [{}]"_format(i), line_width),
@@ -540,7 +639,7 @@ namespace sontag::internal::explorer {
 
             auto total = data.rows.size();
             auto position = total == 0U ? 0U : cursor + 1U;
-            append_line("controls: up/down j/k q | {}/{}"_format(position, total));
+            append_line("controls: up/down j/k enter q | {}/{}"_format(position, total));
             append_line("");
 
             auto info = instruction_info{};
@@ -656,6 +755,14 @@ namespace sontag::internal::explorer {
                 case detail::key_event::down:
                     if (cursor + 1U < data.rows.size()) {
                         ++cursor;
+                    }
+                    break;
+                case detail::key_event::enter:
+                    if (cursor < data.rows.size()) {
+                        if (auto next = detail::extract_call_target_symbol(data.rows[cursor].instruction);
+                            next.has_value()) {
+                            return launch_result{.status = launch_status::completed, .next_symbol = std::string{*next}};
+                        }
                     }
                     break;
                 case detail::key_event::quit:

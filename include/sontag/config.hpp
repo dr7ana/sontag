@@ -264,7 +264,7 @@ namespace sontag {
         std::filesystem::path formatter{"clang-format"};
         bool banner_enabled{true};
         color_mode color{color_mode::automatic};
-        color_scheme delta_color_scheme{color_scheme::classic};
+        color_scheme delta_color_scheme{color_scheme::vaporwave};
         bool pager_enabled{false};
         output_mode output{output_mode::table};
         bool quiet{false};

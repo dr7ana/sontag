@@ -31,7 +31,7 @@ namespace sontag::test { namespace detail {
         std::string cache_dir{};
         std::string output{};
         std::string color{};
-        std::string color_scheme{"classic"};
+        std::string color_scheme{"vaporwave"};
     };
 
     struct persisted_snapshots {

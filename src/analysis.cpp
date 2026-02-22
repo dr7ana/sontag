@@ -1615,7 +1615,7 @@ namespace sontag {
             std::string lower{};
             lower.reserve(value.size());
             for (auto c : value) {
-                lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                lower.push_back(utils::char_tolower(c));
             }
             return lower;
         }
