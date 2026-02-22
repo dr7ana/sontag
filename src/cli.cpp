@@ -361,18 +361,6 @@ namespace sontag::cli {
             return effective_cpu_value(cfg);
         }
 
-        static constexpr bool analysis_uses_mca_backend(analysis_kind kind) noexcept {
-            return kind == analysis_kind::mca || kind == analysis_kind::inspect_mca_summary ||
-                   kind == analysis_kind::inspect_mca_heatmap;
-        }
-
-        static std::string_view command_display_name(std::string_view command_name) noexcept {
-            if (command_name.starts_with(':')) {
-                return command_name.substr(1U);
-            }
-            return command_name;
-        }
-
         static std::string effective_editor_value(const startup_config& cfg) {
             if (auto editor = resolve_editor_executable(cfg)) {
                 return *editor;
@@ -4496,15 +4484,6 @@ examples:
                 return false;
             }
 
-            if constexpr (!internal::platform::mca_supported) {
-                if (analysis_uses_mca_backend(kind)) {
-                    out << "{}: unavailable\n"_format(command_display_name(command_name));
-                    out << "llvm-mca is temporarily disabled on macOS arm64 due to a known crash while parsing "
-                           "Darwin assembly directives.\n";
-                    return true;
-                }
-            }
-
             if (state.cells.empty()) {
                 err << "no stored cells available for analysis\n";
                 return true;
@@ -4516,7 +4495,8 @@ examples:
                     request.symbol = std::string(*arg);
                 }
                 else if (
-                        (kind == analysis_kind::asm_text || kind == analysis_kind::dump || kind == analysis_kind::ir) &&
+                        (kind == analysis_kind::asm_text || kind == analysis_kind::dump || kind == analysis_kind::ir ||
+                         kind == analysis_kind::mca) &&
                         arg->empty()) {
                     request.symbol = std::string{"__sontag_main"};
                 }
@@ -4874,7 +4854,13 @@ examples:
         bool should_quit = false;
 
         if (cfg.banner_enabled) {
-            std::cout << banner << '\n';
+            if (detail::should_use_color(cfg.color)) {
+                auto palette = detail::resolve_delta_color_palette(cfg.delta_color_scheme);
+                std::cout << palette.inserted << banner << "\x1b[0m\n";
+            }
+            else {
+                std::cout << banner << '\n';
+            }
         }
         if (resumed_session) {
             std::cout << "resumed session from: {}\n"_format(*resumed_session);
@@ -4884,7 +4870,19 @@ examples:
         std::cout << "type :help for commands\n";
 
         while (!should_quit) {
-            std::string_view prompt = pending_cell.empty() ? "sontag > "sv : "...> "sv;
+            std::string prompt{};
+            if (pending_cell.empty()) {
+                if (detail::should_use_color(cfg.color)) {
+                    auto palette = detail::resolve_delta_color_palette(cfg.delta_color_scheme);
+                    prompt = "{}sontag > \x1b[0m"_format(palette.inserted);
+                }
+                else {
+                    prompt = "sontag > ";
+                }
+            }
+            else {
+                prompt = "...> ";
+            }
             auto next_line = editor.read_line(prompt);
             if (!next_line) {
                 if (!pending_cell.empty()) {

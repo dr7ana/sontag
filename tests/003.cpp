@@ -240,7 +240,9 @@ namespace sontag::test {
         CHECK(args.back().ends_with(".o"));
     }
 
-    TEST_CASE("003: dump analysis uses disassemble-symbols when symbol is provided", "[003][analysis][dump]") {
+    TEST_CASE(
+            "003: dump analysis keeps full disassembly args when symbol is provided (post-extract path)",
+            "[003][analysis][dump]") {
         detail::temp_dir temp{"sontag_m1_dump_symbol"};
 
         auto args_path = temp.path / "objdump.args.txt";
@@ -268,8 +270,8 @@ namespace sontag::test {
         CHECK(detail::has_exact_arg(args, "--demangle"));
         detail::check_default_dump_arch_args(args);
         CHECK(detail::has_exact_arg(args, "--symbolize-operands"));
-        CHECK_FALSE(detail::has_exact_arg(args, "--show-all-symbols"));
-        CHECK(detail::has_prefixed_arg(args, "--disassemble-symbols="));
+        CHECK(detail::has_exact_arg(args, "--show-all-symbols"));
+        CHECK_FALSE(detail::has_prefixed_arg(args, "--disassemble-symbols="));
     }
 
     TEST_CASE("003: dump analysis uses no-aliases for explicit aarch64 target", "[003][analysis][dump][aarch64]") {

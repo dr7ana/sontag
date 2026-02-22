@@ -717,9 +717,11 @@ namespace sontag {
                 case analysis_kind::asm_text:
                     base_args.emplace_back(arg_tokens::compile_to_text);
                     base_args.emplace_back(arg_tokens::verbose_asm);
+#if SONTAG_ARCH_X86_64
                     if (request.asm_syntax == "intel") {
                         base_args.emplace_back(arg_tokens::intel_syntax);
                     }
+#endif
                     base_args.push_back(source_path.string());
                     base_args.emplace_back(arg_tokens::output_path);
                     base_args.push_back(artifact_path.string());
@@ -1567,22 +1569,45 @@ namespace sontag {
             return extracted.str();
         }
 
-        static std::string prepare_mca_symbol_input(std::string_view extracted_asm, std::string_view asm_syntax) {
+        static constexpr bool should_strip_mca_line(std::string_view trimmed_line) noexcept {
+#if SONTAG_PLATFORM_MACOS && SONTAG_ARCH_ARM64
+            return trimmed_line == ".subsections_via_symbols"sv;
+#else
+            static_cast<void>(trimmed_line);
+            return false;
+#endif
+        }
+
+        static std::string sanitize_mca_input(std::string_view asm_text, bool strip_cfi_directives) {
+            auto lines = split_lines(asm_text);
+            std::string sanitized{};
+            sanitized.reserve(asm_text.size());
+            for (const auto& line : lines) {
+                auto trimmed = trim_ascii(line);
+                if (strip_cfi_directives && trimmed.starts_with(".cfi_"sv)) {
+                    continue;
+                }
+                if (should_strip_mca_line(trimmed)) {
+                    continue;
+                }
+                sanitized.append(line);
+                sanitized.push_back('\n');
+            }
+            return sanitized;
+        }
+
+        static std::string prepare_mca_symbol_input(
+                std::string_view extracted_asm, [[maybe_unused]] std::string_view asm_syntax) {
+            auto sanitized_input = sanitize_mca_input(extracted_asm, true);
             std::string prepared{};
-            prepared.reserve(extracted_asm.size() + 64U);
+            prepared.reserve(sanitized_input.size() + 64U);
             prepared.append(".text\n");
+#if SONTAG_ARCH_X86_64
             if (asm_syntax == "intel"sv) {
                 prepared.append(".intel_syntax noprefix\n");
             }
-            auto lines = split_lines(extracted_asm);
-            for (const auto& line : lines) {
-                auto trimmed = trim_ascii(line);
-                if (trimmed.starts_with(".cfi_"sv)) {
-                    continue;
-                }
-                prepared.append(line);
-                prepared.push_back('\n');
-            }
+#endif
+            prepared.append(sanitized_input);
             return prepared;
         }
 
@@ -2660,20 +2685,25 @@ namespace sontag {
                 return result;
             }
 
+            auto asm_text = detail::read_text_file(asm_path);
+
             if (request.symbol) {
                 auto resolved = detail::resolve_symbol_name(request, *request.symbol);
                 if (!resolved) {
                     throw std::runtime_error("unable to resolve symbol: {}"_format(*request.symbol));
                 }
 
-                auto asm_text = detail::read_text_file(asm_path);
                 auto extracted = detail::extract_asm_for_symbol(asm_text, *resolved);
                 if (extracted.empty()) {
                     throw std::runtime_error("symbol not found in artifact: {}"_format(*resolved));
                 }
-                auto prepared_input = detail::prepare_mca_symbol_input(extracted, request.asm_syntax);
-                detail::write_text_file(asm_path, prepared_input);
+                asm_text = detail::prepare_mca_symbol_input(extracted, request.asm_syntax);
             }
+            else {
+                asm_text = detail::sanitize_mca_input(asm_text, false);
+            }
+
+            detail::write_text_file(asm_path, asm_text);
 
             auto mca_exit = 127;
             std::string stdout_text{};
@@ -2759,7 +2789,7 @@ namespace sontag {
             auto objdump_candidates = detail::build_objdump_executable_candidates(request, kind_dir, id);
 
             for (const auto& candidate : objdump_candidates) {
-                objdump_command = detail::build_objdump_command(request, object_path, candidate, resolved_symbol);
+                objdump_command = detail::build_objdump_command(request, object_path, candidate, std::nullopt);
                 objdump_exit = detail::run_process(objdump_command, stdout_path, stderr_path);
                 stdout_text = detail::read_text_file(stdout_path);
                 stderr_text = detail::read_text_file(stderr_path);
@@ -2779,6 +2809,14 @@ namespace sontag {
                             request.objdump_path.string(), detail::join_with_separator(attempted, ", "sv));
                 }
                 detail::write_text_file(stderr_path, stderr_text);
+            }
+
+            if (resolved_symbol) {
+                auto display_symbol = detail::demangle_symbol_name(*resolved_symbol);
+                auto extracted = detail::extract_objdump_for_symbol(stdout_text, *resolved_symbol, display_symbol);
+                if (!extracted.empty()) {
+                    stdout_text = std::move(extracted);
+                }
             }
 
             detail::write_text_file(artifact_path, stdout_text);

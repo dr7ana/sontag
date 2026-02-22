@@ -9,7 +9,7 @@ namespace sontag::internal::platform {
     inline constexpr bool is_macos = SONTAG_PLATFORM_MACOS != 0;
     inline constexpr bool is_x86_64 = SONTAG_ARCH_X86_64 != 0;
     inline constexpr bool is_arm64 = SONTAG_ARCH_ARM64 != 0;
-    inline constexpr bool mca_supported = !(is_macos && is_arm64);
+    inline constexpr bool mca_supported = true;
 
     inline constexpr int clang_version_major = SONTAG_CLANG_VERSION_MAJOR;
 
