@@ -9,6 +9,8 @@
 
 a C++ interpreter, assembly explorer, analysis-focused code execution harness
 
+![sontag demo](docs/sontag.gif)
+
 ## Requirements
 
 - Linux or macOS
