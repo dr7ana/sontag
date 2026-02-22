@@ -15,10 +15,10 @@ namespace sontag::cli { namespace detail {
 
     using namespace std::string_view_literals;
 
-    static std::array<const char*, 23> command_completions{
-            ":help",   ":clear", ":show",    ":symbols",   ":decl", ":declfile", ":file", ":openfile",
-            ":config", ":reset", ":mark",    ":snapshots", ":asm",  ":dump",     ":ir",   ":diag",
-            ":mca",    ":delta", ":inspect", ":graph",     ":quit", ":q",        nullptr};
+    static std::array<const char*, 22> command_completions{
+            ":help",   ":clear",   ":show",  ":symbols",   ":decl", ":declfile", ":file", ":openfile",
+            ":config", ":reset",   ":mark",  ":snapshots", ":asm",  ":ir",       ":diag", ":mca",
+            ":delta",  ":inspect", ":graph", ":quit",      ":q",    nullptr};
 
     static std::array<const char*, 2> clear_completions{"last", nullptr};
     static std::array<const char*, 4> reset_completions{"last", "snapshots", "file", nullptr};
@@ -297,8 +297,7 @@ namespace sontag::cli { namespace detail {
             ic_complete_word(cenv, prefix, complete_inspect_args, nullptr);
             return;
         }
-        if (command == ":asm"sv || command == ":dump"sv || command == ":ir"sv || command == ":diag"sv ||
-            command == ":mca"sv) {
+        if (command == ":asm"sv || command == ":ir"sv || command == ":diag"sv || command == ":mca"sv) {
             ic_complete_word(cenv, prefix, complete_analysis_args, nullptr);
             return;
         }

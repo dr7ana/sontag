@@ -66,7 +66,6 @@ values[1] = value * 2;
 :show all
 :symbols
 :config build.opt=O0
-:dump
 :asm
 :ir
 :mca
@@ -129,7 +128,6 @@ sontag >
 - generated translation unit preview (`:show all`)
 - symbol listing from compiled output (`:symbols`)
 - assembly output and interactive assembly explorer (`:asm`, `:asm explore`)
-- object disassembly via `llvm-objdump` (`:dump`)
 - LLVM IR output (`:ir`)
 - compiler diagnostics output (`:diag`)
 - microarchitecture analysis via `llvm-mca` (`:mca`)
@@ -200,7 +198,6 @@ sontag >
 - `:asm explore [symbol|@last]` launches an interactive assembly explorer (TTY-only) with up/down navigation (`Up`/`Down`/`j`/`k`) and quit (`q`).
 - in `:asm explore`, the selected row’s instruction uses the scheme `inserted` color and the selected row’s right-side instruction definition uses the scheme `modified` color.
 - instruction definitions shown in `:asm explore` are resolved from internal ARM/x86 instruction-definition tables.
-- `:dump [symbol|@last]` compiles the current snapshot to an object file, disassembles it, and prints instruction-level object disassembly (default symbol: `__sontag_main`).
 - `:ir [symbol|@last]` compiles the current snapshot with LLVM IR emission and prints a symbol-scoped IR definition (default symbol: `__sontag_main`).
 - `:diag [symbol|@last]` runs compile diagnostics on the current snapshot and prints compiler errors/warnings (optionally filtered by symbol).
 - `:mca [symbol|@last]` compiles to assembly, runs microarchitecture analysis, and prints throughput/latency/resource-pressure analysis text (default symbol: `__sontag_main`).

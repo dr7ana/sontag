@@ -25,11 +25,35 @@ namespace sontag::internal::explorer {
     using namespace std::string_view_literals;
     using namespace sontag::literals;
 
+    struct asm_row {
+        std::string offset{};
+        std::string encodings{};
+        std::string instruction{};
+    };
+
+    struct instruction_info {
+        std::string uops{};
+        std::string latency{};
+        std::string rthroughput{};
+        bool may_load{false};
+        bool may_store{false};
+        bool has_side_effects{false};
+        std::string encoding_size{};
+        std::string instruction{};
+    };
+
+    struct resource_pressure_table {
+        std::vector<std::string> resources{};
+        std::vector<std::vector<std::string>> row_values{};
+    };
+
     struct model {
         std::string symbol_display{};
         size_t operations_total{};
         std::vector<std::pair<std::string, size_t>> opcode_counts{};
-        std::vector<std::string> instructions{};
+        std::vector<asm_row> rows{};
+        std::vector<instruction_info> row_info{};
+        resource_pressure_table resource_pressure{};
         std::vector<std::string> instruction_definitions{};
         std::string_view selected_line_color{};
         std::string_view selected_definition_color{};
@@ -215,12 +239,105 @@ namespace sontag::internal::explorer {
             bool active{false};
         };
 
-        static size_t calculate_rows_visible(size_t total_rows, size_t opcode_rows) {
-            auto fixed_rows = 9U + opcode_rows;
+        static size_t calculate_rows_visible(size_t total_rows, size_t opcode_rows, bool has_resource_pressure) {
+            // Fixed rows:
+            // 3 (title/symbol/operations) + 2 (opcode header) + opcode rows +
+            // 1 (blank before pressure) + pressure section +
+            // 1 (blank before assembly) + 3 (assembly heading/header/separator) +
+            // 1 (controls) + 1 (blank before info) +
+            // 3 (info heading/header/separator) + 7 (info body)
+            //
+            // pressure section:
+            // - with data: 4 rows (heading/header/separator/values)
+            // - no data:  2 rows (heading/"unavailable")
+            auto fixed_rows = (has_resource_pressure ? 26U : 24U) + opcode_rows;
             if (total_rows <= fixed_rows) {
                 return 1U;
             }
             return total_rows - fixed_rows;
+        }
+
+        static std::string format_offset(std::string_view value) {
+            if (value.empty()) {
+                return {};
+            }
+            if (value.starts_with("0x"sv) || value.starts_with("0X"sv)) {
+                return std::string{value};
+            }
+            return "0x{}"_format(value);
+        }
+
+        static std::pair<std::string_view, std::string_view> split_instruction_parts(std::string_view instruction) {
+            auto trimmed = instruction;
+            while (!trimmed.empty() && (trimmed.front() == ' ' || trimmed.front() == '\t')) {
+                trimmed.remove_prefix(1U);
+            }
+            while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '\t')) {
+                trimmed.remove_suffix(1U);
+            }
+            if (trimmed.empty()) {
+                return {};
+            }
+
+            auto end = size_t{0U};
+            while (end < trimmed.size() && trimmed[end] != ' ' && trimmed[end] != '\t') {
+                ++end;
+            }
+
+            auto mnemonic = trimmed.substr(0U, end);
+            auto operands = end < trimmed.size() ? trimmed.substr(end) : std::string_view{};
+            while (!operands.empty() && (operands.front() == ' ' || operands.front() == '\t')) {
+                operands.remove_prefix(1U);
+            }
+            return {mnemonic, operands};
+        }
+
+        static std::string format_aligned_instruction(std::string_view instruction, size_t mnemonic_width) {
+            auto [mnemonic, operands] = split_instruction_parts(instruction);
+            if (mnemonic.empty()) {
+                return std::string{instruction};
+            }
+
+            std::string formatted{};
+            formatted.reserve(
+                    instruction.size() + (mnemonic_width > mnemonic.size() ? mnemonic_width - mnemonic.size() : 0U));
+            formatted.append(mnemonic);
+            if (mnemonic.size() < mnemonic_width) {
+                formatted.append(mnemonic_width - mnemonic.size(), ' ');
+            }
+            if (!operands.empty()) {
+                formatted.push_back(' ');
+                formatted.append(operands);
+            }
+            return formatted;
+        }
+
+        static std::string colorize_instruction_mnemonic(
+                std::string_view aligned_instruction,
+                size_t mnemonic_length,
+                size_t instruction_width,
+                std::string_view mnemonic_color,
+                std::string_view restore_color) {
+            std::string out{};
+            out.reserve(aligned_instruction.size() + instruction_width + 32U);
+
+            if (mnemonic_length == 0U || mnemonic_color.empty()) {
+                out.append(aligned_instruction);
+            }
+            else {
+                out.append(mnemonic_color);
+                out.append(aligned_instruction.substr(0U, mnemonic_length));
+                out.append("\x1b[0m");
+                if (!restore_color.empty()) {
+                    out.append(restore_color);
+                }
+                out.append(aligned_instruction.substr(mnemonic_length));
+            }
+
+            if (aligned_instruction.size() < instruction_width) {
+                out.append(instruction_width - aligned_instruction.size(), ' ');
+            }
+            return out;
         }
 
         static void clamp_viewport(size_t instruction_count, size_t rows_visible, size_t& cursor, size_t& top_row) {
@@ -281,83 +398,139 @@ namespace sontag::internal::explorer {
                 }
             }
 
+            append_line("");
+            append_line("resource pressure:");
+            if (data.resource_pressure.resources.empty()) {
+                append_line("  unavailable");
+            }
+            else {
+                auto column_widths = std::vector<size_t>{};
+                column_widths.reserve(data.resource_pressure.resources.size());
+                for (size_t i = 0U; i < data.resource_pressure.resources.size(); ++i) {
+                    auto width = data.resource_pressure.resources[i].size();
+                    for (const auto& row_values : data.resource_pressure.row_values) {
+                        auto value = i < row_values.size() ? std::string_view{row_values[i]} : "na"sv;
+                        width = std::max(width, value.size());
+                    }
+                    column_widths.push_back(width);
+                }
+
+                std::string header_row{"  "};
+                std::string separator_row{};
+                std::string value_row{"  "};
+                auto append_separator = [&separator_row](size_t width) {
+                    if (!separator_row.empty()) {
+                        separator_row.append("-+-");
+                    }
+                    separator_row.append(width, '-');
+                };
+                auto append_cell = [](std::string& row, std::string_view value, size_t width) {
+                    if (row.size() > 2U) {
+                        row.append(" | ");
+                    }
+                    row.append(pad_cell(value, width));
+                };
+
+                for (size_t i = 0U; i < data.resource_pressure.resources.size(); ++i) {
+                    append_cell(header_row, data.resource_pressure.resources[i], column_widths[i]);
+                    append_separator(column_widths[i]);
+                    auto has_value = cursor < data.resource_pressure.row_values.size() &&
+                                     i < data.resource_pressure.row_values[cursor].size();
+                    auto value = has_value ? std::string_view{data.resource_pressure.row_values[cursor][i]} : "na"sv;
+                    append_cell(value_row, value, column_widths[i]);
+                }
+
+                append_line(header_row);
+                append_line("  {}"_format(separator_row));
+                append_line(value_row);
+            }
+
             auto line_width = std::string_view{"  line"}.size();
+            auto offset_width = std::string_view{"offset"}.size();
+            auto encoding_width = std::string_view{"encodings"}.size();
             auto instruction_width = std::string_view{"instruction"}.size();
             auto definition_width = std::string_view{"definition"}.size();
-            for (size_t i = 0U; i < data.instructions.size(); ++i) {
+            auto mnemonic_width = size_t{0U};
+            for (size_t i = 0U; i < data.rows.size(); ++i) {
+                auto [mnemonic, _] = split_instruction_parts(data.rows[i].instruction);
+                mnemonic_width = std::max(mnemonic_width, mnemonic.size());
+            }
+            for (size_t i = 0U; i < data.rows.size(); ++i) {
+                auto aligned_instruction = format_aligned_instruction(data.rows[i].instruction, mnemonic_width);
                 line_width = std::max(line_width, "  [{}]"_format(i).size());
-                instruction_width = std::max(instruction_width, data.instructions[i].size());
+                offset_width = std::max(offset_width, format_offset(data.rows[i].offset).size());
+                encoding_width = std::max(encoding_width, data.rows[i].encodings.size());
+                instruction_width = std::max(instruction_width, aligned_instruction.size());
                 if (i < data.instruction_definitions.size()) {
                     definition_width = std::max(definition_width, data.instruction_definitions[i].size());
                 }
             }
 
+            append_line("");
             append_line("assembly:");
             append_line(
-                    "{} | {} | {}"_format(
+                    "{} | {} | {} | {} | {}"_format(
                             pad_cell("  line", line_width),
+                            pad_cell("offset", offset_width),
+                            pad_cell("encodings", encoding_width),
                             pad_cell("instruction", instruction_width),
                             pad_cell("definition", definition_width)));
             append_line(
-                    "{}-+-{}-+-{}"_format(
+                    "{}-+-{}-+-{}-+-{}-+-{}"_format(
                             std::string(line_width, '-'),
+                            std::string(offset_width, '-'),
+                            std::string(encoding_width, '-'),
                             std::string(instruction_width, '-'),
                             std::string(definition_width, '-')));
 
-            if (data.instructions.empty()) {
+            if (data.rows.empty()) {
                 append_line(
-                        "{} | {} | {}"_format(
+                        "{} | {} | {} | {} | {}"_format(
                                 pad_cell("  <none>", line_width),
+                                pad_cell("", offset_width),
+                                pad_cell("", encoding_width),
                                 pad_cell("", instruction_width),
                                 pad_cell("", definition_width)));
             }
             else {
-                auto start = std::min(top_row, data.instructions.size() - 1U);
-                auto end = std::min(data.instructions.size(), start + rows_visible);
+                auto start = std::min(top_row, data.rows.size() - 1U);
+                auto end = std::min(data.rows.size(), start + rows_visible);
                 for (size_t i = start; i < end; ++i) {
-                    auto row_prefix = "{} | {}"_format(
+                    auto offset = format_offset(data.rows[i].offset);
+                    auto aligned_instruction = format_aligned_instruction(data.rows[i].instruction, mnemonic_width);
+                    auto [mnemonic, _] = split_instruction_parts(aligned_instruction);
+                    auto instruction_cell = colorize_instruction_mnemonic(
+                            aligned_instruction,
+                            mnemonic.size(),
+                            instruction_width,
+                            data.selected_definition_color,
+                            i == cursor ? data.selected_line_color : std::string_view{});
+                    auto row_prefix = "{} | {} | {} | {}"_format(
                             pad_cell("  [{}]"_format(i), line_width),
-                            pad_cell(data.instructions[i], instruction_width));
+                            pad_cell(offset, offset_width),
+                            pad_cell(data.rows[i].encodings, encoding_width),
+                            instruction_cell);
                     auto selected_definition = std::string_view{};
                     if (i == cursor && i < data.instruction_definitions.size()) {
                         selected_definition = data.instruction_definitions[i];
                     }
-                    auto row = "{} | {}"_format(row_prefix, pad_cell(selected_definition, definition_width));
                     if (i == cursor) {
-                        auto clipped = clip_to_width(row, terminal_cols);
-                        auto split_at = row_prefix.size();
-                        if (clipped.size() <= split_at) {
-                            if (data.selected_line_color.empty()) {
-                                frame.append("\x1b[7m");
-                            }
-                            else {
-                                frame.append(data.selected_line_color);
-                            }
-                            frame.append(clipped);
-                            frame.append("\x1b[0m\n");
+                        if (data.selected_line_color.empty()) {
+                            frame.append("\x1b[7m");
                         }
                         else {
-                            auto left = clipped.substr(0U, split_at);
-                            auto right = clipped.substr(split_at);
-                            if (data.selected_line_color.empty()) {
-                                frame.append("\x1b[7m");
-                            }
-                            else {
-                                frame.append(data.selected_line_color);
-                            }
-                            frame.append(left);
-                            frame.append("\x1b[0m");
-                            if (!right.empty()) {
-                                if (!data.selected_definition_color.empty()) {
-                                    frame.append(data.selected_definition_color);
-                                }
-                                frame.append(right);
-                                if (!data.selected_definition_color.empty()) {
-                                    frame.append("\x1b[0m");
-                                }
-                            }
-                            frame.push_back('\n');
+                            frame.append(data.selected_line_color);
                         }
+                        frame.append("{} | "_format(row_prefix));
+                        frame.append("\x1b[0m");
+                        if (!data.selected_definition_color.empty()) {
+                            frame.append(data.selected_definition_color);
+                        }
+                        frame.append(pad_cell(selected_definition, definition_width));
+                        if (!data.selected_definition_color.empty()) {
+                            frame.append("\x1b[0m");
+                        }
+                        frame.push_back('\n');
                     }
                     else {
                         append_line("{} | {}"_format(row_prefix, pad_cell("", definition_width)));
@@ -365,9 +538,70 @@ namespace sontag::internal::explorer {
                 }
             }
 
-            auto total = data.instructions.size();
+            auto total = data.rows.size();
             auto position = total == 0U ? 0U : cursor + 1U;
             append_line("controls: up/down j/k q | {}/{}"_format(position, total));
+            append_line("");
+
+            auto info = instruction_info{};
+            auto has_info = cursor < data.row_info.size();
+            if (has_info) {
+                info = data.row_info[cursor];
+            }
+
+            auto field_width = std::string_view{"  field"}.size();
+            field_width = std::max(field_width, std::string_view{"  #uOps"}.size());
+            field_width = std::max(field_width, std::string_view{"  Latency"}.size());
+            field_width = std::max(field_width, std::string_view{"  RThroughput"}.size());
+            field_width = std::max(field_width, std::string_view{"  MayLoad"}.size());
+            field_width = std::max(field_width, std::string_view{"  MayStore"}.size());
+            field_width = std::max(field_width, std::string_view{"  HasSideEffects"}.size());
+            field_width = std::max(field_width, std::string_view{"  EncodingSize"}.size());
+
+            auto value_width = std::string_view{"value"}.size();
+            auto load_value = std::string_view{has_info ? (info.may_load ? "true" : "false") : "na"};
+            auto store_value = std::string_view{has_info ? (info.may_store ? "true" : "false") : "na"};
+            auto side_effects_value = std::string_view{has_info ? (info.has_side_effects ? "true" : "false") : "na"};
+            value_width = std::max(value_width, has_info ? info.uops.size() : std::string_view{"na"}.size());
+            value_width = std::max(value_width, has_info ? info.latency.size() : std::string_view{"na"}.size());
+            value_width = std::max(value_width, has_info ? info.rthroughput.size() : std::string_view{"na"}.size());
+            value_width = std::max(value_width, load_value.size());
+            value_width = std::max(value_width, store_value.size());
+            value_width = std::max(value_width, side_effects_value.size());
+            value_width = std::max(value_width, has_info ? info.encoding_size.size() : std::string_view{"na"}.size());
+
+            append_line("instruction info:");
+            append_line("{} | {}"_format(pad_cell("  field", field_width), pad_cell("value", value_width)));
+            append_line("{}-+-{}"_format(std::string(field_width, '-'), std::string(value_width, '-')));
+            append_line(
+                    "{} | {}"_format(
+                            pad_cell("  #uOps", field_width),
+                            pad_cell(
+                                    has_info && !info.uops.empty() ? std::string_view{info.uops} : "na", value_width)));
+            append_line(
+                    "{} | {}"_format(
+                            pad_cell("  Latency", field_width),
+                            pad_cell(
+                                    has_info && !info.latency.empty() ? std::string_view{info.latency} : "na",
+                                    value_width)));
+            append_line(
+                    "{} | {}"_format(
+                            pad_cell("  RThroughput", field_width),
+                            pad_cell(
+                                    has_info && !info.rthroughput.empty() ? std::string_view{info.rthroughput} : "na",
+                                    value_width)));
+            append_line("{} | {}"_format(pad_cell("  MayLoad", field_width), pad_cell(load_value, value_width)));
+            append_line("{} | {}"_format(pad_cell("  MayStore", field_width), pad_cell(store_value, value_width)));
+            append_line(
+                    "{} | {}"_format(
+                            pad_cell("  HasSideEffects", field_width), pad_cell(side_effects_value, value_width)));
+            append_line(
+                    "{} | {}"_format(
+                            pad_cell("  EncodingSize", field_width),
+                            pad_cell(
+                                    has_info && !info.encoding_size.empty() ? std::string_view{info.encoding_size}
+                                                                            : "na",
+                                    value_width)));
             return frame;
         }
 
@@ -380,7 +614,7 @@ namespace sontag::internal::explorer {
                     .message = "asm explore: requires an interactive tty, falling back to :asm output"};
         }
 
-        if (data.instructions.empty()) {
+        if (data.rows.empty()) {
             return launch_result{
                     .status = launch_status::fallback,
                     .message = "asm explore: no assembly instructions available, falling back to :asm output"};
@@ -403,9 +637,11 @@ namespace sontag::internal::explorer {
 
         while (running) {
             auto dims = detail::query_terminal_dims();
-            auto rows_visible =
-                    detail::calculate_rows_visible(dims.rows, std::max<size_t>(1U, data.opcode_counts.size()));
-            detail::clamp_viewport(data.instructions.size(), rows_visible, cursor, top_row);
+            auto rows_visible = detail::calculate_rows_visible(
+                    dims.rows,
+                    std::max<size_t>(1U, data.opcode_counts.size()),
+                    !data.resource_pressure.resources.empty());
+            detail::clamp_viewport(data.rows.size(), rows_visible, cursor, top_row);
 
             out << detail::render_frame(data, cursor, top_row, rows_visible, dims.cols);
             out.flush();
@@ -418,7 +654,7 @@ namespace sontag::internal::explorer {
                     }
                     break;
                 case detail::key_event::down:
-                    if (cursor + 1U < data.instructions.size()) {
+                    if (cursor + 1U < data.rows.size()) {
                         ++cursor;
                     }
                     break;

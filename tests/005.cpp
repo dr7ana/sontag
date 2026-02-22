@@ -643,25 +643,6 @@ namespace sontag::test {
         CHECK(output.err.empty());
     }
 
-    TEST_CASE("005: dump command defaults to __sontag_main when no symbol is provided", "[005][session][dump]") {
-        detail::temp_dir temp{"sontag_dump_default_symbol"};
-
-        startup_config cfg{};
-        cfg.cache_dir = temp.path / "cache";
-        cfg.history_enabled = false;
-        cfg.banner_enabled = false;
-
-        auto output = detail::run_repl_script_capture_output(
-                cfg,
-                ":decl int zeta_default_dump_visibility_probe(int x) { return x + 13; }\n"
-                ":dump\n"
-                ":quit\n");
-
-        CHECK(output.out.find("dump: success") != std::string::npos);
-        CHECK(output.out.find("zeta_default_dump_visibility_probe") == std::string::npos);
-        CHECK(output.err.empty());
-    }
-
     TEST_CASE("005: ir command defaults to __sontag_main when no symbol is provided", "[005][session][ir]") {
         detail::temp_dir temp{"sontag_ir_default_symbol"};
 

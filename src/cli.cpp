@@ -2264,7 +2264,6 @@ namespace sontag::cli {
   :snapshots
   :asm [symbol|@last] (default: __sontag_main)
   :asm explore [symbol|@last]
-  :dump [symbol|@last]
   :ir [symbol|@last]
   :diag [symbol|@last]
   :mca [symbol|@last]
@@ -2293,7 +2292,6 @@ examples:
   :mark baseline
   :asm
   :asm explore
-  :dump
   :delta
   :delta spectrum
   :delta O3
@@ -2884,7 +2882,7 @@ examples:
         struct asm_summary {
             size_t operations{};
             std::vector<std::pair<std::string, size_t>> opcode_counts{};
-            std::vector<std::string> instruction_rows{};
+            std::vector<internal::explorer::asm_row> rows{};
         };
 
         static void append_opcode_count(
@@ -2978,8 +2976,445 @@ examples:
             return demangled_signature;
         }
 
+        static std::string normalize_instruction_whitespace(std::string_view value) {
+            std::string normalized{};
+            normalized.reserve(value.size());
+
+            auto pending_space = false;
+            for (char c : value) {
+                if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                    pending_space = true;
+                    continue;
+                }
+                if (pending_space && !normalized.empty()) {
+                    normalized.push_back(' ');
+                }
+                normalized.push_back(c);
+                pending_space = false;
+            }
+            return normalized;
+        }
+
         static std::string format_asm_instruction_text(const opcode::operation_node& operation) {
-            return demangle_symbols_in_signature(operation.signature);
+            return normalize_instruction_whitespace(demangle_symbols_in_signature(operation.signature));
+        }
+
+        static bool is_hex_offset_token(std::string_view token) {
+            if (token.empty()) {
+                return false;
+            }
+            return std::ranges::all_of(token, opcode::ascii_is_hex_digit);
+        }
+
+        static std::optional<internal::explorer::asm_row> parse_dump_row(std::string_view line) {
+            auto trimmed = trim_view(line);
+            if (trimmed.empty()) {
+                return std::nullopt;
+            }
+
+            auto colon = trimmed.find(':');
+            if (colon == std::string_view::npos) {
+                return std::nullopt;
+            }
+
+            auto offset = trim_view(trimmed.substr(0U, colon));
+            if (!is_hex_offset_token(offset)) {
+                return std::nullopt;
+            }
+
+            auto tail = trimmed.substr(colon + 1U);
+            size_t cursor = 0U;
+            std::vector<std::string_view> encodings{};
+            encodings.reserve(8U);
+            std::optional<size_t> instruction_start{};
+
+            while (cursor < tail.size()) {
+                while (cursor < tail.size() &&
+                       (tail[cursor] == ' ' || tail[cursor] == '\t' || tail[cursor] == '\r' || tail[cursor] == '\n')) {
+                    ++cursor;
+                }
+                if (cursor >= tail.size()) {
+                    break;
+                }
+
+                auto token_end = cursor;
+                while (token_end < tail.size() && tail[token_end] != ' ' && tail[token_end] != '\t' &&
+                       tail[token_end] != '\r' && tail[token_end] != '\n') {
+                    ++token_end;
+                }
+
+                auto token = tail.substr(cursor, token_end - cursor);
+                if (opcode::is_hex_blob_token(token)) {
+                    encodings.push_back(token);
+                    cursor = token_end;
+                    continue;
+                }
+
+                instruction_start = cursor;
+                break;
+            }
+
+            if (encodings.empty() || !instruction_start.has_value()) {
+                return std::nullopt;
+            }
+
+            auto instruction = trim_view(tail.substr(*instruction_start));
+            if (instruction.empty()) {
+                return std::nullopt;
+            }
+
+            auto encoding = std::string{encodings.front()};
+            for (size_t i = 1U; i < encodings.size(); ++i) {
+                encoding.append(" ");
+                encoding.append(encodings[i]);
+            }
+
+            return internal::explorer::asm_row{
+                    .offset = std::string{offset},
+                    .encodings = std::move(encoding),
+                    .instruction = normalize_instruction_whitespace(demangle_symbols_in_signature(instruction))};
+        }
+
+        static std::vector<internal::explorer::asm_row> parse_dump_rows(std::string_view dump_text) {
+            std::vector<internal::explorer::asm_row> rows{};
+            size_t begin = 0U;
+            while (begin <= dump_text.size()) {
+                auto end = dump_text.find('\n', begin);
+                if (end == std::string_view::npos) {
+                    end = dump_text.size();
+                }
+                if (auto parsed = parse_dump_row(dump_text.substr(begin, end - begin)); parsed.has_value()) {
+                    rows.push_back(std::move(*parsed));
+                }
+                if (end == dump_text.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+            return rows;
+        }
+
+        struct mca_instruction_table_layout {
+            std::array<size_t, 7U> starts{};
+            size_t encodings_start{};
+            size_t instructions_start{};
+            bool valid{false};
+        };
+
+        static std::optional<mca_instruction_table_layout> find_mca_instruction_table_layout(std::string_view text) {
+            size_t begin = 0U;
+            while (begin <= text.size()) {
+                auto end = text.find('\n', begin);
+                if (end == std::string_view::npos) {
+                    end = text.size();
+                }
+                auto line = text.substr(begin, end - begin);
+                if (line.find("[1]"sv) != std::string_view::npos && line.find("[7]"sv) != std::string_view::npos &&
+                    line.find("Encodings:"sv) != std::string_view::npos &&
+                    line.find("Instructions:"sv) != std::string_view::npos) {
+                    mca_instruction_table_layout layout{};
+                    for (size_t i = 0U; i < 7U; ++i) {
+                        auto marker = "[{}]"_format(i + 1U);
+                        auto position = line.find(marker);
+                        if (position == std::string_view::npos) {
+                            return std::nullopt;
+                        }
+                        layout.starts[i] = position;
+                    }
+                    layout.encodings_start = line.find("Encodings:"sv);
+                    layout.instructions_start = line.find("Instructions:"sv);
+                    layout.valid = layout.instructions_start > layout.encodings_start &&
+                                   layout.encodings_start > layout.starts[6];
+                    if (!layout.valid) {
+                        return std::nullopt;
+                    }
+                    return layout;
+                }
+                if (end == text.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+            return std::nullopt;
+        }
+
+        static bool is_numeric_token(std::string_view token) {
+            token = trim_view(token);
+            if (token.empty()) {
+                return false;
+            }
+            bool has_digit = false;
+            for (char c : token) {
+                if (c >= '0' && c <= '9') {
+                    has_digit = true;
+                    continue;
+                }
+                if (c == '.') {
+                    continue;
+                }
+                return false;
+            }
+            return has_digit;
+        }
+
+        static bool is_numeric_or_dash_token(std::string_view token) {
+            token = trim_view(token);
+            if (token == "-"sv) {
+                return true;
+            }
+            return is_numeric_token(token);
+        }
+
+        static std::vector<std::string_view> split_ascii_whitespace_tokens(std::string_view line) {
+            std::vector<std::string_view> tokens{};
+            auto cursor = size_t{0U};
+            while (cursor < line.size()) {
+                while (cursor < line.size() &&
+                       (line[cursor] == ' ' || line[cursor] == '\t' || line[cursor] == '\r' || line[cursor] == '\n')) {
+                    ++cursor;
+                }
+                if (cursor >= line.size()) {
+                    break;
+                }
+                auto end = cursor;
+                while (end < line.size() && line[end] != ' ' && line[end] != '\t' && line[end] != '\r' &&
+                       line[end] != '\n') {
+                    ++end;
+                }
+                tokens.push_back(line.substr(cursor, end - cursor));
+                cursor = end;
+            }
+            return tokens;
+        }
+
+        static std::vector<std::string> parse_resource_header_labels(std::string_view line) {
+            std::vector<std::string> labels{};
+            auto instructions = line.find("Instructions:"sv);
+            if (instructions == std::string_view::npos) {
+                return labels;
+            }
+
+            auto header = line.substr(0U, instructions);
+            auto cursor = size_t{0U};
+            while (cursor < header.size()) {
+                auto open = header.find('[', cursor);
+                if (open == std::string_view::npos) {
+                    break;
+                }
+                auto close = header.find(']', open + 1U);
+                if (close == std::string_view::npos) {
+                    break;
+                }
+                auto label = trim_view(header.substr(open + 1U, close - open - 1U));
+                if (!label.empty()) {
+                    labels.push_back(std::string{label});
+                }
+                cursor = close + 1U;
+            }
+            return labels;
+        }
+
+        static internal::explorer::resource_pressure_table parse_mca_resource_pressure_rows(std::string_view mca_text) {
+            auto table = internal::explorer::resource_pressure_table{};
+            auto in_section = false;
+            auto header_parsed = false;
+
+            size_t begin = 0U;
+            while (begin <= mca_text.size()) {
+                auto end = mca_text.find('\n', begin);
+                if (end == std::string_view::npos) {
+                    end = mca_text.size();
+                }
+                auto line = mca_text.substr(begin, end - begin);
+                auto trimmed = trim_view(line);
+
+                if (!in_section) {
+                    if (trimmed == "Resource pressure by instruction:"sv) {
+                        in_section = true;
+                    }
+                    if (end == mca_text.size()) {
+                        break;
+                    }
+                    begin = end + 1U;
+                    continue;
+                }
+
+                if (!header_parsed) {
+                    if (trimmed.empty()) {
+                        if (end == mca_text.size()) {
+                            break;
+                        }
+                        begin = end + 1U;
+                        continue;
+                    }
+                    table.resources = parse_resource_header_labels(trimmed);
+                    header_parsed = !table.resources.empty();
+                    if (end == mca_text.size()) {
+                        break;
+                    }
+                    begin = end + 1U;
+                    continue;
+                }
+
+                if (trimmed.empty()) {
+                    if (!table.row_values.empty()) {
+                        break;
+                    }
+                    if (end == mca_text.size()) {
+                        break;
+                    }
+                    begin = end + 1U;
+                    continue;
+                }
+
+                auto tokens = split_ascii_whitespace_tokens(trimmed);
+                if (tokens.size() <= table.resources.size()) {
+                    if (!table.row_values.empty()) {
+                        break;
+                    }
+                    if (end == mca_text.size()) {
+                        break;
+                    }
+                    begin = end + 1U;
+                    continue;
+                }
+
+                auto row_values = std::vector<std::string>{};
+                row_values.reserve(table.resources.size());
+                auto row_valid = true;
+                for (size_t i = 0U; i < table.resources.size(); ++i) {
+                    if (!is_numeric_or_dash_token(tokens[i])) {
+                        row_valid = false;
+                        break;
+                    }
+                    row_values.emplace_back(tokens[i] == "-"sv ? "-" : std::string{tokens[i]});
+                }
+
+                if (!row_valid) {
+                    if (!table.row_values.empty()) {
+                        break;
+                    }
+                    if (end == mca_text.size()) {
+                        break;
+                    }
+                    begin = end + 1U;
+                    continue;
+                }
+
+                table.row_values.push_back(std::move(row_values));
+
+                if (end == mca_text.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+
+            if (table.resources.empty()) {
+                table.row_values.clear();
+            }
+            return table;
+        }
+
+        static std::vector<internal::explorer::instruction_info> parse_mca_instruction_info_rows(
+                std::string_view mca_text) {
+            std::vector<internal::explorer::instruction_info> rows{};
+            auto layout = find_mca_instruction_table_layout(mca_text);
+            if (!layout.has_value()) {
+                return rows;
+            }
+
+            size_t begin = 0U;
+            bool in_table = false;
+            while (begin <= mca_text.size()) {
+                auto end = mca_text.find('\n', begin);
+                if (end == std::string_view::npos) {
+                    end = mca_text.size();
+                }
+                auto line = mca_text.substr(begin, end - begin);
+
+                if (!in_table) {
+                    if (line.find("[1]"sv) != std::string_view::npos &&
+                        line.find("Encodings:"sv) != std::string_view::npos &&
+                        line.find("Instructions:"sv) != std::string_view::npos) {
+                        in_table = true;
+                    }
+                    if (end == mca_text.size()) {
+                        break;
+                    }
+                    begin = end + 1U;
+                    continue;
+                }
+
+                auto trimmed = trim_view(line);
+                if (trimmed.empty()) {
+                    if (!rows.empty()) {
+                        break;
+                    }
+                    if (end == mca_text.size()) {
+                        break;
+                    }
+                    begin = end + 1U;
+                    continue;
+                }
+
+                auto safe_substring = [&](size_t start, size_t stop) {
+                    if (start >= line.size() || stop <= start) {
+                        return std::string_view{};
+                    }
+                    return line.substr(start, std::min(stop, line.size()) - start);
+                };
+
+                auto c1 = trim_view(safe_substring(layout->starts[0], layout->starts[1]));
+                auto c2 = trim_view(safe_substring(layout->starts[1], layout->starts[2]));
+                auto c3 = trim_view(safe_substring(layout->starts[2], layout->starts[3]));
+                auto c4 = trim_view(safe_substring(layout->starts[3], layout->starts[4]));
+                auto c5 = trim_view(safe_substring(layout->starts[4], layout->starts[5]));
+                auto c6 = trim_view(safe_substring(layout->starts[5], layout->starts[6]));
+                auto c7 = trim_view(safe_substring(layout->starts[6], layout->encodings_start));
+                auto instruction = trim_view(safe_substring(layout->instructions_start, line.size()));
+
+                // Skip non-data lines in/after the section.
+                if (!is_numeric_token(c1) || instruction.empty()) {
+                    if (!rows.empty()) {
+                        break;
+                    }
+                    if (end == mca_text.size()) {
+                        break;
+                    }
+                    begin = end + 1U;
+                    continue;
+                }
+
+                rows.push_back(
+                        internal::explorer::instruction_info{
+                                .uops = std::string{c1},
+                                .latency = std::string{c2},
+                                .rthroughput = std::string{c3},
+                                .may_load = c4 == "*"sv,
+                                .may_store = c5 == "*"sv,
+                                .has_side_effects = c6.find('U') != std::string_view::npos,
+                                .encoding_size = std::string{c7},
+                                .instruction =
+                                        normalize_instruction_whitespace(demangle_symbols_in_signature(instruction))});
+
+                if (end == mca_text.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+
+            return rows;
+        }
+
+        static void overlay_rows_with_mca_instruction_text(
+                std::vector<internal::explorer::asm_row>& rows,
+                std::span<const internal::explorer::instruction_info> row_info) {
+            auto row_count = std::min(rows.size(), row_info.size());
+            for (size_t i = 0U; i < row_count; ++i) {
+                if (!row_info[i].instruction.empty()) {
+                    rows[i].instruction = row_info[i].instruction;
+                }
+            }
         }
 
         static std::optional<std::string> extract_asm_display_symbol(std::string_view asm_text) {
@@ -3018,6 +3453,42 @@ examples:
                 cell.append(width - cell.size(), ' ');
             }
             return cell;
+        }
+
+        static std::pair<std::string_view, std::string_view> split_asm_instruction_parts(std::string_view instruction) {
+            auto trimmed = trim_view(instruction);
+            if (trimmed.empty()) {
+                return {};
+            }
+
+            auto end = trimmed.find_first_of(" \t\r\n");
+            if (end == std::string_view::npos) {
+                return {trimmed, {}};
+            }
+            auto mnemonic = trimmed.substr(0U, end);
+            auto operands = trim_view(trimmed.substr(end));
+            return {mnemonic, operands};
+        }
+
+        static std::string align_asm_instruction_mnemonic_slot(std::string_view instruction, size_t mnemonic_width) {
+            auto [mnemonic, operands] = split_asm_instruction_parts(instruction);
+            if (mnemonic.empty()) {
+                return std::string{instruction};
+            }
+
+            std::string aligned{};
+            aligned.reserve(
+                    instruction.size() +
+                    (mnemonic_width > mnemonic.size() ? mnemonic_width - mnemonic.size() : size_t{0U}) + 1U);
+            aligned.append(mnemonic);
+            if (mnemonic.size() < mnemonic_width) {
+                aligned.append(mnemonic_width - mnemonic.size(), ' ');
+            }
+            if (!operands.empty()) {
+                aligned.push_back(' ');
+                aligned.append(operands);
+            }
+            return aligned;
         }
 
         static std::string to_upper_ascii(std::string_view value) {
@@ -3076,10 +3547,11 @@ examples:
         }
 
         static size_t count_instruction_definition_hits(
-                std::span<const std::string> instructions, const std::flat_map<std::string, std::string>& table) {
+                std::span<const internal::explorer::asm_row> rows,
+                const std::flat_map<std::string, std::string>& table) {
             auto hits = size_t{0U};
-            for (const auto& instruction : instructions) {
-                auto mnemonic = extract_instruction_mnemonic(instruction);
+            for (const auto& row : rows) {
+                auto mnemonic = extract_instruction_mnemonic(row.instruction);
                 if (!mnemonic.empty() && lookup_instruction_definition_in_table(mnemonic, table).has_value()) {
                     ++hits;
                 }
@@ -3088,9 +3560,9 @@ examples:
         }
 
         static const std::flat_map<std::string, std::string>& select_instruction_definition_table(
-                std::span<const std::string> instructions) {
-            auto arm_hits = count_instruction_definition_hits(instructions, tables::ARM);
-            auto x86_hits = count_instruction_definition_hits(instructions, tables::X86);
+                std::span<const internal::explorer::asm_row> rows) {
+            auto arm_hits = count_instruction_definition_hits(rows, tables::ARM);
+            auto x86_hits = count_instruction_definition_hits(rows, tables::X86);
             if (arm_hits > x86_hits) {
                 return tables::ARM;
             }
@@ -3103,17 +3575,18 @@ examples:
             return tables::X86;
         }
 
-        static std::vector<std::string> build_instruction_definitions(std::span<const std::string> instructions) {
+        static std::vector<std::string> build_instruction_definitions(
+                std::span<const internal::explorer::asm_row> rows) {
             std::vector<std::string> definitions{};
-            definitions.reserve(instructions.size());
-            if (instructions.empty()) {
+            definitions.reserve(rows.size());
+            if (rows.empty()) {
                 return definitions;
             }
 
-            auto* primary = &select_instruction_definition_table(instructions);
+            auto* primary = &select_instruction_definition_table(rows);
             auto* secondary = primary == &tables::ARM ? &tables::X86 : &tables::ARM;
-            for (const auto& instruction : instructions) {
-                auto mnemonic = extract_instruction_mnemonic(instruction);
+            for (const auto& row : rows) {
+                auto mnemonic = extract_instruction_mnemonic(row.instruction);
                 if (mnemonic.empty()) {
                     definitions.emplace_back();
                     continue;
@@ -3128,7 +3601,7 @@ examples:
             return definitions;
         }
 
-        static asm_summary summarize_asm_artifact(std::string_view asm_text) {
+        static asm_summary summarize_asm_artifact(std::string_view asm_text, std::string_view dump_text) {
             auto summary = asm_summary{};
             if (asm_text.empty()) {
                 return summary;
@@ -3143,10 +3616,20 @@ examples:
             auto& operations = mapped.streams.front().operations;
             summary.operations = operations.size();
             summary.opcode_counts.reserve(mapped.opcode_table.size());
-            summary.instruction_rows.reserve(operations.size());
             for (const auto& operation : operations) {
                 append_opcode_count(summary.opcode_counts, operation.mnemonic);
-                summary.instruction_rows.push_back(format_asm_instruction_text(operation));
+            }
+
+            summary.rows = parse_dump_rows(dump_text);
+            if (summary.rows.empty()) {
+                summary.rows.reserve(operations.size());
+                for (const auto& operation : operations) {
+                    summary.rows.push_back(
+                            internal::explorer::asm_row{
+                                    .offset = {},
+                                    .encodings = {},
+                                    .instruction = format_asm_instruction_text(operation)});
+                }
             }
             return summary;
         }
@@ -3180,31 +3663,54 @@ examples:
         static void render_asm_instruction_rows(const asm_summary& summary, std::ostream& os) {
             constexpr auto diff_indent = "\t"sv;
             auto line_width = std::string_view{"  line"}.size();
+            auto offset_width = std::string_view{"offset"}.size();
+            auto encoding_width = std::string_view{"encodings"}.size();
             auto instruction_width = std::string_view{"instruction"}.size();
-            for (size_t i = 0U; i < summary.instruction_rows.size(); ++i) {
+            auto mnemonic_width = size_t{0U};
+            for (size_t i = 0U; i < summary.rows.size(); ++i) {
+                auto [mnemonic, _] = split_asm_instruction_parts(summary.rows[i].instruction);
+                mnemonic_width = std::max(mnemonic_width, mnemonic.size());
+            }
+            for (size_t i = 0U; i < summary.rows.size(); ++i) {
+                auto aligned_instruction =
+                        align_asm_instruction_mnemonic_slot(summary.rows[i].instruction, mnemonic_width);
                 line_width = std::max(line_width, "  [{}]"_format(i).size());
-                instruction_width = std::max(instruction_width, summary.instruction_rows[i].size());
+                offset_width = std::max(offset_width, summary.rows[i].offset.size());
+                encoding_width = std::max(encoding_width, summary.rows[i].encodings.size());
+                instruction_width = std::max(instruction_width, aligned_instruction.size());
             }
 
+            os << '\n';
             os << "assembly:\n";
-            os << diff_indent << pad_asm_cell("  line", line_width) << " | "
+            os << diff_indent << pad_asm_cell("  line", line_width) << " | " << pad_asm_cell("offset", offset_width)
+               << " | " << pad_asm_cell("encodings", encoding_width) << " | "
                << pad_asm_cell("instruction", instruction_width) << '\n';
-            os << diff_indent << std::string(line_width, '-') << "-+-" << std::string(instruction_width, '-') << '\n';
+            os << diff_indent << std::string(line_width, '-') << "-+-" << std::string(offset_width, '-') << "-+-"
+               << std::string(encoding_width, '-') << "-+-" << std::string(instruction_width, '-') << '\n';
 
-            if (summary.instruction_rows.empty()) {
-                os << diff_indent << pad_asm_cell("  <none>", line_width) << " | "
-                   << pad_asm_cell("", instruction_width) << '\n';
+            if (summary.rows.empty()) {
+                os << diff_indent << pad_asm_cell("  <none>", line_width) << " | " << pad_asm_cell("", offset_width)
+                   << " | " << pad_asm_cell("", encoding_width) << " | " << pad_asm_cell("", instruction_width) << '\n';
                 return;
             }
 
-            for (size_t i = 0U; i < summary.instruction_rows.size(); ++i) {
+            for (size_t i = 0U; i < summary.rows.size(); ++i) {
+                auto aligned_instruction =
+                        align_asm_instruction_mnemonic_slot(summary.rows[i].instruction, mnemonic_width);
                 os << diff_indent << pad_asm_cell("  [{}]"_format(i), line_width) << " | "
-                   << pad_asm_cell(summary.instruction_rows[i], instruction_width) << '\n';
+                   << pad_asm_cell(summary.rows[i].offset, offset_width) << " | "
+                   << pad_asm_cell(summary.rows[i].encodings, encoding_width) << " | "
+                   << pad_asm_cell(aligned_instruction, instruction_width) << '\n';
             }
         }
 
-        static void render_asm_artifact_summary_and_body(const analysis_result& result, std::ostream& os) {
-            auto summary = summarize_asm_artifact(result.artifact_text);
+        static void render_asm_artifact_summary_and_body(
+                const analysis_result& result,
+                std::string_view dump_text,
+                std::span<const internal::explorer::instruction_info> row_info,
+                std::ostream& os) {
+            auto summary = summarize_asm_artifact(result.artifact_text, dump_text);
+            overlay_rows_with_mca_instruction_text(summary.rows, row_info);
             os << "asm:\n";
             if (auto symbol = extract_asm_display_symbol(result.artifact_text)) {
                 os << "symbol: {}\n"_format(*symbol);
@@ -3903,6 +4409,7 @@ examples:
             }
             value_width = std::max(value_width, static_cast<size_t>(10U));
 
+            os << '\n';
             os << "metrics:\n";
             os << diff_indent << padded_column("  metric", metric_width);
             for (const auto& column : columns) {
@@ -3945,6 +4452,7 @@ examples:
             constexpr auto diff_indent = "\t"sv;
             constexpr size_t row_lead_width = 2U;
 
+            os << '\n';
             os << diff_heading(report) << '\n';
             render_delta_alignment_anchors(report, columns, diff_indent, os);
 
@@ -4372,7 +4880,7 @@ examples:
             }
 
             if (result.kind == analysis_kind::asm_text) {
-                render_asm_artifact_summary_and_body(result, os);
+                render_asm_artifact_summary_and_body(result, {} /* dump_text */, {} /* row_info */, os);
                 return;
             }
 
@@ -4427,7 +4935,7 @@ examples:
             }
 
             if (result.kind == analysis_kind::asm_text) {
-                render_asm_artifact_summary_and_body(result, os);
+                render_asm_artifact_summary_and_body(result, {} /* dump_text */, {} /* row_info */, os);
                 return;
             }
 
@@ -4500,6 +5008,26 @@ examples:
                         arg->empty()) {
                     request.symbol = std::string{"__sontag_main"};
                 }
+
+                if (kind == analysis_kind::asm_text && cfg.output != output_mode::json) {
+                    auto asm_result = run_analysis(request, kind);
+                    if (!asm_result.success) {
+                        render_analysis_result(asm_result, cfg.output, cfg.verbose, out);
+                        return true;
+                    }
+
+                    auto dump_result = run_analysis(request, analysis_kind::dump);
+                    auto dump_text =
+                            dump_result.success ? std::string_view{dump_result.artifact_text} : std::string_view{};
+                    std::vector<internal::explorer::instruction_info> row_info{};
+                    auto mca_result = run_analysis(request, analysis_kind::mca);
+                    if (mca_result.success) {
+                        row_info = parse_mca_instruction_info_rows(mca_result.artifact_text);
+                    }
+                    render_asm_artifact_summary_and_body(asm_result, dump_text, row_info, out);
+                    return true;
+                }
+
                 auto result = run_analysis(request, kind);
                 render_analysis_result(result, cfg.output, cfg.verbose, out);
             } catch (const std::exception& e) {
@@ -4546,14 +5074,26 @@ examples:
             try {
                 auto request = make_analysis_request(cfg, state);
                 request.symbol = symbol.has_value() ? symbol : std::optional<std::string>{"__sontag_main"};
-                auto result = run_analysis(request, analysis_kind::asm_text);
-                if (!result.success) {
-                    render_analysis_result(result, cfg.output, cfg.verbose, out);
+                auto asm_result = run_analysis(request, analysis_kind::asm_text);
+                if (!asm_result.success) {
+                    render_analysis_result(asm_result, cfg.output, cfg.verbose, out);
                     return true;
                 }
 
-                auto summary = summarize_asm_artifact(result.artifact_text);
-                auto instruction_definitions = build_instruction_definitions(summary.instruction_rows);
+                auto dump_result = run_analysis(request, analysis_kind::dump);
+                auto dump_text = dump_result.success ? std::string_view{dump_result.artifact_text} : std::string_view{};
+                auto summary = summarize_asm_artifact(asm_result.artifact_text, dump_text);
+                std::vector<internal::explorer::instruction_info> row_info{};
+                auto resource_pressure = internal::explorer::resource_pressure_table{};
+
+                auto mca_result = run_analysis(request, analysis_kind::mca);
+                if (mca_result.success) {
+                    row_info = parse_mca_instruction_info_rows(mca_result.artifact_text);
+                    resource_pressure = parse_mca_resource_pressure_rows(mca_result.artifact_text);
+                }
+                overlay_rows_with_mca_instruction_text(summary.rows, row_info);
+
+                auto instruction_definitions = build_instruction_definitions(summary.rows);
                 std::string_view selected_line_color{};
                 std::string_view selected_definition_color{};
                 if (should_use_color(cfg.color)) {
@@ -4562,17 +5102,20 @@ examples:
                     selected_definition_color = palette.modified;
                 }
                 auto model = internal::explorer::model{
-                        .symbol_display = extract_asm_display_symbol(result.artifact_text).value_or("__sontag_main()"),
+                        .symbol_display =
+                                extract_asm_display_symbol(asm_result.artifact_text).value_or("__sontag_main()"),
                         .operations_total = summary.operations,
                         .opcode_counts = summary.opcode_counts,
-                        .instructions = summary.instruction_rows,
+                        .rows = summary.rows,
+                        .row_info = std::move(row_info),
+                        .resource_pressure = std::move(resource_pressure),
                         .instruction_definitions = std::move(instruction_definitions),
                         .selected_line_color = selected_line_color,
                         .selected_definition_color = selected_definition_color};
                 auto launch = internal::explorer::run(model, out);
                 if (launch.status == internal::explorer::launch_status::fallback) {
                     out << "{}\n"_format(launch.message);
-                    render_asm_artifact_summary_and_body(result, out);
+                    render_asm_artifact_summary_and_body(asm_result, dump_text, row_info, out);
                 }
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());
@@ -4748,9 +5291,6 @@ examples:
                 return true;
             }
             if (process_analysis_command(cmd, ":asm"sv, analysis_kind::asm_text, cfg, state, std::cout, std::cerr)) {
-                return true;
-            }
-            if (process_analysis_command(cmd, ":dump"sv, analysis_kind::dump, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
             if (process_analysis_command(cmd, ":ir"sv, analysis_kind::ir, cfg, state, std::cout, std::cerr)) {
