@@ -4515,7 +4515,9 @@ examples:
                 if (!arg->empty() && *arg != "@last"sv) {
                     request.symbol = std::string(*arg);
                 }
-                else if (kind == analysis_kind::asm_text && arg->empty()) {
+                else if (
+                        (kind == analysis_kind::asm_text || kind == analysis_kind::dump || kind == analysis_kind::ir) &&
+                        arg->empty()) {
                     request.symbol = std::string{"__sontag_main"};
                 }
                 auto result = run_analysis(request, kind);
