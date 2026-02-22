@@ -3514,7 +3514,37 @@ examples:
             return out;
         }
 
-        static std::vector<asm_color_span> find_asm_at_symbol_spans(std::string_view text) {
+        static std::vector<asm_color_span> find_asm_at_symbol_spans_arm(std::string_view text) {
+            auto spans = std::vector<asm_color_span>{};
+            size_t i = 0U;
+            while (i < text.size()) {
+                if (text[i] != '@') {
+                    ++i;
+                    continue;
+                }
+
+                auto end = i;
+                auto start = end;
+                while (start > 0U) {
+                    auto c = static_cast<unsigned char>(text[start - 1U]);
+                    auto is_symbol_char = std::isalnum(c) || text[start - 1U] == '_' || text[start - 1U] == ':' ||
+                                          text[start - 1U] == '$' || text[start - 1U] == '.';
+                    if (!is_symbol_char) {
+                        break;
+                    }
+                    --start;
+                }
+
+                if (end > start) {
+                    spans.push_back(asm_color_span{.begin = start, .end = end});
+                }
+
+                ++i;
+            }
+            return spans;
+        }
+
+        static std::vector<asm_color_span> find_asm_at_symbol_spans_x86(std::string_view text) {
             auto spans = std::vector<asm_color_span>{};
             size_t i = 0U;
             while (i < text.size()) {
@@ -3538,6 +3568,13 @@ examples:
                 }
             }
             return spans;
+        }
+
+        static std::vector<asm_color_span> find_asm_at_symbol_spans(std::string_view text) {
+            if constexpr (internal::platform::is_arm64) {
+                return find_asm_at_symbol_spans_arm(text);
+            }
+            return find_asm_at_symbol_spans_x86(text);
         }
 
         static std::vector<asm_color_span> find_asm_plus_symbol_spans(std::string_view text) {
@@ -3630,9 +3667,8 @@ examples:
             }
 
             auto candidate = operands;
-            auto candidate_end = candidate.find_first_of(" \t\r\n,");
-            if (candidate_end != std::string_view::npos) {
-                candidate = candidate.substr(0U, candidate_end);
+            while (!candidate.empty() && std::isspace(static_cast<unsigned char>(candidate.back())) != 0) {
+                candidate.remove_suffix(1U);
             }
             while (!candidate.empty() && candidate.back() == ',') {
                 candidate.remove_suffix(1U);
@@ -3649,6 +3685,44 @@ examples:
                 return std::nullopt;
             }
             if (candidate.size() >= 2U && candidate[0] == '0' && (candidate[1] == 'x' || candidate[1] == 'X')) {
+                return std::nullopt;
+            }
+            if (candidate.find('[') != std::string_view::npos) {
+                return std::nullopt;
+            }
+
+            auto end = candidate.size();
+            if (auto open = candidate.find('('); open != std::string_view::npos) {
+                auto depth = size_t{0U};
+                auto close = size_t{0U};
+                for (size_t i = 0U; i < candidate.size(); ++i) {
+                    if (candidate[i] == '(') {
+                        ++depth;
+                    }
+                    else if (candidate[i] == ')') {
+                        if (depth == 0U) {
+                            break;
+                        }
+                        --depth;
+                        if (depth == 0U) {
+                            close = i + 1U;
+                            break;
+                        }
+                    }
+                }
+                if (close != 0U) {
+                    end = close;
+                }
+            }
+            else if (auto token_end = candidate.find_first_of(" \t\r\n"); token_end != std::string_view::npos) {
+                end = token_end;
+            }
+
+            candidate = trim_view(candidate.substr(0U, end));
+            while (!candidate.empty() && candidate.back() == ',') {
+                candidate.remove_suffix(1U);
+            }
+            if (candidate.empty()) {
                 return std::nullopt;
             }
 
