@@ -2365,8 +2365,10 @@ namespace sontag {
                 }
 
                 dot_text = call_artifact->dot_text;
-                artifact_summary = "root: {}\nnodes: {}\nedges: {}\ndot: {}\n"_format(
+                artifact_summary = "root: {}\nroot_symbol: {}\nnodes: {}\nedges: {}\ndot: {}\n"_format(
                         call_artifact->root_display_name,
+                        call_artifact->root_function.empty() ? "<all>"sv
+                                                             : std::string_view{call_artifact->root_function},
                         call_artifact->node_count,
                         call_artifact->edge_count,
                         artifact_path.string());
@@ -2380,8 +2382,9 @@ namespace sontag {
                 }
 
                 dot_text = defuse_artifact->dot_text;
-                artifact_summary = "function: {}\nnodes: {}\nedges: {}\ndot: {}\n"_format(
+                artifact_summary = "function: {}\nfunction_symbol: {}\nnodes: {}\nedges: {}\ndot: {}\n"_format(
                         defuse_artifact->function_display_name,
+                        defuse_artifact->function_name,
                         defuse_artifact->node_count,
                         defuse_artifact->edge_count,
                         artifact_path.string());

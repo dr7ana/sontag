@@ -42,7 +42,8 @@ namespace sontag::cli { namespace detail {
             "editor.editor=",
             "editor.formatter=",
             nullptr};
-    static std::array<const char*, 4> graph_completions{"cfg", "call", "defuse", nullptr};
+    static std::array<const char*, 3> graph_completions{"cfg", "call", nullptr};
+    static std::array<const char*, 4> graph_mode_or_symbol_completions{"export", "@last", "__sontag_main", nullptr};
     static std::array<const char*, 3> inspect_completions{"asm", "mca", nullptr};
     static std::array<const char*, 3> inspect_mca_completions{"summary", "heatmap", nullptr};
     static std::array<const char*, 3> analysis_target_completions{"@last", "__sontag_main", nullptr};
@@ -98,6 +99,10 @@ namespace sontag::cli { namespace detail {
 
     static void complete_graph_args(ic_completion_env_t* cenv, const char* prefix) {
         complete_from(cenv, prefix, graph_completions.data());
+    }
+
+    static void complete_graph_mode_or_symbol_args(ic_completion_env_t* cenv, const char* prefix) {
+        complete_from(cenv, prefix, graph_mode_or_symbol_completions.data());
     }
 
     static void complete_inspect_args(ic_completion_env_t* cenv, const char* prefix) {
@@ -258,13 +263,33 @@ namespace sontag::cli { namespace detail {
         if (command == ":graph"sv) {
             auto rest = trim_left(trimmed.substr(command.size()));
             auto graph_subcommand = first_token(rest);
-            auto has_graph_arg = graph_subcommand.size() < rest.size();
-            if ((graph_subcommand == "cfg"sv || graph_subcommand == "call"sv || graph_subcommand == "defuse"sv) &&
-                has_graph_arg) {
+            if (graph_subcommand.empty()) {
+                ic_complete_word(cenv, prefix, complete_graph_args, nullptr);
+                return;
+            }
+            if (graph_subcommand != "cfg"sv && graph_subcommand != "call"sv) {
+                ic_complete_word(cenv, prefix, complete_graph_args, nullptr);
+                return;
+            }
+
+            auto graph_rest = trim_left(rest.substr(graph_subcommand.size()));
+            if (graph_rest.empty()) {
+                ic_complete_word(cenv, prefix, complete_graph_mode_or_symbol_args, nullptr);
+                return;
+            }
+
+            auto graph_mode = first_token(graph_rest);
+            auto has_graph_mode_arg = graph_mode.size() < graph_rest.size();
+            if (graph_mode == "export"sv && has_graph_mode_arg) {
                 ic_complete_word(cenv, prefix, complete_analysis_args, nullptr);
                 return;
             }
-            ic_complete_word(cenv, prefix, complete_graph_args, nullptr);
+            if (graph_mode == "export"sv) {
+                ic_complete_word(cenv, prefix, complete_graph_mode_or_symbol_args, nullptr);
+                return;
+            }
+
+            ic_complete_word(cenv, prefix, complete_analysis_args, nullptr);
             return;
         }
         if (command == ":inspect"sv) {

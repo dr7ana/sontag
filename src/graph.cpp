@@ -997,10 +997,25 @@ namespace sontag::graph {
         if (!parsed) {
             return std::nullopt;
         }
+
+        auto blocks = std::vector<cfg_graph_block>{};
+        blocks.reserve(parsed->blocks.size());
+        for (const auto& block : parsed->blocks) {
+            blocks.push_back(cfg_graph_block{.id = block.id, .instructions = block.instructions});
+        }
+
+        auto edges = std::vector<cfg_graph_edge>{};
+        edges.reserve(parsed->edges.size());
+        for (const auto& edge : parsed->edges) {
+            edges.push_back(cfg_graph_edge{.from = edge.from, .to = edge.to, .label = edge.label});
+        }
+
         return cfg_graph_artifact{
                 .function_name = parsed->function_name,
                 .block_count = parsed->blocks.size(),
                 .edge_count = parsed->edges.size(),
+                .blocks = std::move(blocks),
+                .edges = std::move(edges),
                 .dot_text = detail::render_cfg_graph_dot(*parsed)};
     }
 
@@ -1014,11 +1029,31 @@ namespace sontag::graph {
         if (!parsed) {
             return std::nullopt;
         }
+
+        auto nodes = std::vector<call_graph_artifact::node>{};
+        nodes.reserve(parsed->nodes.size());
+        for (const auto& node : parsed->nodes) {
+            nodes.push_back(
+                    call_graph_artifact::node{
+                            .name = node.name,
+                            .display_name = node.display_name,
+                            .annotation = node.annotation,
+                            .is_defined = node.is_defined});
+        }
+
+        auto edges = std::vector<call_graph_artifact::edge>{};
+        edges.reserve(parsed->edges.size());
+        for (const auto& edge : parsed->edges) {
+            edges.push_back(call_graph_artifact::edge{.from = edge.from, .to = edge.to});
+        }
+
         return call_graph_artifact{
                 .root_function = parsed->root_function,
                 .root_display_name = parsed->root_display_name,
                 .node_count = parsed->nodes.size(),
                 .edge_count = parsed->edges.size(),
+                .nodes = std::move(nodes),
+                .edges = std::move(edges),
                 .dot_text = detail::render_call_graph_dot(*parsed)};
     }
 
@@ -1028,11 +1063,26 @@ namespace sontag::graph {
         if (!parsed) {
             return std::nullopt;
         }
+
+        auto nodes = std::vector<defuse_graph_artifact::node>{};
+        nodes.reserve(parsed->nodes.size());
+        for (const auto& node : parsed->nodes) {
+            nodes.push_back(defuse_graph_artifact::node{.id = node.id, .instruction = node.instruction});
+        }
+
+        auto edges = std::vector<defuse_graph_artifact::edge>{};
+        edges.reserve(parsed->edges.size());
+        for (const auto& edge : parsed->edges) {
+            edges.push_back(defuse_graph_artifact::edge{.from = edge.from, .to = edge.to, .label = edge.label});
+        }
+
         return defuse_graph_artifact{
                 .function_name = parsed->function_name,
                 .function_display_name = parsed->function_display_name,
                 .node_count = parsed->nodes.size(),
                 .edge_count = parsed->edges.size(),
+                .nodes = std::move(nodes),
+                .edges = std::move(edges),
                 .dot_text = detail::render_defuse_graph_dot(*parsed)};
     }
 

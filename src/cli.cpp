@@ -2,6 +2,7 @@
 
 #include "sontag/analysis.hpp"
 #include "sontag/format.hpp"
+#include "sontag/graph.hpp"
 #include "sontag/utils.hpp"
 
 #include "internal/delta.hpp"
@@ -24,6 +25,7 @@ extern "C" {
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -43,6 +45,7 @@ extern "C" {
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 using namespace sontag::literals;
@@ -2264,7 +2267,8 @@ namespace sontag::cli {
   :snapshots
   :asm [symbol|@last] (default: __sontag_main)
   :asm explore [symbol|@last]
-  :ir [symbol|@last]
+  :ir [symbol|@last] (default: __sontag_main)
+  :ir explore [symbol|@last]
   :diag [symbol|@last]
   :mca [symbol|@last]
   :delta [spectrum] [target_opt] [symbol|@last]
@@ -2272,8 +2276,9 @@ namespace sontag::cli {
   :inspect asm [symbol|@last]
   :inspect mca [summary|heatmap] [symbol|@last]
   :graph cfg [symbol|@last]
+  :graph cfg export [symbol|@last]
   :graph call [symbol|@last]
-  :graph defuse [symbol|@last]
+  :graph call export [symbol|@last]
   :quit
 examples:
   :decl #include <cstdint>
@@ -2293,6 +2298,7 @@ examples:
   :asm
   :asm explore
   :delta
+  :ir explore
   :delta spectrum
   :delta O3
   :delta spectrum O3
@@ -2301,6 +2307,7 @@ examples:
   :inspect asm
   :inspect mca
   :graph cfg
+  :graph cfg export
   :graph call
 )";
             os << help_text;
@@ -2823,10 +2830,10 @@ examples:
                 .removed = "\x1b[31m"sv,
                 .inserted = "\x1b[38;5;117m"sv};
         static constexpr auto vaporwave_color_scheme = delta_color_palette{
-                .unchanged = "\x1b[38;5;117m"sv,
+                .unchanged = "\x1b[38;5;51m"sv,
                 .modified = "\x1b[38;5;141m"sv,
                 .removed = "\x1b[38;5;204m"sv,
-                .inserted = "\x1b[38;5;51m"sv};
+                .inserted = "\x1b[38;5;48m"sv};
 
         static constexpr delta_color_palette resolve_delta_color_palette(color_scheme scheme) {
             switch (scheme) {
@@ -3470,6 +3477,243 @@ examples:
             return {mnemonic, operands};
         }
 
+        struct asm_color_span {
+            size_t begin{};
+            size_t end{};
+        };
+
+        static constexpr bool asm_spans_overlap(const asm_color_span& lhs, const asm_color_span& rhs) {
+            return lhs.begin < rhs.end && rhs.begin < lhs.end;
+        }
+
+        static void append_asm_color_span(std::vector<asm_color_span>& spans, asm_color_span span) {
+            if (span.begin >= span.end) {
+                return;
+            }
+            for (const auto& existing : spans) {
+                if (asm_spans_overlap(existing, span)) {
+                    return;
+                }
+            }
+            spans.push_back(span);
+        }
+
+        static std::string colorize_asm_text_span(
+                std::string_view text, size_t begin, size_t end, std::string_view color) {
+            if (color.empty() || begin >= end || begin >= text.size()) {
+                return std::string{text};
+            }
+            end = std::min(end, text.size());
+            std::string out{};
+            out.reserve(text.size() + color.size() + 8U);
+            out.append(text.substr(0U, begin));
+            out.append(color);
+            out.append(text.substr(begin, end - begin));
+            out.append("\x1b[0m");
+            out.append(text.substr(end));
+            return out;
+        }
+
+        static std::vector<asm_color_span> find_asm_at_symbol_spans(std::string_view text) {
+            auto spans = std::vector<asm_color_span>{};
+            size_t i = 0U;
+            while (i < text.size()) {
+                if (text[i] != '@') {
+                    ++i;
+                    continue;
+                }
+                auto start = i;
+                ++i;
+                while (i < text.size()) {
+                    auto c = static_cast<unsigned char>(text[i]);
+                    auto is_symbol_char =
+                            std::isalnum(c) || text[i] == '_' || text[i] == ':' || text[i] == '$' || text[i] == '.';
+                    if (!is_symbol_char) {
+                        break;
+                    }
+                    ++i;
+                }
+                if (i > start + 1U) {
+                    spans.push_back(asm_color_span{.begin = start, .end = i});
+                }
+            }
+            return spans;
+        }
+
+        static std::vector<asm_color_span> find_asm_plus_symbol_spans(std::string_view text) {
+            auto spans = std::vector<asm_color_span>{};
+            size_t i = 0U;
+            while (i < text.size()) {
+                if (text[i] != '+') {
+                    ++i;
+                    continue;
+                }
+                auto j = i + 1U;
+                while (j < text.size() && (text[j] == ' ' || text[j] == '\t')) {
+                    ++j;
+                }
+                if (j >= text.size()) {
+                    break;
+                }
+
+                auto c = static_cast<unsigned char>(text[j]);
+                auto is_symbol_start = std::isalpha(c) || text[j] == '_' || text[j] == '$' || text[j] == '.';
+                if (!is_symbol_start) {
+                    i = j + 1U;
+                    continue;
+                }
+
+                auto start = j;
+                ++j;
+                while (j < text.size()) {
+                    auto cc = static_cast<unsigned char>(text[j]);
+                    auto is_symbol_char =
+                            std::isalnum(cc) || text[j] == '_' || text[j] == ':' || text[j] == '$' || text[j] == '.';
+                    if (!is_symbol_char) {
+                        break;
+                    }
+                    ++j;
+                }
+                spans.push_back(asm_color_span{.begin = start, .end = j});
+                i = j;
+            }
+            return spans;
+        }
+
+        static std::vector<asm_color_span> find_asm_angle_symbol_spans(std::string_view text) {
+            auto spans = std::vector<asm_color_span>{};
+            size_t i = 0U;
+            while (i < text.size()) {
+                if (text[i] != '<') {
+                    ++i;
+                    continue;
+                }
+                auto j = i + 1U;
+                while (j < text.size() && (text[j] == ' ' || text[j] == '\t')) {
+                    ++j;
+                }
+                if (j >= text.size()) {
+                    break;
+                }
+
+                auto c = static_cast<unsigned char>(text[j]);
+                auto is_symbol_start = std::isalpha(c) || text[j] == '_' || text[j] == '$' || text[j] == '.';
+                if (!is_symbol_start) {
+                    i = j + 1U;
+                    continue;
+                }
+
+                auto start = j;
+                ++j;
+                while (j < text.size()) {
+                    auto cc = static_cast<unsigned char>(text[j]);
+                    auto is_symbol_char =
+                            std::isalnum(cc) || text[j] == '_' || text[j] == ':' || text[j] == '$' || text[j] == '.';
+                    if (!is_symbol_char) {
+                        break;
+                    }
+                    ++j;
+                }
+                spans.push_back(asm_color_span{.begin = start, .end = j});
+                i = j;
+            }
+            return spans;
+        }
+
+        static std::optional<asm_color_span> find_asm_call_target_span(std::string_view instruction) {
+            auto [mnemonic, operands] = split_asm_instruction_parts(instruction);
+            if (!(utils::str_case_eq(mnemonic, "call"sv) || utils::str_case_eq(mnemonic, "bl"sv))) {
+                return std::nullopt;
+            }
+            if (operands.empty()) {
+                return std::nullopt;
+            }
+
+            auto candidate = operands;
+            auto candidate_end = candidate.find_first_of(" \t\r\n,");
+            if (candidate_end != std::string_view::npos) {
+                candidate = candidate.substr(0U, candidate_end);
+            }
+            while (!candidate.empty() && candidate.back() == ',') {
+                candidate.remove_suffix(1U);
+            }
+            if (candidate.empty()) {
+                return std::nullopt;
+            }
+
+            if (candidate.front() == '<' || candidate.front() == '*' || candidate.front() == '[' ||
+                candidate.front() == '-') {
+                return std::nullopt;
+            }
+            if (candidate.front() >= '0' && candidate.front() <= '9') {
+                return std::nullopt;
+            }
+            if (candidate.size() >= 2U && candidate[0] == '0' && (candidate[1] == 'x' || candidate[1] == 'X')) {
+                return std::nullopt;
+            }
+
+            auto pos = instruction.find(candidate);
+            if (pos == std::string_view::npos) {
+                return std::nullopt;
+            }
+            return asm_color_span{.begin = pos, .end = pos + candidate.size()};
+        }
+
+        static std::string colorize_asm_instruction_cell(std::string_view instruction_cell, std::string_view color) {
+            if (instruction_cell.empty() || color.empty()) {
+                return std::string{instruction_cell};
+            }
+
+            auto spans = std::vector<asm_color_span>{};
+            auto [mnemonic, _] = split_asm_instruction_parts(instruction_cell);
+            if (!mnemonic.empty()) {
+                auto begin = instruction_cell.find(mnemonic);
+                if (begin != std::string_view::npos) {
+                    append_asm_color_span(spans, asm_color_span{.begin = begin, .end = begin + mnemonic.size()});
+                }
+            }
+            if (auto call_target = find_asm_call_target_span(instruction_cell); call_target.has_value()) {
+                append_asm_color_span(spans, *call_target);
+            }
+            for (const auto& span : find_asm_at_symbol_spans(instruction_cell)) {
+                append_asm_color_span(spans, span);
+            }
+            for (const auto& span : find_asm_plus_symbol_spans(instruction_cell)) {
+                append_asm_color_span(spans, span);
+            }
+            for (const auto& span : find_asm_angle_symbol_spans(instruction_cell)) {
+                append_asm_color_span(spans, span);
+            }
+            if (spans.empty()) {
+                return std::string{instruction_cell};
+            }
+
+            std::sort(spans.begin(), spans.end(), [](const asm_color_span& lhs, const asm_color_span& rhs) {
+                return lhs.begin < rhs.begin;
+            });
+
+            std::string out{};
+            out.reserve(instruction_cell.size() + (spans.size() * (color.size() + 8U)));
+            auto cursor = size_t{0U};
+            for (const auto& span : spans) {
+                if (span.begin < cursor || span.begin >= instruction_cell.size()) {
+                    continue;
+                }
+                auto end = std::min(span.end, instruction_cell.size());
+                if (cursor < span.begin) {
+                    out.append(instruction_cell.substr(cursor, span.begin - cursor));
+                }
+                out.append(color);
+                out.append(instruction_cell.substr(span.begin, end - span.begin));
+                out.append("\x1b[0m");
+                cursor = end;
+            }
+            if (cursor < instruction_cell.size()) {
+                out.append(instruction_cell.substr(cursor));
+            }
+            return out;
+        }
+
         static std::string align_asm_instruction_mnemonic_slot(std::string_view instruction, size_t mnemonic_width) {
             auto [mnemonic, operands] = split_asm_instruction_parts(instruction);
             if (mnemonic.empty()) {
@@ -3634,7 +3878,8 @@ examples:
             return summary;
         }
 
-        static void render_asm_opcode_table(const asm_summary& summary, std::ostream& os) {
+        static void render_asm_opcode_table(
+                const asm_summary& summary, std::ostream& os, std::string_view modified_color) {
             constexpr auto diff_indent = "\t"sv;
             auto opcode_width = std::string_view{"  opcode"}.size();
             auto count_width = std::string_view{"count"}.size();
@@ -3655,12 +3900,16 @@ examples:
             }
 
             for (const auto& [opcode, count] : summary.opcode_counts) {
-                os << diff_indent << pad_asm_cell("  {}"_format(opcode), opcode_width) << " | "
-                   << pad_asm_cell("{}"_format(count), count_width) << '\n';
+                auto opcode_cell = pad_asm_cell("  {}"_format(opcode), opcode_width);
+                if (!modified_color.empty()) {
+                    opcode_cell = colorize_asm_text_span(opcode_cell, 2U, 2U + opcode.size(), modified_color);
+                }
+                os << diff_indent << opcode_cell << " | " << pad_asm_cell("{}"_format(count), count_width) << '\n';
             }
         }
 
-        static void render_asm_instruction_rows(const asm_summary& summary, std::ostream& os) {
+        static void render_asm_instruction_rows(
+                const asm_summary& summary, std::ostream& os, std::string_view modified_color) {
             constexpr auto diff_indent = "\t"sv;
             auto line_width = std::string_view{"  line"}.size();
             auto offset_width = std::string_view{"offset"}.size();
@@ -3697,10 +3946,13 @@ examples:
             for (size_t i = 0U; i < summary.rows.size(); ++i) {
                 auto aligned_instruction =
                         align_asm_instruction_mnemonic_slot(summary.rows[i].instruction, mnemonic_width);
+                auto instruction_cell = pad_asm_cell(aligned_instruction, instruction_width);
+                if (!modified_color.empty()) {
+                    instruction_cell = colorize_asm_instruction_cell(instruction_cell, modified_color);
+                }
                 os << diff_indent << pad_asm_cell("  [{}]"_format(i), line_width) << " | "
                    << pad_asm_cell(summary.rows[i].offset, offset_width) << " | "
-                   << pad_asm_cell(summary.rows[i].encodings, encoding_width) << " | "
-                   << pad_asm_cell(aligned_instruction, instruction_width) << '\n';
+                   << pad_asm_cell(summary.rows[i].encodings, encoding_width) << " | " << instruction_cell << '\n';
             }
         }
 
@@ -3708,6 +3960,7 @@ examples:
                 const analysis_result& result,
                 std::string_view dump_text,
                 std::span<const internal::explorer::instruction_info> row_info,
+                std::string_view modified_color,
                 std::ostream& os) {
             auto summary = summarize_asm_artifact(result.artifact_text, dump_text);
             overlay_rows_with_mca_instruction_text(summary.rows, row_info);
@@ -3716,8 +3969,294 @@ examples:
                 os << "symbol: {}\n"_format(*symbol);
             }
             os << "operations: {}\n"_format(summary.operations);
-            render_asm_opcode_table(summary, os);
-            render_asm_instruction_rows(summary, os);
+            render_asm_opcode_table(summary, os, modified_color);
+            render_asm_instruction_rows(summary, os, modified_color);
+        }
+
+        static std::optional<std::string> parse_graph_summary_field(std::string_view summary, std::string_view field) {
+            auto key = "{}:"_format(field);
+            size_t begin = 0U;
+            while (begin <= summary.size()) {
+                auto end = summary.find('\n', begin);
+                if (end == std::string_view::npos) {
+                    end = summary.size();
+                }
+
+                auto line = trim_view(summary.substr(begin, end - begin));
+                if (line.starts_with(key)) {
+                    auto value = trim_view(line.substr(key.size()));
+                    if (!value.empty()) {
+                        return std::string{value};
+                    }
+                    return std::nullopt;
+                }
+
+                if (end == summary.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+            return std::nullopt;
+        }
+
+        static std::string build_cfg_node_label(const graph::cfg_graph_block& block) {
+            auto label = std::string{};
+            label.reserve(block.id.size() + (block.instructions.empty() ? 0U : block.instructions.front().size() + 3U));
+            label.append(block.id);
+            if (!block.instructions.empty()) {
+                label.append(" | ");
+                label.append(block.instructions.front());
+            }
+            return label;
+        }
+
+        static std::string build_cfg_node_detail(const graph::cfg_graph_block& block) {
+            auto detail = std::string{};
+            detail.reserve(block.id.size() + 4U + block.instructions.size() * 8U);
+            detail.append(block.id);
+            if (block.instructions.empty()) {
+                detail.append(" | <empty>");
+                return detail;
+            }
+
+            for (const auto& instruction : block.instructions) {
+                detail.append(" | ");
+                detail.append(instruction);
+            }
+            return detail;
+        }
+
+        static bool should_use_color(color_mode mode);
+
+        static internal::explorer::graph_model build_cfg_graph_model(
+                const graph::cfg_graph_artifact& artifact, const startup_config& cfg) {
+            auto model = internal::explorer::graph_model{};
+            model.kind_label = "cfg";
+            if (auto demangled = demangle_itanium_token(artifact.function_name); demangled.has_value()) {
+                model.title = *demangled;
+            }
+            else {
+                model.title = artifact.function_name;
+            }
+
+            auto node_index = std::unordered_map<std::string, size_t>{};
+            node_index.reserve(artifact.blocks.size() + 2U);
+
+            for (const auto& block : artifact.blocks) {
+                auto index = model.nodes.size();
+                model.nodes.push_back(
+                        internal::explorer::graph_node{
+                                .id = block.id,
+                                .short_label = build_cfg_node_label(block),
+                                .full_label = build_cfg_node_detail(block)});
+                node_index.emplace(block.id, index);
+            }
+
+            auto ensure_node = [&](std::string_view id) {
+                if (auto it = node_index.find(std::string{id}); it != node_index.end()) {
+                    return it->second;
+                }
+
+                auto index = model.nodes.size();
+                auto detail = std::string{id};
+                if (id == "__entry__"sv) {
+                    detail = "__entry__ | pseudo entry";
+                }
+                else if (id == "__exit__"sv) {
+                    detail = "__exit__ | pseudo exit";
+                }
+
+                model.nodes.push_back(
+                        internal::explorer::graph_node{
+                                .id = std::string{id},
+                                .short_label = std::string{id},
+                                .full_label = std::move(detail)});
+                node_index.emplace(std::string{id}, index);
+                return index;
+            };
+
+            for (const auto& edge : artifact.edges) {
+                auto from = ensure_node(edge.from);
+                auto to = ensure_node(edge.to);
+                model.edges.push_back(internal::explorer::graph_edge{.from = from, .to = to, .label = edge.label});
+            }
+
+            model.outgoing_edges.assign(model.nodes.size(), {});
+            model.incoming_edges.assign(model.nodes.size(), {});
+            for (size_t i = 0U; i < model.edges.size(); ++i) {
+                auto from = model.edges[i].from;
+                auto to = model.edges[i].to;
+                if (from < model.outgoing_edges.size()) {
+                    model.outgoing_edges[from].push_back(i);
+                }
+                if (to < model.incoming_edges.size()) {
+                    model.incoming_edges[to].push_back(i);
+                }
+            }
+
+            for (size_t i = 0U; i < model.nodes.size(); ++i) {
+                model.nodes[i].outgoing_count = i < model.outgoing_edges.size() ? model.outgoing_edges[i].size() : 0U;
+                model.nodes[i].incoming_count = i < model.incoming_edges.size() ? model.incoming_edges[i].size() : 0U;
+            }
+
+            if (should_use_color(cfg.color)) {
+                auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                model.selected_line_color = palette.unchanged;
+                model.selected_detail_color = palette.modified;
+                model.unchanged_line_color = palette.inserted;
+                model.removed_line_color = palette.removed;
+            }
+            model.initial_cursor = 0U;
+            return model;
+        }
+
+        static internal::explorer::graph_model build_call_graph_model(
+                const graph::call_graph_artifact& artifact, const startup_config& cfg) {
+            auto model = internal::explorer::graph_model{};
+            model.kind_label = "call";
+            model.title = artifact.root_display_name.empty() ? "<all>" : artifact.root_display_name;
+
+            auto node_index = std::unordered_map<std::string, size_t>{};
+            node_index.reserve(artifact.nodes.size());
+            for (const auto& node : artifact.nodes) {
+                auto index = model.nodes.size();
+                auto id = node.display_name.empty() ? node.name : node.display_name;
+                auto short_label = node.annotation;
+                if (!node.annotation.empty()) {
+                    short_label = node.annotation;
+                }
+                auto full_label = std::string{};
+                full_label.reserve(id.size() + short_label.size() + 24U);
+                full_label.append(id);
+                if (!short_label.empty()) {
+                    full_label.append(" | ");
+                    full_label.append(short_label);
+                }
+                full_label.append(node.is_defined ? " | defined" : " | external");
+
+                model.nodes.push_back(
+                        internal::explorer::graph_node{
+                                .id = std::move(id),
+                                .short_label = std::move(short_label),
+                                .full_label = std::move(full_label)});
+                node_index.emplace(node.name, index);
+            }
+
+            for (const auto& edge : artifact.edges) {
+                auto from_it = node_index.find(edge.from);
+                auto to_it = node_index.find(edge.to);
+                if (from_it == node_index.end() || to_it == node_index.end()) {
+                    continue;
+                }
+                model.edges.push_back(
+                        internal::explorer::graph_edge{.from = from_it->second, .to = to_it->second, .label = {}});
+            }
+
+            model.outgoing_edges.assign(model.nodes.size(), {});
+            model.incoming_edges.assign(model.nodes.size(), {});
+            for (size_t i = 0U; i < model.edges.size(); ++i) {
+                auto from = model.edges[i].from;
+                auto to = model.edges[i].to;
+                if (from < model.outgoing_edges.size()) {
+                    model.outgoing_edges[from].push_back(i);
+                }
+                if (to < model.incoming_edges.size()) {
+                    model.incoming_edges[to].push_back(i);
+                }
+            }
+
+            for (size_t i = 0U; i < model.nodes.size(); ++i) {
+                model.nodes[i].outgoing_count = i < model.outgoing_edges.size() ? model.outgoing_edges[i].size() : 0U;
+                model.nodes[i].incoming_count = i < model.incoming_edges.size() ? model.incoming_edges[i].size() : 0U;
+            }
+
+            if (should_use_color(cfg.color)) {
+                auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                model.selected_line_color = palette.unchanged;
+                model.selected_detail_color = palette.modified;
+                model.unchanged_line_color = palette.inserted;
+                model.removed_line_color = palette.removed;
+            }
+            model.initial_cursor = 0U;
+            return model;
+        }
+
+        static internal::explorer::graph_model build_defuse_graph_model(
+                const graph::defuse_graph_artifact& artifact, const startup_config& cfg) {
+            auto model = internal::explorer::graph_model{};
+            model.kind_label = "defuse";
+            if (!artifact.function_display_name.empty()) {
+                model.title = artifact.function_display_name;
+            }
+            else if (auto demangled = demangle_itanium_token(artifact.function_name); demangled.has_value()) {
+                model.title = *demangled;
+            }
+            else {
+                model.title = artifact.function_name;
+            }
+
+            model.nodes.reserve(artifact.nodes.size());
+            for (const auto& node : artifact.nodes) {
+                auto instruction = normalize_instruction_whitespace(demangle_symbols_in_signature(node.instruction));
+                model.nodes.push_back(
+                        internal::explorer::graph_node{
+                                .id = "n{}"_format(node.id), .short_label = instruction, .full_label = instruction});
+            }
+
+            for (const auto& edge : artifact.edges) {
+                if (edge.from >= model.nodes.size() || edge.to >= model.nodes.size()) {
+                    continue;
+                }
+                model.edges.push_back(
+                        internal::explorer::graph_edge{.from = edge.from, .to = edge.to, .label = edge.label});
+            }
+
+            model.outgoing_edges.assign(model.nodes.size(), {});
+            model.incoming_edges.assign(model.nodes.size(), {});
+            for (size_t i = 0U; i < model.edges.size(); ++i) {
+                auto from = model.edges[i].from;
+                auto to = model.edges[i].to;
+                if (from < model.outgoing_edges.size()) {
+                    model.outgoing_edges[from].push_back(i);
+                }
+                if (to < model.incoming_edges.size()) {
+                    model.incoming_edges[to].push_back(i);
+                }
+            }
+
+            for (size_t i = 0U; i < model.nodes.size(); ++i) {
+                model.nodes[i].outgoing_count = i < model.outgoing_edges.size() ? model.outgoing_edges[i].size() : 0U;
+                model.nodes[i].incoming_count = i < model.incoming_edges.size() ? model.incoming_edges[i].size() : 0U;
+            }
+
+            if (should_use_color(cfg.color)) {
+                auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                model.selected_line_color = palette.unchanged;
+                model.selected_detail_color = palette.modified;
+                model.unchanged_line_color = palette.inserted;
+                model.removed_line_color = palette.removed;
+            }
+            model.initial_cursor = 0U;
+            return model;
+        }
+
+        static std::optional<internal::explorer::graph_model> build_ir_explorer_model(
+                std::string_view ir_text, const startup_config& cfg) {
+            auto symbol = graph::find_first_ir_function_name(ir_text);
+            if (!symbol.has_value()) {
+                return std::nullopt;
+            }
+
+            auto artifact = graph::build_defuse_graph_artifact(ir_text, *symbol);
+            if (!artifact.has_value()) {
+                return std::nullopt;
+            }
+
+            auto model = build_defuse_graph_model(*artifact, cfg);
+            model.kind_label = "ir";
+            model.title =
+                    artifact->function_display_name.empty() ? artifact->function_name : artifact->function_display_name;
+            return model;
         }
 
         static std::string format_delta_level_summary_line(const delta_level_record& level) {
@@ -4880,7 +5419,7 @@ examples:
             }
 
             if (result.kind == analysis_kind::asm_text) {
-                render_asm_artifact_summary_and_body(result, {} /* dump_text */, {} /* row_info */, os);
+                render_asm_artifact_summary_and_body(result, {} /* dump_text */, {} /* row_info */, {} /* color */, os);
                 return;
             }
 
@@ -4935,7 +5474,7 @@ examples:
             }
 
             if (result.kind == analysis_kind::asm_text) {
-                render_asm_artifact_summary_and_body(result, {} /* dump_text */, {} /* row_info */, os);
+                render_asm_artifact_summary_and_body(result, {} /* dump_text */, {} /* row_info */, {} /* color */, os);
                 return;
             }
 
@@ -5024,7 +5563,31 @@ examples:
                     if (mca_result.success) {
                         row_info = parse_mca_instruction_info_rows(mca_result.artifact_text);
                     }
-                    render_asm_artifact_summary_and_body(asm_result, dump_text, row_info, out);
+                    auto modified_color = std::string_view{};
+                    if (should_use_color(cfg.color)) {
+                        auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                        modified_color = palette.modified;
+                    }
+                    render_asm_artifact_summary_and_body(asm_result, dump_text, row_info, modified_color, out);
+                    return true;
+                }
+
+                if (kind == analysis_kind::ir && cfg.output != output_mode::json) {
+                    auto ir_result = run_analysis(request, kind);
+                    if (!ir_result.success) {
+                        render_analysis_result(ir_result, cfg.output, cfg.verbose, out);
+                        return true;
+                    }
+
+                    auto model = build_ir_explorer_model(ir_result.artifact_text, cfg);
+                    if (!model.has_value()) {
+                        out << ir_result.artifact_text;
+                        if (!ir_result.artifact_text.ends_with('\n')) {
+                            out << '\n';
+                        }
+                        return true;
+                    }
+                    internal::explorer::render_ir_static(*model, out);
                     return true;
                 }
 
@@ -5072,6 +5635,12 @@ examples:
             }
 
             try {
+                auto static_asm_modified_color = std::string_view{};
+                if (should_use_color(cfg.color)) {
+                    auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                    static_asm_modified_color = palette.modified;
+                }
+
                 struct explore_frame_state {
                     std::string symbol{};
                     size_t cursor{};
@@ -5110,7 +5679,7 @@ examples:
                     std::string_view call_target_color{};
                     if (should_use_color(cfg.color)) {
                         auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
-                        selected_line_color = palette.inserted;
+                        selected_line_color = palette.unchanged;
                         selected_definition_color = palette.modified;
                         call_target_color = palette.removed;
                     }
@@ -5130,7 +5699,8 @@ examples:
                     auto launch = internal::explorer::run(model, out);
                     if (launch.status == internal::explorer::launch_status::fallback) {
                         out << "{}\n"_format(launch.message);
-                        render_asm_artifact_summary_and_body(asm_result, dump_text, row_info, out);
+                        render_asm_artifact_summary_and_body(
+                                asm_result, dump_text, row_info, static_asm_modified_color, out);
                         return true;
                     }
                     if (launch.next_symbol.has_value() && !launch.next_symbol->empty()) {
@@ -5145,6 +5715,235 @@ examples:
                     active = std::move(frame_stack.back());
                     frame_stack.pop_back();
                 }
+            } catch (const std::exception& e) {
+                err << "analysis error: {}\n"_format(e.what());
+            }
+
+            return true;
+        }
+
+        static bool process_ir_explore_command(
+                std::string_view cmd, startup_config& cfg, repl_state& state, std::ostream& out, std::ostream& err) {
+            auto arg = command_argument(cmd, ":ir"sv);
+            if (!arg) {
+                return false;
+            }
+
+            auto tail = trim_view(*arg);
+            if (!tail.starts_with("explore"sv) ||
+                (tail.size() > "explore"sv.size() && !is_command_separator(tail["explore"sv.size()]))) {
+                return false;
+            }
+
+            if (state.cells.empty()) {
+                err << "no stored cells available for analysis\n";
+                return true;
+            }
+
+            auto symbol_arg = trim_view(tail.substr("explore"sv.size()));
+            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            if (!symbol_arg.empty()) {
+                auto split = symbol_arg.find_first_of(" \t\r\n");
+                auto token = split == std::string_view::npos ? symbol_arg : trim_view(symbol_arg.substr(0U, split));
+                auto extra =
+                        split == std::string_view::npos ? std::string_view{} : trim_view(symbol_arg.substr(split + 1U));
+                if (!extra.empty()) {
+                    err << "invalid :ir explore, expected :ir explore [symbol|@last]\n";
+                    return true;
+                }
+                if (token == "@last"sv) {
+                    symbol = std::nullopt;
+                }
+                else if (!token.empty()) {
+                    symbol = std::string{token};
+                }
+            }
+
+            try {
+                auto request = make_analysis_request(cfg, state);
+                request.symbol = symbol;
+                auto ir_result = run_analysis(request, analysis_kind::ir);
+                if (!ir_result.success) {
+                    render_analysis_result(ir_result, cfg.output, cfg.verbose, out);
+                    return true;
+                }
+
+                auto model = build_ir_explorer_model(ir_result.artifact_text, cfg);
+                if (!model.has_value()) {
+                    out << "ir explore: unable to construct explorer model, falling back to raw ir output\n";
+                    out << ir_result.artifact_text;
+                    if (!ir_result.artifact_text.ends_with('\n')) {
+                        out << '\n';
+                    }
+                    return true;
+                }
+
+                auto launch = internal::explorer::run_graph(*model, out);
+                if (launch.status == internal::explorer::launch_status::fallback) {
+                    out << "{}\n"_format(launch.message);
+                    internal::explorer::render_ir_static(*model, out);
+                }
+            } catch (const std::exception& e) {
+                err << "analysis error: {}\n"_format(e.what());
+            }
+
+            return true;
+        }
+
+        enum class graph_command_mode : uint8_t { static_render, export_artifact };
+
+        static std::optional<analysis_kind> parse_graph_analysis_kind(std::string_view token) {
+            if (token == "cfg"sv) {
+                return analysis_kind::graph_cfg;
+            }
+            if (token == "call"sv) {
+                return analysis_kind::graph_call;
+            }
+            return std::nullopt;
+        }
+
+        static bool process_graph_command(
+                std::string_view cmd, startup_config& cfg, repl_state& state, std::ostream& out, std::ostream& err) {
+            auto arg = command_argument(cmd, ":graph"sv);
+            if (!arg) {
+                return false;
+            }
+
+            if (state.cells.empty()) {
+                err << "no stored cells available for analysis\n";
+                return true;
+            }
+
+            auto args = trim_view(*arg);
+            if (args.empty()) {
+                err << "invalid :graph, expected cfg|call\n";
+                return true;
+            }
+
+            auto next_token = [&args]() {
+                auto split = args.find_first_of(" \t\r\n");
+                auto token = split == std::string_view::npos ? args : trim_view(args.substr(0U, split));
+                args = split == std::string_view::npos ? std::string_view{} : trim_view(args.substr(split + 1U));
+                return token;
+            };
+
+            auto kind_token = next_token();
+            auto kind = parse_graph_analysis_kind(kind_token);
+            if (!kind.has_value()) {
+                err << "invalid :graph, expected cfg|call\n";
+                return true;
+            }
+
+            auto mode = graph_command_mode::static_render;
+            auto symbol = std::optional<std::string>{};
+
+            if (!args.empty()) {
+                auto token = next_token();
+                if (token == "export"sv) {
+                    mode = graph_command_mode::export_artifact;
+                    if (!args.empty()) {
+                        auto symbol_token = next_token();
+                        if (!symbol_token.empty() && symbol_token != "@last"sv) {
+                            symbol = std::string{symbol_token};
+                        }
+                    }
+                }
+                else if (token == "explore"sv) {
+                    err << "invalid :graph command arguments\n";
+                    return true;
+                }
+                else if (!token.empty() && token != "@last"sv) {
+                    symbol = std::string{token};
+                }
+            }
+
+            if (!args.empty()) {
+                err << "invalid :graph command arguments\n";
+                return true;
+            }
+
+            if (cfg.output == output_mode::json) {
+                mode = graph_command_mode::export_artifact;
+            }
+
+            try {
+                auto request = make_analysis_request(cfg, state);
+                if (symbol.has_value()) {
+                    request.symbol = symbol;
+                }
+
+                auto result = run_analysis(request, *kind);
+                if (mode == graph_command_mode::export_artifact) {
+                    render_analysis_result(result, cfg.output, cfg.verbose, out);
+                    return true;
+                }
+
+                if (!result.success) {
+                    render_analysis_result(result, cfg.output, cfg.verbose, out);
+                    return true;
+                }
+
+                auto ir_request = make_analysis_request(cfg, state);
+                if (symbol.has_value()) {
+                    ir_request.symbol = symbol;
+                }
+                auto ir_result = run_analysis(ir_request, analysis_kind::ir);
+                if (!ir_result.success) {
+                    render_analysis_result(ir_result, cfg.output, cfg.verbose, out);
+                    return true;
+                }
+
+                auto model = internal::explorer::graph_model{};
+                if (*kind == analysis_kind::graph_cfg) {
+                    auto resolved_symbol = parse_graph_summary_field(result.artifact_text, "function"sv);
+                    if (!resolved_symbol.has_value()) {
+                        out << "graph: missing resolved function in graph summary, falling back to export output\n";
+                        render_analysis_result(result, cfg.output, cfg.verbose, out);
+                        return true;
+                    }
+
+                    auto cfg_artifact = graph::build_cfg_graph_artifact(ir_result.artifact_text, *resolved_symbol);
+                    if (!cfg_artifact.has_value()) {
+                        err << "graph error: unable to build cfg graph for {}\n"_format(*resolved_symbol);
+                        render_analysis_result(result, cfg.output, cfg.verbose, out);
+                        return true;
+                    }
+                    model = build_cfg_graph_model(*cfg_artifact, cfg);
+                }
+                else if (*kind == analysis_kind::graph_call) {
+                    auto resolved_root = parse_graph_summary_field(result.artifact_text, "root_symbol"sv);
+                    std::string_view root = {};
+                    if (resolved_root.has_value() && *resolved_root != "<all>") {
+                        root = *resolved_root;
+                    }
+
+                    auto call_artifact =
+                            graph::build_call_graph_artifact(ir_result.artifact_text, root, nullptr, request.verbose);
+                    if (!call_artifact.has_value()) {
+                        err << "graph error: unable to build call graph\n";
+                        render_analysis_result(result, cfg.output, cfg.verbose, out);
+                        return true;
+                    }
+                    model = build_call_graph_model(*call_artifact, cfg);
+                }
+                else {
+                    err << "graph error: unsupported graph kind\n";
+                    return true;
+                }
+
+                internal::explorer::render_graph_sugiyama(model, out);
+                if (auto dot = parse_graph_summary_field(result.artifact_text, "dot"sv),
+                    rendered = parse_graph_summary_field(result.artifact_text, "rendered"sv);
+                    dot.has_value() || rendered.has_value()) {
+                    out << '\n';
+                    if (dot.has_value()) {
+                        out << "dot: {}\n"_format(*dot);
+                    }
+                    if (rendered.has_value()) {
+                        out << "rendered: {}\n"_format(*rendered);
+                    }
+                }
+                return true;
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());
             }
@@ -5318,6 +6117,9 @@ examples:
             if (process_asm_explore_command(cmd, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
+            if (process_ir_explore_command(cmd, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
             if (process_analysis_command(cmd, ":asm"sv, analysis_kind::asm_text, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
@@ -5358,16 +6160,7 @@ examples:
                         cmd, ":inspect mca"sv, analysis_kind::inspect_mca_summary, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
-            if (process_analysis_command(
-                        cmd, ":graph cfg"sv, analysis_kind::graph_cfg, cfg, state, std::cout, std::cerr)) {
-                return true;
-            }
-            if (process_analysis_command(
-                        cmd, ":graph call"sv, analysis_kind::graph_call, cfg, state, std::cout, std::cerr)) {
-                return true;
-            }
-            if (process_analysis_command(
-                        cmd, ":graph defuse"sv, analysis_kind::graph_defuse, cfg, state, std::cout, std::cerr)) {
+            if (process_graph_command(cmd, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
             if (cmd.starts_with(":"sv)) {
@@ -5424,7 +6217,7 @@ examples:
         if (cfg.banner_enabled) {
             if (detail::should_use_color(cfg.color)) {
                 auto palette = detail::resolve_delta_color_palette(cfg.delta_color_scheme);
-                std::cout << palette.inserted << banner << "\x1b[0m\n";
+                std::cout << palette.unchanged << banner << "\x1b[0m\n";
             }
             else {
                 std::cout << banner << '\n';
@@ -5442,7 +6235,7 @@ examples:
             if (pending_cell.empty()) {
                 if (detail::should_use_color(cfg.color)) {
                     auto palette = detail::resolve_delta_color_palette(cfg.delta_color_scheme);
-                    prompt = "{}sontag > \x1b[0m"_format(palette.inserted);
+                    prompt = "{}sontag > \x1b[0m"_format(palette.unchanged);
                 }
                 else {
                     prompt = "sontag > ";
