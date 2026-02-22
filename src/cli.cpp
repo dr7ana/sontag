@@ -9,6 +9,7 @@
 #include "internal/explorer.hpp"
 #include "internal/opcode.hpp"
 #include "internal/platform.hpp"
+#include "internal/tables.hpp"
 #include "internal/types.hpp"
 
 #include <glaze/glaze.hpp>
@@ -3031,6 +3032,114 @@ examples:
             return cell;
         }
 
+        static std::string to_upper_ascii(std::string_view value) {
+            std::string out{};
+            out.reserve(value.size());
+            for (char c : value) {
+                if (c >= 'a' && c <= 'z') {
+                    out.push_back(static_cast<char>(c - ('a' - 'A')));
+                }
+                else {
+                    out.push_back(c);
+                }
+            }
+            return out;
+        }
+
+        static std::string extract_instruction_mnemonic(std::string_view instruction) {
+            auto trimmed = trim_view(instruction);
+            if (trimmed.empty()) {
+                return {};
+            }
+
+            auto end = trimmed.find_first_of(" \t\r\n,");
+            auto token = end == std::string_view::npos ? trimmed : trimmed.substr(0U, end);
+            while (!token.empty() && (token.back() == ':' || token.back() == ',')) {
+                token.remove_suffix(1U);
+            }
+            return to_upper_ascii(token);
+        }
+
+        static std::optional<std::string_view> find_instruction_definition_exact(
+                std::string_view mnemonic, const std::flat_map<std::string, std::string>& table) {
+            if (mnemonic.empty()) {
+                return std::nullopt;
+            }
+            auto it = table.find(std::string{mnemonic});
+            if (it == table.end()) {
+                return std::nullopt;
+            }
+            return it->second;
+        }
+
+        static std::optional<std::string_view> lookup_instruction_definition_in_table(
+                std::string_view mnemonic, const std::flat_map<std::string, std::string>& table) {
+            if (auto hit = find_instruction_definition_exact(mnemonic, table)) {
+                return hit;
+            }
+
+            auto dot = mnemonic.find('.');
+            if (dot != std::string_view::npos && dot > 0U) {
+                if (auto hit = find_instruction_definition_exact(mnemonic.substr(0U, dot), table)) {
+                    return hit;
+                }
+            }
+            return std::nullopt;
+        }
+
+        static size_t count_instruction_definition_hits(
+                std::span<const std::string> instructions, const std::flat_map<std::string, std::string>& table) {
+            auto hits = size_t{0U};
+            for (const auto& instruction : instructions) {
+                auto mnemonic = extract_instruction_mnemonic(instruction);
+                if (!mnemonic.empty() && lookup_instruction_definition_in_table(mnemonic, table).has_value()) {
+                    ++hits;
+                }
+            }
+            return hits;
+        }
+
+        static const std::flat_map<std::string, std::string>& select_instruction_definition_table(
+                std::span<const std::string> instructions) {
+            auto arm_hits = count_instruction_definition_hits(instructions, tables::ARM);
+            auto x86_hits = count_instruction_definition_hits(instructions, tables::X86);
+            if (arm_hits > x86_hits) {
+                return tables::ARM;
+            }
+            if (x86_hits > arm_hits) {
+                return tables::X86;
+            }
+            if constexpr (internal::platform::is_arm64) {
+                return tables::ARM;
+            }
+            return tables::X86;
+        }
+
+        static std::vector<std::string> build_instruction_definitions(std::span<const std::string> instructions) {
+            std::vector<std::string> definitions{};
+            definitions.reserve(instructions.size());
+            if (instructions.empty()) {
+                return definitions;
+            }
+
+            auto* primary = &select_instruction_definition_table(instructions);
+            auto* secondary = primary == &tables::ARM ? &tables::X86 : &tables::ARM;
+            for (const auto& instruction : instructions) {
+                auto mnemonic = extract_instruction_mnemonic(instruction);
+                if (mnemonic.empty()) {
+                    definitions.emplace_back();
+                    continue;
+                }
+
+                auto definition = lookup_instruction_definition_in_table(mnemonic, *primary);
+                if (!definition) {
+                    definition = lookup_instruction_definition_in_table(mnemonic, *secondary);
+                }
+                definitions.push_back(definition ? std::string{*definition} : std::string{});
+            }
+            return definitions;
+        }
+
         static asm_summary summarize_asm_artifact(std::string_view asm_text) {
             auto summary = asm_summary{};
             if (asm_text.empty()) {
@@ -4462,11 +4571,22 @@ examples:
                 }
 
                 auto summary = summarize_asm_artifact(result.artifact_text);
+                auto instruction_definitions = build_instruction_definitions(summary.instruction_rows);
+                std::string_view selected_line_color{};
+                std::string_view selected_definition_color{};
+                if (should_use_color(cfg.color)) {
+                    auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                    selected_line_color = palette.inserted;
+                    selected_definition_color = palette.modified;
+                }
                 auto model = internal::explorer::model{
                         .symbol_display = extract_asm_display_symbol(result.artifact_text).value_or("__sontag_main()"),
                         .operations_total = summary.operations,
                         .opcode_counts = summary.opcode_counts,
-                        .instructions = summary.instruction_rows};
+                        .instructions = summary.instruction_rows,
+                        .instruction_definitions = std::move(instruction_definitions),
+                        .selected_line_color = selected_line_color,
+                        .selected_definition_color = selected_definition_color};
                 auto launch = internal::explorer::run(model, out);
                 if (launch.status == internal::explorer::launch_status::fallback) {
                     out << "{}\n"_format(launch.message);

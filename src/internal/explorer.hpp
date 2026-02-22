@@ -30,6 +30,9 @@ namespace sontag::internal::explorer {
         size_t operations_total{};
         std::vector<std::pair<std::string, size_t>> opcode_counts{};
         std::vector<std::string> instructions{};
+        std::vector<std::string> instruction_definitions{};
+        std::string_view selected_line_color{};
+        std::string_view selected_definition_color{};
     };
 
     enum class launch_status : uint8_t { completed, fallback };
@@ -280,32 +283,84 @@ namespace sontag::internal::explorer {
 
             auto line_width = std::string_view{"  line"}.size();
             auto instruction_width = std::string_view{"instruction"}.size();
+            auto definition_width = std::string_view{"definition"}.size();
             for (size_t i = 0U; i < data.instructions.size(); ++i) {
                 line_width = std::max(line_width, "  [{}]"_format(i).size());
                 instruction_width = std::max(instruction_width, data.instructions[i].size());
+                if (i < data.instruction_definitions.size()) {
+                    definition_width = std::max(definition_width, data.instruction_definitions[i].size());
+                }
             }
 
             append_line("assembly:");
-            append_line("{} | {}"_format(pad_cell("  line", line_width), pad_cell("instruction", instruction_width)));
-            append_line("{}-+-{}"_format(std::string(line_width, '-'), std::string(instruction_width, '-')));
+            append_line(
+                    "{} | {} | {}"_format(
+                            pad_cell("  line", line_width),
+                            pad_cell("instruction", instruction_width),
+                            pad_cell("definition", definition_width)));
+            append_line(
+                    "{}-+-{}-+-{}"_format(
+                            std::string(line_width, '-'),
+                            std::string(instruction_width, '-'),
+                            std::string(definition_width, '-')));
 
             if (data.instructions.empty()) {
-                append_line("{} | {}"_format(pad_cell("  <none>", line_width), pad_cell("", instruction_width)));
+                append_line(
+                        "{} | {} | {}"_format(
+                                pad_cell("  <none>", line_width),
+                                pad_cell("", instruction_width),
+                                pad_cell("", definition_width)));
             }
             else {
                 auto start = std::min(top_row, data.instructions.size() - 1U);
                 auto end = std::min(data.instructions.size(), start + rows_visible);
                 for (size_t i = start; i < end; ++i) {
-                    auto row = "{} | {}"_format(
+                    auto row_prefix = "{} | {}"_format(
                             pad_cell("  [{}]"_format(i), line_width),
                             pad_cell(data.instructions[i], instruction_width));
+                    auto selected_definition = std::string_view{};
+                    if (i == cursor && i < data.instruction_definitions.size()) {
+                        selected_definition = data.instruction_definitions[i];
+                    }
+                    auto row = "{} | {}"_format(row_prefix, pad_cell(selected_definition, definition_width));
                     if (i == cursor) {
-                        frame.append("\x1b[7m");
-                        frame.append(clip_to_width(row, terminal_cols));
-                        frame.append("\x1b[0m\n");
+                        auto clipped = clip_to_width(row, terminal_cols);
+                        auto split_at = row_prefix.size();
+                        if (clipped.size() <= split_at) {
+                            if (data.selected_line_color.empty()) {
+                                frame.append("\x1b[7m");
+                            }
+                            else {
+                                frame.append(data.selected_line_color);
+                            }
+                            frame.append(clipped);
+                            frame.append("\x1b[0m\n");
+                        }
+                        else {
+                            auto left = clipped.substr(0U, split_at);
+                            auto right = clipped.substr(split_at);
+                            if (data.selected_line_color.empty()) {
+                                frame.append("\x1b[7m");
+                            }
+                            else {
+                                frame.append(data.selected_line_color);
+                            }
+                            frame.append(left);
+                            frame.append("\x1b[0m");
+                            if (!right.empty()) {
+                                if (!data.selected_definition_color.empty()) {
+                                    frame.append(data.selected_definition_color);
+                                }
+                                frame.append(right);
+                                if (!data.selected_definition_color.empty()) {
+                                    frame.append("\x1b[0m");
+                                }
+                            }
+                            frame.push_back('\n');
+                        }
                     }
                     else {
-                        append_line(row);
+                        append_line("{} | {}"_format(row_prefix, pad_cell("", definition_width)));
                     }
                 }
             }
