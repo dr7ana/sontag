@@ -127,6 +127,11 @@ Controls:
 
 ![ir explore demo](docs/ir_explore.gif)
 
+### ARM Instruction Support
+Note: tested on Apple Silicon (M4), welcoming any feedback on x86 Intel Mac performance (I don't own one)
+
+![arm demo](docs/arm.gif)
+
 ## State and Session Commands
 
 - `:decl <code>`: append declarative cell
