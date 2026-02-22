@@ -5072,10 +5072,17 @@ examples:
             }
 
             try {
-                auto active_symbol = symbol.has_value() ? *symbol : std::string{"__sontag_main"};
+                struct explore_frame_state {
+                    std::string symbol{};
+                    size_t cursor{};
+                };
+
+                auto active = explore_frame_state{
+                        .symbol = symbol.has_value() ? *symbol : std::string{"__sontag_main"}, .cursor = 0U};
+                std::vector<explore_frame_state> frame_stack{};
                 while (true) {
                     auto request = make_analysis_request(cfg, state);
-                    request.symbol = active_symbol;
+                    request.symbol = active.symbol;
 
                     auto asm_result = run_analysis(request, analysis_kind::asm_text);
                     if (!asm_result.success) {
@@ -5105,7 +5112,7 @@ examples:
                         auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
                         selected_line_color = palette.inserted;
                         selected_definition_color = palette.modified;
-                        call_target_color = palette.unchanged;
+                        call_target_color = palette.removed;
                     }
                     auto model = internal::explorer::model{
                             .symbol_display =
@@ -5118,17 +5125,25 @@ examples:
                             .instruction_definitions = std::move(instruction_definitions),
                             .selected_line_color = selected_line_color,
                             .selected_definition_color = selected_definition_color,
-                            .call_target_color = call_target_color};
+                            .call_target_color = call_target_color,
+                            .initial_cursor = active.cursor};
                     auto launch = internal::explorer::run(model, out);
                     if (launch.status == internal::explorer::launch_status::fallback) {
                         out << "{}\n"_format(launch.message);
                         render_asm_artifact_summary_and_body(asm_result, dump_text, row_info, out);
                         return true;
                     }
-                    if (!launch.next_symbol.has_value() || launch.next_symbol->empty()) {
+                    if (launch.next_symbol.has_value() && !launch.next_symbol->empty()) {
+                        frame_stack.push_back(
+                                explore_frame_state{.symbol = active.symbol, .cursor = launch.selected_row});
+                        active = explore_frame_state{.symbol = *launch.next_symbol, .cursor = 0U};
+                        continue;
+                    }
+                    if (frame_stack.empty()) {
                         return true;
                     }
-                    active_symbol = *launch.next_symbol;
+                    active = std::move(frame_stack.back());
+                    frame_stack.pop_back();
                 }
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());

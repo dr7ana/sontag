@@ -59,6 +59,7 @@ namespace sontag::internal::explorer {
         std::string_view selected_line_color{};
         std::string_view selected_definition_color{};
         std::string_view call_target_color{};
+        size_t initial_cursor{};
     };
 
     enum class launch_status : uint8_t { completed, fallback };
@@ -67,6 +68,7 @@ namespace sontag::internal::explorer {
         launch_status status{launch_status::completed};
         std::string message{};
         std::optional<std::string> next_symbol{};
+        size_t selected_row{};
     };
 
     namespace detail {
@@ -596,13 +598,14 @@ namespace sontag::internal::explorer {
                             call_target_span = std::pair<size_t, size_t>{position, call_target->size()};
                         }
                     }
+                    auto active_call_target_color = i == cursor ? data.call_target_color : std::string_view{};
                     auto instruction_cell = colorize_instruction_mnemonic(
                             aligned_instruction,
                             mnemonic.size(),
                             instruction_width,
                             data.selected_definition_color,
                             call_target_span,
-                            data.call_target_color,
+                            active_call_target_color,
                             i == cursor ? data.selected_line_color : std::string_view{});
                     auto row_prefix = "{} | {} | {} | {}"_format(
                             pad_cell("  [{}]"_format(i), line_width),
@@ -730,8 +733,8 @@ namespace sontag::internal::explorer {
         auto screen = detail::screen_guard{STDOUT_FILENO};
         screen.enter();
 
-        auto cursor = static_cast<size_t>(0U);
-        auto top_row = static_cast<size_t>(0U);
+        auto cursor = std::min(data.initial_cursor, data.rows.size() - 1U);
+        auto top_row = cursor;
         auto running = true;
 
         while (running) {
@@ -761,7 +764,10 @@ namespace sontag::internal::explorer {
                     if (cursor < data.rows.size()) {
                         if (auto next = detail::extract_call_target_symbol(data.rows[cursor].instruction);
                             next.has_value()) {
-                            return launch_result{.status = launch_status::completed, .next_symbol = std::string{*next}};
+                            return launch_result{
+                                    .status = launch_status::completed,
+                                    .next_symbol = std::string{*next},
+                                    .selected_row = cursor};
                         }
                     }
                     break;
@@ -773,7 +779,7 @@ namespace sontag::internal::explorer {
             }
         }
 
-        return launch_result{.status = launch_status::completed};
+        return launch_result{.status = launch_status::completed, .selected_row = cursor};
     }
 
 }  // namespace sontag::internal::explorer
