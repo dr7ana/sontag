@@ -108,7 +108,7 @@ Controls:
 
 - `Up`/`Down` or `j`/`k`: move selection
 - `Enter`: follow callable symbol on selected row (when available)
-- `q`: exit
+- `q`: exit (recursively if you have followed callable symbols)
 
 ![asm explore demo](docs/asm_explore.gif)
 
@@ -128,7 +128,9 @@ Controls:
 ![ir explore demo](docs/ir_explore.gif)
 
 ### ARM Instruction Support
-Note: tested on Apple Silicon (M4), welcoming any feedback on x86 Intel Mac performance (I don't own one)
+Currently tested on:
+- Apple Silicon M4 (welcoming any feedback on x86 Intel Mac performance, as I don't own one)
+- Aarch64 Raspberry Pi
 
 ![arm demo](docs/arm.gif)
 

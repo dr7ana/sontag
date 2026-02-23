@@ -17,6 +17,7 @@ namespace sontag {
         diag,
         mca,
         dump,
+        mem_trace,
         inspect_asm_map,
         inspect_mca_summary,
         inspect_mca_heatmap,
@@ -37,6 +38,8 @@ namespace sontag {
                 return "mca"sv;
             case analysis_kind::dump:
                 return "dump"sv;
+            case analysis_kind::mem_trace:
+                return "mem_trace"sv;
             case analysis_kind::inspect_asm_map:
                 return "inspect asm"sv;
             case analysis_kind::inspect_mca_summary:

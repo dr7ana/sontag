@@ -15,10 +15,10 @@ namespace sontag::cli { namespace detail {
 
     using namespace std::string_view_literals;
 
-    static std::array<const char*, 22> command_completions{
-            ":help",   ":clear",   ":show",  ":symbols",   ":decl", ":declfile", ":file", ":openfile",
-            ":config", ":reset",   ":mark",  ":snapshots", ":asm",  ":ir",       ":diag", ":mca",
-            ":delta",  ":inspect", ":graph", ":quit",      ":q",    nullptr};
+    static std::array<const char*, 23> command_completions{
+            ":help",   ":clear", ":show",    ":symbols",   ":decl", ":declfile", ":file", ":openfile",
+            ":config", ":reset", ":mark",    ":snapshots", ":asm",  ":mem",      ":ir",   ":diag",
+            ":mca",    ":delta", ":inspect", ":graph",     ":quit", ":q",        nullptr};
 
     static std::array<const char*, 2> clear_completions{"last", nullptr};
     static std::array<const char*, 4> reset_completions{"last", "snapshots", "file", nullptr};
@@ -44,7 +44,7 @@ namespace sontag::cli { namespace detail {
             nullptr};
     static std::array<const char*, 3> graph_completions{"cfg", "call", nullptr};
     static std::array<const char*, 4> graph_mode_or_symbol_completions{"export", "@last", "__sontag_main", nullptr};
-    static std::array<const char*, 3> inspect_completions{"asm", "mca", nullptr};
+    static std::array<const char*, 4> inspect_completions{"asm", "mca", "mem", nullptr};
     static std::array<const char*, 3> inspect_mca_completions{"summary", "heatmap", nullptr};
     static std::array<const char*, 3> analysis_target_completions{"@last", "__sontag_main", nullptr};
     static std::array<const char*, 10> delta_completions{
@@ -319,10 +319,20 @@ namespace sontag::cli { namespace detail {
                 ic_complete_word(cenv, prefix, complete_analysis_args, nullptr);
                 return;
             }
+            if (inspect_subcommand == "mem"sv) {
+                auto has_mem_arg = inspect_subcommand.size() < rest.size();
+                if (has_mem_arg) {
+                    ic_complete_word(cenv, prefix, complete_analysis_args, nullptr);
+                    return;
+                }
+                ic_complete_word(cenv, prefix, complete_inspect_args, nullptr);
+                return;
+            }
             ic_complete_word(cenv, prefix, complete_inspect_args, nullptr);
             return;
         }
-        if (command == ":asm"sv || command == ":ir"sv || command == ":diag"sv || command == ":mca"sv) {
+        if (command == ":asm"sv || command == ":mem"sv || command == ":ir"sv || command == ":diag"sv ||
+            command == ":mca"sv) {
             ic_complete_word(cenv, prefix, complete_analysis_args, nullptr);
             return;
         }

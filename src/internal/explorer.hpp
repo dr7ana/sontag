@@ -51,10 +51,13 @@ namespace sontag::internal::explorer {
     };
 
     struct model {
+        std::string_view mode_label{"asm"};
         std::string symbol_display{};
         size_t operations_total{};
         std::vector<std::pair<std::string, size_t>> opcode_counts{};
         std::vector<asm_row> rows{};
+        std::vector<std::string> table_extra_headers{};
+        std::vector<std::vector<std::string>> table_extra_values{};
         std::vector<instruction_info> row_info{};
         resource_pressure_table resource_pressure{};
         std::vector<std::string> instruction_definitions{};
@@ -1277,7 +1280,8 @@ namespace sontag::internal::explorer {
             };
 
             frame.append("\x1b[H\x1b[2J");
-            append_line("asm explorer:");
+            auto label = data.mode_label.empty() ? "asm"sv : data.mode_label;
+            append_line("{} explorer:"_format(label));
             append_line("symbol: {}"_format(data.symbol_display));
             append_line("operations: {}"_format(data.operations_total));
 
@@ -1355,6 +1359,16 @@ namespace sontag::internal::explorer {
             auto encoding_width = std::string_view{"encodings"}.size();
             auto instruction_width = std::string_view{"instruction"}.size();
             auto definition_width = std::string_view{"definition"}.size();
+            auto extra_column_widths = std::vector<size_t>{};
+            extra_column_widths.reserve(data.table_extra_headers.size());
+            for (size_t i = 0U; i < data.table_extra_headers.size(); ++i) {
+                auto width = data.table_extra_headers[i].size();
+                for (const auto& row_values : data.table_extra_values) {
+                    auto value = i < row_values.size() ? std::string_view{row_values[i]} : std::string_view{};
+                    width = std::max(width, value.size());
+                }
+                extra_column_widths.push_back(width);
+            }
             auto mnemonic_width = size_t{0U};
             for (size_t i = 0U; i < data.rows.size(); ++i) {
                 auto [mnemonic, _] = split_instruction_parts(data.rows[i].instruction);
@@ -1373,29 +1387,43 @@ namespace sontag::internal::explorer {
 
             append_line("");
             append_line("assembly:");
-            append_line(
-                    "{} | {} | {} | {} | {}"_format(
-                            pad_cell("  line", line_width),
-                            pad_cell("offset", offset_width),
-                            pad_cell("encodings", encoding_width),
-                            pad_cell("instruction", instruction_width),
-                            pad_cell("definition", definition_width)));
-            append_line(
-                    "{}-+-{}-+-{}-+-{}-+-{}"_format(
-                            std::string(line_width, '-'),
-                            std::string(offset_width, '-'),
-                            std::string(encoding_width, '-'),
-                            std::string(instruction_width, '-'),
-                            std::string(definition_width, '-')));
+            auto header_row = "{} | {} | {} | {}"_format(
+                    pad_cell("  line", line_width),
+                    pad_cell("offset", offset_width),
+                    pad_cell("encodings", encoding_width),
+                    pad_cell("instruction", instruction_width));
+            auto separator_row = "{}-+-{}-+-{}-+-{}"_format(
+                    std::string(line_width, '-'),
+                    std::string(offset_width, '-'),
+                    std::string(encoding_width, '-'),
+                    std::string(instruction_width, '-'));
+            for (size_t i = 0U; i < data.table_extra_headers.size(); ++i) {
+                header_row.append(" | ");
+                header_row.append(pad_cell(data.table_extra_headers[i], extra_column_widths[i]));
+                separator_row.append("-+-");
+                separator_row.append(std::string(extra_column_widths[i], '-'));
+            }
+            header_row.append(" | ");
+            header_row.append(pad_cell("definition", definition_width));
+            separator_row.append("-+-");
+            separator_row.append(std::string(definition_width, '-'));
+
+            append_line(header_row);
+            append_line(separator_row);
 
             if (data.rows.empty()) {
-                append_line(
-                        "{} | {} | {} | {} | {}"_format(
-                                pad_cell("  <none>", line_width),
-                                pad_cell("", offset_width),
-                                pad_cell("", encoding_width),
-                                pad_cell("", instruction_width),
-                                pad_cell("", definition_width)));
+                auto empty_row = "{} | {} | {} | {}"_format(
+                        pad_cell("  <none>", line_width),
+                        pad_cell("", offset_width),
+                        pad_cell("", encoding_width),
+                        pad_cell("", instruction_width));
+                for (size_t i = 0U; i < data.table_extra_headers.size(); ++i) {
+                    empty_row.append(" | ");
+                    empty_row.append(pad_cell("", extra_column_widths[i]));
+                }
+                empty_row.append(" | ");
+                empty_row.append(pad_cell("", definition_width));
+                append_line(empty_row);
             }
             else {
                 auto start = std::min(top_row, data.rows.size() - 1U);
@@ -1425,6 +1453,20 @@ namespace sontag::internal::explorer {
                             pad_cell(offset, offset_width),
                             pad_cell(data.rows[i].encodings, encoding_width),
                             instruction_cell);
+                    if (i < data.table_extra_values.size()) {
+                        const auto& row_values = data.table_extra_values[i];
+                        for (size_t j = 0U; j < data.table_extra_headers.size(); ++j) {
+                            auto value = j < row_values.size() ? std::string_view{row_values[j]} : std::string_view{};
+                            row_prefix.append(" | ");
+                            row_prefix.append(pad_cell(value, extra_column_widths[j]));
+                        }
+                    }
+                    else {
+                        for (size_t j = 0U; j < data.table_extra_headers.size(); ++j) {
+                            row_prefix.append(" | ");
+                            row_prefix.append(pad_cell("", extra_column_widths[j]));
+                        }
+                    }
                     auto selected_definition = std::string_view{};
                     if (i == cursor && i < data.instruction_definitions.size()) {
                         selected_definition = data.instruction_definitions[i];
@@ -2045,16 +2087,18 @@ namespace sontag::internal::explorer {
     }  // namespace detail
 
     inline launch_result run(const model& data, std::ostream& out) {
+        auto label = data.mode_label.empty() ? "asm"sv : data.mode_label;
         if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
             return launch_result{
                     .status = launch_status::fallback,
-                    .message = "asm explore: requires an interactive tty, falling back to :asm output"};
+                    .message =
+                            "{} explore: requires an interactive tty, falling back to :{} output"_format(label, label)};
         }
 
         if (data.rows.empty()) {
             return launch_result{
                     .status = launch_status::fallback,
-                    .message = "asm explore: no assembly instructions available, falling back to :asm output"};
+                    .message = "{} explore: no rows available, falling back to :{} output"_format(label, label)};
         }
 
         auto terminal_guard = detail::raw_terminal_guard{STDIN_FILENO};
@@ -2062,7 +2106,7 @@ namespace sontag::internal::explorer {
         if (!terminal_guard.activate(setup_error)) {
             return launch_result{
                     .status = launch_status::fallback,
-                    .message = "asm explore: {} (falling back to :asm output)"_format(setup_error)};
+                    .message = "{} explore: {} (falling back to :{} output)"_format(label, setup_error, label)};
         }
 
         auto screen = detail::screen_guard{STDOUT_FILENO};

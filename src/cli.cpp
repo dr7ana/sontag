@@ -8,6 +8,7 @@
 #include "internal/delta.hpp"
 #include "internal/editor.hpp"
 #include "internal/explorer.hpp"
+#include "internal/mem.hpp"
 #include "internal/opcode.hpp"
 #include "internal/platform.hpp"
 #include "internal/tables.hpp"
@@ -116,6 +117,50 @@ namespace sontag::cli { namespace detail {
         std::vector<analysis_opcode_entry> opcode_table{};
         std::vector<analysis_operation_entry> operations{};
         std::vector<metric_output_record> metrics{};
+    };
+
+    struct mem_summary_output_record {
+        size_t memory_ops{};
+        size_t loads{};
+        size_t stores{};
+        size_t rmw{};
+        size_t alias_groups{};
+        size_t stack{};
+        size_t globals{};
+        size_t unknown{};
+    };
+
+    struct mem_row_output_record {
+        size_t line{};
+        std::string offset{};
+        std::string encodings{};
+        std::string instruction{};
+        std::string mnemonic{};
+        std::string access{};
+        std::optional<size_t> width_bytes{};
+        std::string address_expr{};
+        std::string address_class{};
+        bool may_load{false};
+        bool may_store{false};
+        std::optional<std::string> base_reg{};
+        std::optional<std::string> index_reg{};
+        std::optional<int> scale{};
+        std::optional<int64_t> displacement{};
+        std::optional<std::string> symbol{};
+        std::optional<size_t> alias_group{};
+        std::vector<size_t> source_refs{};
+        std::optional<std::string> runtime_address{};
+        std::optional<std::string> observed_value{};
+        size_t value_variation_count{};
+        std::vector<std::string> trace_samples{};
+    };
+
+    struct mem_inspect_output_record {
+        std::string command{"inspect mem"};
+        std::string symbol{};
+        std::string symbol_display{};
+        mem_summary_output_record summary{};
+        std::vector<mem_row_output_record> rows{};
     };
 
     struct delta_operation_output_record {
@@ -306,6 +351,94 @@ namespace glz {
                        &T::operations,
                        "metrics",
                        &T::metrics);
+    };
+
+    template <>
+    struct meta<sontag::cli::detail::mem_summary_output_record> {
+        using T = sontag::cli::detail::mem_summary_output_record;
+        static constexpr auto value =
+                object("memory_ops",
+                       &T::memory_ops,
+                       "loads",
+                       &T::loads,
+                       "stores",
+                       &T::stores,
+                       "rmw",
+                       &T::rmw,
+                       "alias_groups",
+                       &T::alias_groups,
+                       "stack",
+                       &T::stack,
+                       "globals",
+                       &T::globals,
+                       "unknown",
+                       &T::unknown);
+    };
+
+    template <>
+    struct meta<sontag::cli::detail::mem_row_output_record> {
+        using T = sontag::cli::detail::mem_row_output_record;
+        static constexpr auto value =
+                object("line",
+                       &T::line,
+                       "offset",
+                       &T::offset,
+                       "encodings",
+                       &T::encodings,
+                       "instruction",
+                       &T::instruction,
+                       "mnemonic",
+                       &T::mnemonic,
+                       "access",
+                       &T::access,
+                       "width_bytes",
+                       &T::width_bytes,
+                       "address_expr",
+                       &T::address_expr,
+                       "address_class",
+                       &T::address_class,
+                       "may_load",
+                       &T::may_load,
+                       "may_store",
+                       &T::may_store,
+                       "base_reg",
+                       &T::base_reg,
+                       "index_reg",
+                       &T::index_reg,
+                       "scale",
+                       &T::scale,
+                       "displacement",
+                       &T::displacement,
+                       "symbol",
+                       &T::symbol,
+                       "alias_group",
+                       &T::alias_group,
+                       "source_refs",
+                       &T::source_refs,
+                       "runtime_address",
+                       &T::runtime_address,
+                       "observed_value",
+                       &T::observed_value,
+                       "value_variation_count",
+                       &T::value_variation_count,
+                       "trace_samples",
+                       &T::trace_samples);
+    };
+
+    template <>
+    struct meta<sontag::cli::detail::mem_inspect_output_record> {
+        using T = sontag::cli::detail::mem_inspect_output_record;
+        static constexpr auto value =
+                object("command",
+                       &T::command,
+                       "symbol",
+                       &T::symbol,
+                       "symbol_display",
+                       &T::symbol_display,
+                       "summary",
+                       &T::summary,
+                       "rows",
+                       &T::rows);
     };
 
 }  // namespace glz
@@ -858,7 +991,8 @@ namespace sontag::cli {
                 const startup_config& cfg, const fs::path& path, std::ostream& out, std::ostream& err) {
             auto editor = resolve_editor_executable(cfg);
             if (!editor) {
-                err << "failed to resolve editor (tried configured editor, VISUAL, EDITOR, hx, neovim, vim, nano)\n";
+                err << "failed to resolve editor (tried configured editor, VISUAL, EDITOR, hx, neovim, vim, "
+                       "nano)\n";
                 err << "state unchanged\n";
                 return false;
             }
@@ -2267,6 +2401,8 @@ namespace sontag::cli {
   :snapshots
   :asm [symbol|@last] (default: __sontag_main)
   :asm explore [symbol|@last]
+  :mem [symbol|@last] (default: __sontag_main)
+  :mem explore [symbol|@last]
   :ir [symbol|@last] (default: __sontag_main)
   :ir explore [symbol|@last]
   :diag [symbol|@last]
@@ -2275,6 +2411,7 @@ namespace sontag::cli {
   :delta <snapshot> [target_opt]
   :inspect asm [symbol|@last]
   :inspect mca [summary|heatmap] [symbol|@last]
+  :inspect mem [symbol|@last]
   :graph cfg [symbol|@last]
   :graph cfg export [symbol|@last]
   :graph call [symbol|@last]
@@ -2297,6 +2434,8 @@ examples:
   :mark baseline
   :asm
   :asm explore
+  :mem
+  :mem explore
   :delta
   :ir explore
   :delta spectrum
@@ -2306,6 +2445,7 @@ examples:
   :delta add
   :inspect asm
   :inspect mca
+  :inspect mem
   :graph cfg
   :graph cfg export
   :graph call
@@ -2890,6 +3030,21 @@ examples:
             size_t operations{};
             std::vector<std::pair<std::string, size_t>> opcode_counts{};
             std::vector<internal::explorer::asm_row> rows{};
+        };
+
+        struct mem_summary {
+            std::vector<internal::mem::row> rows{};
+            internal::mem::summary totals{};
+            std::vector<std::pair<std::string, size_t>> opcode_counts{};
+            size_t alias_groups{};
+        };
+
+        struct mem_analysis_data {
+            analysis_result asm_result{};
+            std::string symbol_display{"__sontag_main()"};
+            mem_summary summary{};
+            std::vector<internal::explorer::instruction_info> row_info{};
+            internal::explorer::resource_pressure_table resource_pressure{};
         };
 
         static void append_opcode_count(
@@ -3952,6 +4107,824 @@ examples:
             return summary;
         }
 
+        static mem_summary summarize_mem_rows(
+                std::span<const internal::explorer::asm_row> rows,
+                std::span<const internal::explorer::instruction_info> row_info) {
+            auto summary = mem_summary{};
+            auto inputs = std::vector<internal::mem::row_input>{};
+            inputs.reserve(rows.size());
+
+            for (size_t i = 0U; i < rows.size(); ++i) {
+                auto may_load = i < row_info.size() ? row_info[i].may_load : false;
+                auto may_store = i < row_info.size() ? row_info[i].may_store : false;
+                inputs.push_back(
+                        internal::mem::row_input{
+                                .line = i,
+                                .offset = rows[i].offset,
+                                .encodings = rows[i].encodings,
+                                .instruction = rows[i].instruction,
+                                .may_load = may_load,
+                                .may_store = may_store});
+            }
+
+            summary.rows = internal::mem::build_rows(inputs);
+            summary.totals = internal::mem::summarize(summary.rows);
+            summary.opcode_counts.reserve(summary.rows.size());
+            for (const auto& row : summary.rows) {
+                append_opcode_count(summary.opcode_counts, row.mnemonic);
+            }
+            return summary;
+        }
+
+        static std::string normalize_mem_alias_token(std::string_view value) {
+            auto out = std::string{};
+            out.reserve(value.size());
+            for (auto c : value) {
+                out.push_back(utils::char_tolower(c));
+            }
+            return out;
+        }
+
+        static std::string build_mem_alias_key(const internal::mem::row& row) {
+            if (row.symbol.has_value() && !row.symbol->empty()) {
+                return "sym:{}"_format(normalize_mem_alias_token(*row.symbol));
+            }
+
+            if (row.address_kind == internal::mem::address_class::stack) {
+                return "stack:{}:{}:{}"_format(
+                        row.base_reg.value_or("-"),
+                        row.index_reg.value_or("-"),
+                        row.displacement.has_value() ? "{}"_format(*row.displacement) : std::string{"?"});
+            }
+
+            if (row.address_expr.empty()) {
+                return "addr:none";
+            }
+
+            return "addr:{}:{}:{}:{}"_format(
+                    row.base_reg.value_or("-"),
+                    row.index_reg.value_or("-"),
+                    row.scale.has_value() ? "{}"_format(*row.scale) : std::string{"?"},
+                    row.displacement.has_value() ? "{}"_format(*row.displacement) : std::string{"?"});
+        }
+
+        static void assign_mem_alias_groups(mem_summary& summary) {
+            auto alias_to_group = std::unordered_map<std::string, size_t>{};
+            alias_to_group.reserve(summary.rows.size());
+            auto next_group = size_t{0U};
+            for (auto& row : summary.rows) {
+                auto key = build_mem_alias_key(row);
+                auto [it, inserted] = alias_to_group.try_emplace(std::move(key), next_group);
+                if (inserted) {
+                    ++next_group;
+                }
+                row.alias_group = it->second;
+            }
+            summary.alias_groups = alias_to_group.size();
+        }
+
+        struct ir_memory_line {
+            size_t line{};
+            internal::mem::access_kind access{internal::mem::access_kind::none};
+            std::vector<std::string> symbols{};
+            bool stack_like{false};
+        };
+
+        static std::vector<std::string> extract_ir_symbol_tokens(std::string_view line) {
+            auto symbols = std::vector<std::string>{};
+            size_t i = 0U;
+            while (i < line.size()) {
+                if (line[i] != '@') {
+                    ++i;
+                    continue;
+                }
+                auto start = i + 1U;
+                auto end = start;
+                while (end < line.size()) {
+                    auto c = static_cast<unsigned char>(line[end]);
+                    auto is_symbol_char = std::isalnum(c) || line[end] == '_' || line[end] == '$' || line[end] == '.';
+                    if (!is_symbol_char) {
+                        break;
+                    }
+                    ++end;
+                }
+                if (end > start) {
+                    symbols.push_back(normalize_mem_alias_token(line.substr(start, end - start)));
+                }
+                i = end;
+            }
+            return symbols;
+        }
+
+        static internal::mem::access_kind infer_ir_memory_access(std::string_view line) {
+            auto trimmed = trim_view(line);
+            if (trimmed.empty()) {
+                return internal::mem::access_kind::none;
+            }
+            if (trimmed.find("atomicrmw "sv) != std::string_view::npos ||
+                trimmed.find("cmpxchg "sv) != std::string_view::npos) {
+                return internal::mem::access_kind::rmw;
+            }
+            if (trimmed.starts_with("store "sv)) {
+                return internal::mem::access_kind::store;
+            }
+            if (trimmed.find(" = load "sv) != std::string_view::npos) {
+                return internal::mem::access_kind::load;
+            }
+            return internal::mem::access_kind::none;
+        }
+
+        static std::vector<ir_memory_line> collect_ir_memory_lines(std::string_view ir_text) {
+            auto lines = std::vector<ir_memory_line>{};
+            if (ir_text.empty()) {
+                return lines;
+            }
+
+            size_t begin = 0U;
+            auto line_no = size_t{1U};
+            while (begin <= ir_text.size()) {
+                auto end = ir_text.find('\n', begin);
+                if (end == std::string_view::npos) {
+                    end = ir_text.size();
+                }
+                auto line = ir_text.substr(begin, end - begin);
+                auto access = infer_ir_memory_access(line);
+                if (access != internal::mem::access_kind::none) {
+                    lines.push_back(
+                            ir_memory_line{
+                                    .line = line_no,
+                                    .access = access,
+                                    .symbols = extract_ir_symbol_tokens(line),
+                                    .stack_like = line.find(" ptr %"sv) != std::string_view::npos ||
+                                                  line.find("alloca "sv) != std::string_view::npos});
+                }
+                if (end == ir_text.size()) {
+                    break;
+                }
+                begin = end + 1U;
+                ++line_no;
+            }
+
+            return lines;
+        }
+
+        static void attach_mem_ir_hints(mem_summary& summary, std::string_view ir_text) {
+            auto ir_lines = collect_ir_memory_lines(ir_text);
+            if (ir_lines.empty()) {
+                return;
+            }
+
+            for (auto& row : summary.rows) {
+                auto scored = std::vector<std::pair<int, size_t>>{};
+                scored.reserve(ir_lines.size());
+                auto row_symbol = row.symbol.has_value() ? normalize_mem_alias_token(*row.symbol) : std::string{};
+                for (const auto& ir_line : ir_lines) {
+                    auto score = 0;
+                    if (ir_line.access == row.access || ir_line.access == internal::mem::access_kind::rmw ||
+                        row.access == internal::mem::access_kind::rmw) {
+                        score += 5;
+                    }
+                    if (!row_symbol.empty()) {
+                        if (std::ranges::find(ir_line.symbols, row_symbol) != ir_line.symbols.end()) {
+                            score += 7;
+                        }
+                    }
+                    if (row.address_kind == internal::mem::address_class::stack && ir_line.stack_like) {
+                        score += 3;
+                    }
+                    if ((row.address_kind == internal::mem::address_class::global ||
+                         row.address_kind == internal::mem::address_class::pc_relative) &&
+                        !ir_line.symbols.empty()) {
+                        score += 2;
+                    }
+                    if (score > 0) {
+                        scored.push_back({score, ir_line.line});
+                    }
+                }
+
+                std::sort(scored.begin(), scored.end(), [](const auto& lhs, const auto& rhs) {
+                    if (lhs.first != rhs.first) {
+                        return lhs.first > rhs.first;
+                    }
+                    return lhs.second < rhs.second;
+                });
+
+                row.ir_line_hints.clear();
+                for (const auto& [_, line] : scored) {
+                    if (std::ranges::find(row.ir_line_hints, line) != row.ir_line_hints.end()) {
+                        continue;
+                    }
+                    row.ir_line_hints.push_back(line);
+                    if (row.ir_line_hints.size() >= 3U) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        static std::string format_mem_offset_cell(std::string_view offset) {
+            if (offset.empty()) {
+                return {};
+            }
+            if (offset.starts_with("0x"sv) || offset.starts_with("0X"sv)) {
+                return std::string{offset};
+            }
+            return "0x{}"_format(offset);
+        }
+
+        static std::string format_mem_width_cell(const internal::mem::row& row) {
+            return row.width_bytes.has_value() ? "{}"_format(*row.width_bytes) : std::string{"-"};
+        }
+
+        static std::string format_mem_address_cell(const internal::mem::row& row) {
+            return row.address_expr.empty() ? std::string{"-"} : row.address_expr;
+        }
+
+        static std::string format_mem_symbol_cell(const internal::mem::row& row) {
+            return row.symbol.has_value() ? *row.symbol : std::string{"-"};
+        }
+
+        static std::string format_mem_alias_cell(const internal::mem::row& row) {
+            return row.alias_group.has_value() ? "g{}"_format(*row.alias_group) : std::string{"-"};
+        }
+
+        struct mem_trace_map_record {
+            uint64_t trace_id{};
+            size_t ir_line{};
+            internal::mem::access_kind access{internal::mem::access_kind::none};
+            std::string pointer_expr{};
+        };
+
+        struct mem_trace_event_record {
+            uint64_t sequence{};
+            uint64_t trace_id{};
+            internal::mem::access_kind access{internal::mem::access_kind::none};
+            uint64_t address{};
+            uint64_t width_bytes{};
+            uint64_t value{};
+        };
+
+        struct mem_trace_artifact {
+            std::string symbol{};
+            bool truncated{false};
+            size_t dropped_events{};
+            std::vector<mem_trace_map_record> map{};
+            std::vector<mem_trace_event_record> events{};
+        };
+
+        static std::optional<internal::mem::access_kind> parse_mem_trace_access(std::string_view token) {
+            token = trim_view(token);
+            if (token == "load"sv || token == "L"sv) {
+                return internal::mem::access_kind::load;
+            }
+            if (token == "store"sv || token == "S"sv) {
+                return internal::mem::access_kind::store;
+            }
+            if (token == "rmw"sv || token == "R"sv) {
+                return internal::mem::access_kind::rmw;
+            }
+            return std::nullopt;
+        }
+
+        static bool parse_uint64_decimal(std::string_view text, uint64_t& out) {
+            text = trim_view(text);
+            if (text.empty()) {
+                return false;
+            }
+            auto value = uint64_t{0};
+            auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value, 10);
+            if (ec != std::errc{} || ptr != text.data() + text.size()) {
+                return false;
+            }
+            out = value;
+            return true;
+        }
+
+        static bool parse_uint64_hex(std::string_view text, uint64_t& out) {
+            text = trim_view(text);
+            if (text.size() >= 2U && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+                text.remove_prefix(2U);
+            }
+            if (text.empty()) {
+                return false;
+            }
+            auto value = uint64_t{0};
+            auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value, 16);
+            if (ec != std::errc{} || ptr != text.data() + text.size()) {
+                return false;
+            }
+            out = value;
+            return true;
+        }
+
+        static std::vector<std::string_view> split_pipe_tokens(std::string_view line) {
+            auto tokens = std::vector<std::string_view>{};
+            auto begin = size_t{0U};
+            while (begin <= line.size()) {
+                auto end = line.find('|', begin);
+                if (end == std::string_view::npos) {
+                    end = line.size();
+                }
+                tokens.push_back(line.substr(begin, end - begin));
+                if (end == line.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+            return tokens;
+        }
+
+        static std::optional<mem_trace_map_record> parse_mem_trace_map_record(std::string_view line) {
+            auto fields = split_pipe_tokens(trim_view(line));
+            if (fields.size() < 3U) {
+                return std::nullopt;
+            }
+            auto trace_id = uint64_t{0};
+            auto ir_line = uint64_t{0};
+            if (!parse_uint64_decimal(fields[0], trace_id) || !parse_uint64_decimal(fields[1], ir_line)) {
+                return std::nullopt;
+            }
+            auto access = parse_mem_trace_access(fields[2]);
+            if (!access.has_value()) {
+                return std::nullopt;
+            }
+            return mem_trace_map_record{
+                    .trace_id = trace_id,
+                    .ir_line = static_cast<size_t>(ir_line),
+                    .access = *access,
+                    .pointer_expr = fields.size() >= 4U ? std::string{trim_view(fields[3])} : std::string{}};
+        }
+
+        static std::optional<mem_trace_event_record> parse_mem_trace_event_record(std::string_view line) {
+            auto fields = split_pipe_tokens(trim_view(line));
+            if (fields.size() != 6U) {
+                return std::nullopt;
+            }
+            auto sequence = uint64_t{0};
+            auto trace_id = uint64_t{0};
+            auto address = uint64_t{0};
+            auto width = uint64_t{0};
+            auto value = uint64_t{0};
+            if (!parse_uint64_decimal(fields[0], sequence) || !parse_uint64_decimal(fields[1], trace_id) ||
+                !parse_uint64_hex(fields[3], address) || !parse_uint64_decimal(fields[4], width) ||
+                !parse_uint64_hex(fields[5], value)) {
+                return std::nullopt;
+            }
+            auto access = parse_mem_trace_access(fields[2]);
+            if (!access.has_value()) {
+                return std::nullopt;
+            }
+            return mem_trace_event_record{
+                    .sequence = sequence,
+                    .trace_id = trace_id,
+                    .access = *access,
+                    .address = address,
+                    .width_bytes = width,
+                    .value = value};
+        }
+
+        static std::optional<mem_trace_artifact> parse_mem_trace_artifact(std::string_view text) {
+            auto artifact = mem_trace_artifact{};
+            enum class parse_state : uint8_t { header, map, events };
+            auto state = parse_state::header;
+
+            size_t begin = 0U;
+            while (begin <= text.size()) {
+                auto end = text.find('\n', begin);
+                if (end == std::string_view::npos) {
+                    end = text.size();
+                }
+                auto line = trim_view(text.substr(begin, end - begin));
+                if (!line.empty()) {
+                    if (line == "--map--"sv) {
+                        state = parse_state::map;
+                    }
+                    else if (line == "--events--"sv) {
+                        state = parse_state::events;
+                    }
+                    else if (state == parse_state::header) {
+                        auto split = line.find('=');
+                        if (split != std::string_view::npos) {
+                            auto key = trim_view(line.substr(0U, split));
+                            auto value = trim_view(line.substr(split + 1U));
+                            if (key == "symbol"sv) {
+                                artifact.symbol = std::string{value};
+                            }
+                            else if (key == "truncated"sv) {
+                                artifact.truncated = (value == "true"sv);
+                            }
+                            else if (key == "dropped_events"sv) {
+                                auto dropped = uint64_t{0};
+                                if (parse_uint64_decimal(value, dropped)) {
+                                    artifact.dropped_events = static_cast<size_t>(dropped);
+                                }
+                            }
+                        }
+                    }
+                    else if (state == parse_state::map) {
+                        if (auto parsed = parse_mem_trace_map_record(line); parsed.has_value()) {
+                            artifact.map.push_back(std::move(*parsed));
+                        }
+                    }
+                    else if (state == parse_state::events) {
+                        if (auto parsed = parse_mem_trace_event_record(line); parsed.has_value()) {
+                            artifact.events.push_back(std::move(*parsed));
+                        }
+                    }
+                }
+
+                if (end == text.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+
+            if (artifact.map.empty() && artifact.events.empty()) {
+                return std::nullopt;
+            }
+            std::ranges::sort(
+                    artifact.events, [](const auto& lhs, const auto& rhs) { return lhs.sequence < rhs.sequence; });
+            return artifact;
+        }
+
+        static std::string format_runtime_hex(uint64_t value, size_t width_bytes) {
+            auto width = std::clamp<size_t>(width_bytes, 1U, 8U);
+            auto digits = width * 2U;
+            auto out = std::ostringstream{};
+            out << "0x" << std::hex << std::nouppercase << std::setw(static_cast<int>(digits)) << std::setfill('0')
+                << value;
+            return out.str();
+        }
+
+        static constexpr bool is_ir_symbol_char(char c) noexcept {
+            auto lower = static_cast<char>(utils::char_tolower(c));
+            return (c >= '0' && c <= '9') || (lower >= 'a' && lower <= 'z') || c == '_' || c == '$' || c == '.';
+        }
+
+        static bool pointer_expr_contains_symbol(std::string_view pointer_expr, std::string_view symbol) {
+            if (symbol.empty()) {
+                return false;
+            }
+            auto needle = "@{}"_format(symbol);
+            auto pos = pointer_expr.find(needle);
+            if (pos == std::string_view::npos) {
+                return false;
+            }
+            auto end = pos + needle.size();
+            return end >= pointer_expr.size() || !is_ir_symbol_char(pointer_expr[end]);
+        }
+
+        static std::optional<int64_t> parse_ir_gep_last_index(std::string_view pointer_expr) {
+            auto marker = pointer_expr.rfind(", i64 "sv);
+            if (marker == std::string_view::npos) {
+                return std::nullopt;
+            }
+            auto start = marker + ", i64 "sv.size();
+            auto end = start;
+            while (end < pointer_expr.size() &&
+                   (std::isdigit(static_cast<unsigned char>(pointer_expr[end])) || pointer_expr[end] == '-' ||
+                    pointer_expr[end] == '+')) {
+                ++end;
+            }
+            if (end <= start) {
+                return std::nullopt;
+            }
+            auto token = pointer_expr.substr(start, end - start);
+            auto value = int64_t{0};
+            auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), value, 10);
+            if (ec != std::errc{} || ptr != token.data() + token.size()) {
+                return std::nullopt;
+            }
+            return value;
+        }
+
+        static bool mem_trace_map_matches_row(const internal::mem::row& row, const mem_trace_map_record& entry) {
+            if (entry.access != row.access && entry.access != internal::mem::access_kind::rmw &&
+                row.access != internal::mem::access_kind::rmw) {
+                return false;
+            }
+
+            if (row.symbol.has_value() && !row.symbol->empty()) {
+                if (!pointer_expr_contains_symbol(entry.pointer_expr, *row.symbol)) {
+                    return false;
+                }
+            }
+
+            if (row.symbol.has_value() && row.displacement.has_value() && row.width_bytes.has_value() &&
+                *row.width_bytes > 0U && entry.pointer_expr.find("getelementptr"sv) != std::string::npos) {
+                auto expected_index = static_cast<int64_t>(*row.displacement / static_cast<int64_t>(*row.width_bytes));
+                if ((*row.displacement % static_cast<int64_t>(*row.width_bytes)) == 0) {
+                    if (auto parsed_index = parse_ir_gep_last_index(entry.pointer_expr); parsed_index.has_value()) {
+                        return *parsed_index == expected_index;
+                    }
+                }
+            }
+
+            if (row.symbol.has_value() && row.displacement.has_value() && *row.displacement != 0 &&
+                entry.pointer_expr.find("getelementptr"sv) == std::string::npos) {
+                return false;
+            }
+
+            return true;
+        }
+
+        static void apply_mem_runtime_trace(mem_summary& summary, std::string_view trace_text) {
+            auto parsed = parse_mem_trace_artifact(trace_text);
+            if (!parsed.has_value()) {
+                return;
+            }
+
+            auto events_by_trace_id = std::unordered_map<uint64_t, std::vector<const mem_trace_event_record*>>{};
+            events_by_trace_id.reserve(parsed->events.size());
+            for (const auto& event : parsed->events) {
+                events_by_trace_id[event.trace_id].push_back(&event);
+            }
+
+            auto map_entries_by_line = std::unordered_map<size_t, std::vector<const mem_trace_map_record*>>{};
+            map_entries_by_line.reserve(parsed->map.size());
+            for (const auto& entry : parsed->map) {
+                map_entries_by_line[entry.ir_line].push_back(&entry);
+            }
+
+            for (auto& row : summary.rows) {
+                if (row.ir_line_hints.empty()) {
+                    continue;
+                }
+                if (!row.symbol.has_value() &&
+                    (row.mnemonic == "push"sv || row.mnemonic == "pop"sv || row.mnemonic == "call"sv ||
+                     row.mnemonic == "ret"sv)) {
+                    continue;
+                }
+
+                auto collect_for_line = [&](size_t ir_line) {
+                    auto matches = std::vector<const mem_trace_event_record*>{};
+                    if (auto it = map_entries_by_line.find(ir_line); it != map_entries_by_line.end()) {
+                        auto matching_map_entries = std::vector<const mem_trace_map_record*>{};
+                        matching_map_entries.reserve(it->second.size());
+                        for (const auto* map_entry : it->second) {
+                            if (mem_trace_map_matches_row(row, *map_entry)) {
+                                matching_map_entries.push_back(map_entry);
+                            }
+                        }
+
+                        for (const auto* map_entry : matching_map_entries) {
+                            auto trace_id = map_entry->trace_id;
+                            if (auto event_it = events_by_trace_id.find(trace_id); event_it != events_by_trace_id.end()) {
+                                for (const auto* event : event_it->second) {
+                                    if (event->access == row.access ||
+                                        row.access == internal::mem::access_kind::rmw ||
+                                        event->access == internal::mem::access_kind::rmw) {
+                                        matches.push_back(event);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return matches;
+                };
+
+                auto candidate_events = std::vector<const mem_trace_event_record*>{};
+                for (const auto ir_line : row.ir_line_hints) {
+                    auto matches = collect_for_line(ir_line);
+                    if (!matches.empty()) {
+                        candidate_events = std::move(matches);
+                        break;
+                    }
+                }
+
+                if (candidate_events.empty()) {
+                    continue;
+                }
+
+                std::ranges::sort(candidate_events, [](const auto* lhs, const auto* rhs) {
+                    return lhs->sequence < rhs->sequence;
+                });
+
+                auto distinct_values = std::set<std::string>{};
+                for (const auto* event : candidate_events) {
+                    auto sample = format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes));
+                    distinct_values.insert(sample);
+                }
+
+                auto* latest = candidate_events.back();
+                row.runtime_address = latest->address;
+                row.observed_value = distinct_values.size() <= 1U
+                                           ? format_runtime_hex(latest->value, static_cast<size_t>(latest->width_bytes))
+                                           : std::string{"<varied>"};
+                row.value_variation_count = distinct_values.size();
+                row.width_bytes = row.width_bytes.has_value()
+                                        ? row.width_bytes
+                                        : std::optional<size_t>{static_cast<size_t>(latest->width_bytes)};
+            }
+        }
+
+        static std::string format_mem_value_cell(const internal::mem::row& row) {
+            return row.observed_value.has_value() ? *row.observed_value : std::string{"-"};
+        }
+
+        static std::string format_mem_access_cell(const internal::mem::row& row) {
+            return std::string{internal::mem::to_string(row.access)};
+        }
+
+        static std::string format_mem_class_cell(const internal::mem::row& row) {
+            return std::string{internal::mem::to_string(row.address_kind)};
+        }
+
+        static std::string build_mem_definition_text(const internal::mem::row& row) {
+            auto details = std::string{};
+            details.reserve(128U);
+            details.append("access=");
+            details.append(internal::mem::to_string(row.access));
+            details.append(" | class=");
+            details.append(internal::mem::to_string(row.address_kind));
+            if (row.width_bytes.has_value()) {
+                details.append(" | width=");
+                details.append("{}"_format(*row.width_bytes));
+            }
+            if (row.base_reg.has_value()) {
+                details.append(" | base=");
+                details.append(*row.base_reg);
+            }
+            if (row.index_reg.has_value()) {
+                details.append(" | index=");
+                details.append(*row.index_reg);
+            }
+            if (row.scale.has_value()) {
+                details.append(" | scale=");
+                details.append("{}"_format(*row.scale));
+            }
+            if (row.displacement.has_value()) {
+                details.append(" | disp=");
+                details.append("{}"_format(*row.displacement));
+            }
+            if (row.symbol.has_value()) {
+                details.append(" | symbol=");
+                details.append(*row.symbol);
+            }
+            if (row.alias_group.has_value()) {
+                details.append(" | alias=g");
+                details.append("{}"_format(*row.alias_group));
+            }
+            if (row.runtime_address.has_value()) {
+                details.append(" | runtime_addr=");
+                details.append(format_runtime_hex(*row.runtime_address, 8U));
+            }
+            if (row.observed_value.has_value()) {
+                details.append(" | value=");
+                details.append(*row.observed_value);
+            }
+            if (!row.ir_line_hints.empty()) {
+                details.append(" | ir=");
+                for (size_t i = 0U; i < row.ir_line_hints.size(); ++i) {
+                    if (i > 0U) {
+                        details.append(",");
+                    }
+                    details.append("L{}"_format(row.ir_line_hints[i]));
+                }
+            }
+            return details;
+        }
+
+        static internal::explorer::model build_mem_explorer_model(
+                std::string_view symbol_display,
+                const mem_summary& summary,
+                std::span<const internal::explorer::instruction_info> original_info,
+                const internal::explorer::resource_pressure_table& original_resource_pressure,
+                std::string_view selected_line_color,
+                std::string_view selected_definition_color) {
+            auto model = internal::explorer::model{};
+            model.mode_label = "mem";
+            model.symbol_display = std::string{symbol_display};
+            model.operations_total = summary.rows.size();
+            model.opcode_counts = summary.opcode_counts;
+            model.rows.reserve(summary.rows.size());
+            model.table_extra_headers = {"access", "width", "address", "symbol", "alias", "value", "class"};
+            model.table_extra_values.reserve(summary.rows.size());
+            model.row_info.reserve(summary.rows.size());
+            model.instruction_definitions.reserve(summary.rows.size());
+
+            auto remapped_pressure = internal::explorer::resource_pressure_table{};
+            remapped_pressure.resources = original_resource_pressure.resources;
+            remapped_pressure.row_values.reserve(summary.rows.size());
+
+            for (const auto& row : summary.rows) {
+                model.rows.push_back(
+                        internal::explorer::asm_row{
+                                .offset = row.offset, .encodings = row.encodings, .instruction = row.instruction});
+                auto extra_columns = std::vector<std::string>{};
+                extra_columns.reserve(model.table_extra_headers.size());
+                extra_columns.push_back(format_mem_access_cell(row));
+                extra_columns.push_back(format_mem_width_cell(row));
+                extra_columns.push_back(format_mem_address_cell(row));
+                extra_columns.push_back(format_mem_symbol_cell(row));
+                extra_columns.push_back(format_mem_alias_cell(row));
+                extra_columns.push_back(format_mem_value_cell(row));
+                extra_columns.push_back(format_mem_class_cell(row));
+                model.table_extra_values.push_back(std::move(extra_columns));
+                if (row.line < original_info.size()) {
+                    model.row_info.push_back(original_info[row.line]);
+                }
+                else {
+                    model.row_info.push_back(internal::explorer::instruction_info{});
+                }
+                model.instruction_definitions.push_back(build_mem_definition_text(row));
+
+                if (row.line < original_resource_pressure.row_values.size()) {
+                    remapped_pressure.row_values.push_back(original_resource_pressure.row_values[row.line]);
+                }
+                else {
+                    remapped_pressure.row_values.emplace_back();
+                }
+            }
+
+            model.resource_pressure = std::move(remapped_pressure);
+            model.selected_line_color = selected_line_color;
+            model.selected_definition_color = selected_definition_color;
+            model.call_target_color = {};
+            model.initial_cursor = 0U;
+            return model;
+        }
+
+        static mem_inspect_output_record to_mem_inspect_output_record(
+                std::string_view symbol, std::string_view symbol_display, const mem_summary& summary) {
+            auto payload = mem_inspect_output_record{};
+            payload.symbol = std::string{symbol};
+            payload.symbol_display = std::string{symbol_display};
+            payload.summary.memory_ops = summary.totals.memory_ops;
+            payload.summary.loads = summary.totals.loads;
+            payload.summary.stores = summary.totals.stores;
+            payload.summary.rmw = summary.totals.rmw;
+            payload.summary.alias_groups = summary.alias_groups;
+            payload.summary.stack = summary.totals.stack;
+            payload.summary.globals = summary.totals.globals;
+            payload.summary.unknown = summary.totals.unknown;
+            payload.rows.reserve(summary.rows.size());
+            for (const auto& row : summary.rows) {
+                payload.rows.push_back(
+                        mem_row_output_record{
+                                .line = row.line,
+                                .offset = row.offset,
+                                .encodings = row.encodings,
+                                .instruction = row.instruction,
+                                .mnemonic = row.mnemonic,
+                                .access = std::string{internal::mem::to_string(row.access)},
+                                .width_bytes = row.width_bytes,
+                                .address_expr = row.address_expr,
+                                .address_class = std::string{internal::mem::to_string(row.address_kind)},
+                                .may_load = row.may_load,
+                                .may_store = row.may_store,
+                                .base_reg = row.base_reg,
+                                .index_reg = row.index_reg,
+                                .scale = row.scale,
+                                .displacement = row.displacement,
+                                .symbol = row.symbol,
+                                .alias_group = row.alias_group,
+                                .source_refs = row.ir_line_hints,
+                                .runtime_address = row.runtime_address.has_value()
+                                                         ? std::optional<std::string>{format_runtime_hex(
+                                                                   *row.runtime_address, 8U)}
+                                                         : std::nullopt,
+                                .observed_value = row.observed_value,
+                                .value_variation_count = row.value_variation_count,
+                                .trace_samples = {}});
+            }
+            return payload;
+        }
+
+        static mem_analysis_data collect_mem_analysis_data(const analysis_request& request) {
+            auto data = mem_analysis_data{};
+            data.asm_result = run_analysis(request, analysis_kind::asm_text);
+            if (!data.asm_result.success) {
+                return data;
+            }
+
+            auto dump_result = run_analysis(request, analysis_kind::dump);
+            auto dump_text = dump_result.success ? std::string_view{dump_result.artifact_text} : std::string_view{};
+
+            auto asm_summary = summarize_asm_artifact(data.asm_result.artifact_text, dump_text);
+            auto mca_result = run_analysis(request, analysis_kind::mca);
+            if (mca_result.success) {
+                data.row_info = parse_mca_instruction_info_rows(mca_result.artifact_text);
+                data.resource_pressure = parse_mca_resource_pressure_rows(mca_result.artifact_text);
+            }
+            overlay_rows_with_mca_instruction_text(asm_summary.rows, data.row_info);
+
+            data.summary = summarize_mem_rows(asm_summary.rows, data.row_info);
+            assign_mem_alias_groups(data.summary);
+            auto ir_result = run_analysis(request, analysis_kind::ir);
+            if (ir_result.success) {
+                attach_mem_ir_hints(data.summary, ir_result.artifact_text);
+            }
+            auto trace_result = run_analysis(request, analysis_kind::mem_trace);
+            if (trace_result.success) {
+                apply_mem_runtime_trace(data.summary, trace_result.artifact_text);
+            }
+            if (auto symbol = extract_asm_display_symbol(data.asm_result.artifact_text); symbol.has_value()) {
+                data.symbol_display = *symbol;
+            }
+            return data;
+        }
+
         static void render_asm_opcode_table(
                 const asm_summary& summary, std::ostream& os, std::string_view modified_color) {
             constexpr auto diff_indent = "\t"sv;
@@ -4045,6 +5018,130 @@ examples:
             os << "operations: {}\n"_format(summary.operations);
             render_asm_opcode_table(summary, os, modified_color);
             render_asm_instruction_rows(summary, os, modified_color);
+        }
+
+        static void render_mem_rows_table(
+                const mem_summary& summary, std::ostream& os, std::string_view modified_color) {
+            constexpr auto diff_indent = "\t"sv;
+            auto line_width = std::string_view{"  line"}.size();
+            auto offset_width = std::string_view{"offset"}.size();
+            auto encoding_width = std::string_view{"encodings"}.size();
+            auto op_width = std::string_view{"op"}.size();
+            auto access_width = std::string_view{"access"}.size();
+            auto width_width = std::string_view{"width"}.size();
+            auto address_width = std::string_view{"address"}.size();
+            auto symbol_width = std::string_view{"symbol"}.size();
+            auto alias_width = std::string_view{"alias"}.size();
+            auto value_width = std::string_view{"value"}.size();
+            auto class_width = std::string_view{"class"}.size();
+            auto may_load_width = std::string_view{"may_load"}.size();
+            auto may_store_width = std::string_view{"may_store"}.size();
+
+            for (const auto& row : summary.rows) {
+                auto offset_value = format_mem_offset_cell(row.offset);
+                auto width_value = format_mem_width_cell(row);
+                auto address_value = format_mem_address_cell(row);
+                auto symbol_value = format_mem_symbol_cell(row);
+                auto alias_value = format_mem_alias_cell(row);
+                auto value_value = format_mem_value_cell(row);
+                auto access_value = format_mem_access_cell(row);
+                auto class_value = format_mem_class_cell(row);
+                auto may_load_value = row.may_load ? "*"sv : "-"sv;
+                auto may_store_value = row.may_store ? "*"sv : "-"sv;
+
+                line_width = std::max(line_width, "  [{}]"_format(row.line).size());
+                offset_width = std::max(offset_width, offset_value.size());
+                encoding_width = std::max(encoding_width, row.encodings.size());
+                op_width = std::max(op_width, row.mnemonic.size());
+                access_width = std::max(access_width, access_value.size());
+                width_width = std::max(width_width, width_value.size());
+                address_width = std::max(address_width, address_value.size());
+                symbol_width = std::max(symbol_width, symbol_value.size());
+                alias_width = std::max(alias_width, alias_value.size());
+                value_width = std::max(value_width, value_value.size());
+                class_width = std::max(class_width, class_value.size());
+                may_load_width = std::max(may_load_width, may_load_value.size());
+                may_store_width = std::max(may_store_width, may_store_value.size());
+            }
+
+            os << '\n';
+            os << "rows:\n";
+            os << diff_indent << pad_asm_cell("  line", line_width) << " | " << pad_asm_cell("offset", offset_width)
+               << " | " << pad_asm_cell("encodings", encoding_width) << " | " << pad_asm_cell("op", op_width) << " | "
+               << pad_asm_cell("access", access_width) << " | " << pad_asm_cell("width", width_width) << " | "
+               << pad_asm_cell("address", address_width) << " | " << pad_asm_cell("symbol", symbol_width) << " | "
+               << pad_asm_cell("alias", alias_width) << " | " << pad_asm_cell("value", value_width) << " | "
+               << pad_asm_cell("class", class_width) << " | " << pad_asm_cell("may_load", may_load_width) << " | "
+               << pad_asm_cell("may_store", may_store_width) << '\n';
+            os << diff_indent << std::string(line_width, '-') << "-+-" << std::string(offset_width, '-') << "-+-"
+               << std::string(encoding_width, '-') << "-+-" << std::string(op_width, '-') << "-+-"
+               << std::string(access_width, '-') << "-+-" << std::string(width_width, '-') << "-+-"
+               << std::string(address_width, '-') << "-+-" << std::string(symbol_width, '-') << "-+-"
+               << std::string(alias_width, '-') << "-+-" << std::string(value_width, '-') << "-+-"
+               << std::string(class_width, '-') << "-+-" << std::string(may_load_width, '-') << "-+-"
+               << std::string(may_store_width, '-') << '\n';
+
+            if (summary.rows.empty()) {
+                os << diff_indent << pad_asm_cell("  <none>", line_width) << " | " << pad_asm_cell("", offset_width)
+                   << " | " << pad_asm_cell("", encoding_width) << " | " << pad_asm_cell("", op_width) << " | "
+                   << pad_asm_cell("", access_width) << " | " << pad_asm_cell("", width_width) << " | "
+                   << pad_asm_cell("", address_width) << " | " << pad_asm_cell("", symbol_width) << " | "
+                   << pad_asm_cell("", alias_width) << " | " << pad_asm_cell("", value_width) << " | "
+                   << pad_asm_cell("", class_width) << " | " << pad_asm_cell("", may_load_width) << " | "
+                   << pad_asm_cell("", may_store_width) << '\n';
+                return;
+            }
+
+            for (const auto& row : summary.rows) {
+                auto offset_value = format_mem_offset_cell(row.offset);
+                auto width_value = format_mem_width_cell(row);
+                auto address_value = format_mem_address_cell(row);
+                auto symbol_value = format_mem_symbol_cell(row);
+                auto alias_value = format_mem_alias_cell(row);
+                auto value_value = format_mem_value_cell(row);
+                auto access_value = format_mem_access_cell(row);
+                auto class_value = format_mem_class_cell(row);
+                auto may_load_value = row.may_load ? "*"sv : "-"sv;
+                auto may_store_value = row.may_store ? "*"sv : "-"sv;
+
+                auto op_cell = pad_asm_cell(row.mnemonic, op_width);
+                if (!modified_color.empty() && !row.mnemonic.empty()) {
+                    op_cell = colorize_asm_text_span(op_cell, 0U, row.mnemonic.size(), modified_color);
+                }
+
+                auto symbol_cell = pad_asm_cell(symbol_value, symbol_width);
+                if (!modified_color.empty() && symbol_value != "-") {
+                    symbol_cell = colorize_asm_text_span(symbol_cell, 0U, symbol_value.size(), modified_color);
+                }
+
+                os << diff_indent << pad_asm_cell("  [{}]"_format(row.line), line_width) << " | "
+                   << pad_asm_cell(offset_value, offset_width) << " | " << pad_asm_cell(row.encodings, encoding_width)
+                   << " | " << op_cell << " | " << pad_asm_cell(access_value, access_width) << " | "
+                   << pad_asm_cell(width_value, width_width) << " | " << pad_asm_cell(address_value, address_width)
+                   << " | " << symbol_cell << " | " << pad_asm_cell(alias_value, alias_width) << " | "
+                   << pad_asm_cell(value_value, value_width) << " | " << pad_asm_cell(class_value, class_width) << " | "
+                   << pad_asm_cell(may_load_value, may_load_width) << " | "
+                   << pad_asm_cell(may_store_value, may_store_width) << '\n';
+            }
+        }
+
+        static void render_mem_artifact_summary_and_body(
+                std::string_view symbol_display,
+                const mem_summary& summary,
+                std::string_view modified_color,
+                std::ostream& os) {
+            os << "mem:\n";
+            os << "symbol: {}\n"_format(symbol_display);
+            os << "summary:\n";
+            os << "  memory_ops={} | loads={} | stores={} | rmw={} | alias_groups={}\n"_format(
+                    summary.totals.memory_ops,
+                    summary.totals.loads,
+                    summary.totals.stores,
+                    summary.totals.rmw,
+                    summary.alias_groups);
+            os << "  stack={} | globals={} | unknown={}\n"_format(
+                    summary.totals.stack, summary.totals.globals, summary.totals.unknown);
+            render_mem_rows_table(summary, os, modified_color);
         }
 
         static std::optional<std::string> parse_graph_summary_field(std::string_view summary, std::string_view field) {
@@ -5674,6 +6771,127 @@ examples:
             return true;
         }
 
+        static bool process_mem_command(
+                std::string_view cmd, startup_config& cfg, repl_state& state, std::ostream& out, std::ostream& err) {
+            auto arg = command_argument(cmd, ":mem"sv);
+            if (!arg) {
+                return false;
+            }
+
+            auto tail = trim_view(*arg);
+            if (tail.starts_with("explore"sv) &&
+                (tail.size() == "explore"sv.size() || is_command_separator(tail["explore"sv.size()]))) {
+                return false;
+            }
+
+            if (state.cells.empty()) {
+                err << "no stored cells available for analysis\n";
+                return true;
+            }
+
+            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            if (!tail.empty()) {
+                auto split = tail.find_first_of(" \t\r\n");
+                auto token = split == std::string_view::npos ? tail : trim_view(tail.substr(0U, split));
+                auto extra = split == std::string_view::npos ? std::string_view{} : trim_view(tail.substr(split + 1U));
+                if (!extra.empty()) {
+                    err << "invalid :mem, expected :mem [symbol|@last]\n";
+                    return true;
+                }
+                if (token == "@last"sv) {
+                    symbol = std::nullopt;
+                }
+                else if (!token.empty()) {
+                    symbol = std::string{token};
+                }
+            }
+
+            try {
+                auto request = make_analysis_request(cfg, state);
+                request.symbol = symbol;
+                auto mem_data = collect_mem_analysis_data(request);
+                if (!mem_data.asm_result.success) {
+                    render_analysis_result(mem_data.asm_result, cfg.output, cfg.verbose, out);
+                    return true;
+                }
+
+                auto modified_color = std::string_view{};
+                if (should_use_color(cfg.color)) {
+                    auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                    modified_color = palette.modified;
+                }
+                render_mem_artifact_summary_and_body(mem_data.symbol_display, mem_data.summary, modified_color, out);
+            } catch (const std::exception& e) {
+                err << "analysis error: {}\n"_format(e.what());
+            }
+
+            return true;
+        }
+
+        static bool process_inspect_mem_command(
+                std::string_view cmd, startup_config& cfg, repl_state& state, std::ostream& out, std::ostream& err) {
+            auto arg = command_argument(cmd, ":inspect mem"sv);
+            if (!arg) {
+                return false;
+            }
+
+            if (state.cells.empty()) {
+                err << "no stored cells available for analysis\n";
+                return true;
+            }
+
+            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            if (!arg->empty()) {
+                auto split = arg->find_first_of(" \t\r\n");
+                auto token = split == std::string_view::npos ? *arg : trim_view(arg->substr(0U, split));
+                auto extra = split == std::string_view::npos ? std::string_view{} : trim_view(arg->substr(split + 1U));
+                if (!extra.empty()) {
+                    err << "invalid :inspect mem, expected :inspect mem [symbol|@last]\n";
+                    return true;
+                }
+                if (token == "@last"sv) {
+                    symbol = std::nullopt;
+                }
+                else if (!token.empty()) {
+                    symbol = std::string{token};
+                }
+            }
+
+            try {
+                auto request = make_analysis_request(cfg, state);
+                request.symbol = symbol;
+                auto mem_data = collect_mem_analysis_data(request);
+                if (!mem_data.asm_result.success) {
+                    render_analysis_result(mem_data.asm_result, cfg.output, cfg.verbose, out);
+                    return true;
+                }
+
+                if (cfg.output == output_mode::json) {
+                    auto requested_symbol = symbol.value_or("__sontag_main");
+                    auto payload =
+                            to_mem_inspect_output_record(requested_symbol, mem_data.symbol_display, mem_data.summary);
+                    std::string json{};
+                    auto ec = glz::write_json(payload, json);
+                    if (ec) {
+                        throw std::runtime_error("failed to serialize inspect mem output");
+                    }
+                    out << json << '\n';
+                    return true;
+                }
+
+                auto modified_color = std::string_view{};
+                if (should_use_color(cfg.color)) {
+                    auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                    modified_color = palette.modified;
+                }
+                render_mem_artifact_summary_and_body(mem_data.symbol_display, mem_data.summary, modified_color, out);
+            } catch (const std::exception& e) {
+                err << "analysis error: {}\n"_format(e.what());
+            }
+
+            return true;
+        }
+
         static bool process_asm_explore_command(
                 std::string_view cmd, startup_config& cfg, repl_state& state, std::ostream& out, std::ostream& err) {
             auto arg = command_argument(cmd, ":asm"sv);
@@ -5775,6 +6993,110 @@ examples:
                         out << "{}\n"_format(launch.message);
                         render_asm_artifact_summary_and_body(
                                 asm_result, dump_text, row_info, static_asm_modified_color, out);
+                        return true;
+                    }
+                    if (launch.next_symbol.has_value() && !launch.next_symbol->empty()) {
+                        frame_stack.push_back(
+                                explore_frame_state{.symbol = active.symbol, .cursor = launch.selected_row});
+                        active = explore_frame_state{.symbol = *launch.next_symbol, .cursor = 0U};
+                        continue;
+                    }
+                    if (frame_stack.empty()) {
+                        return true;
+                    }
+                    active = std::move(frame_stack.back());
+                    frame_stack.pop_back();
+                }
+            } catch (const std::exception& e) {
+                err << "analysis error: {}\n"_format(e.what());
+            }
+
+            return true;
+        }
+
+        static bool process_mem_explore_command(
+                std::string_view cmd, startup_config& cfg, repl_state& state, std::ostream& out, std::ostream& err) {
+            auto arg = command_argument(cmd, ":mem"sv);
+            if (!arg) {
+                return false;
+            }
+
+            auto tail = trim_view(*arg);
+            if (!tail.starts_with("explore"sv) ||
+                (tail.size() > "explore"sv.size() && !is_command_separator(tail["explore"sv.size()]))) {
+                return false;
+            }
+
+            if (state.cells.empty()) {
+                err << "no stored cells available for analysis\n";
+                return true;
+            }
+
+            auto symbol_arg = trim_view(tail.substr("explore"sv.size()));
+            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            if (!symbol_arg.empty()) {
+                auto split = symbol_arg.find_first_of(" \t\r\n");
+                auto token = split == std::string_view::npos ? symbol_arg : trim_view(symbol_arg.substr(0U, split));
+                auto extra =
+                        split == std::string_view::npos ? std::string_view{} : trim_view(symbol_arg.substr(split + 1U));
+                if (!extra.empty()) {
+                    err << "invalid :mem explore, expected :mem explore [symbol|@last]\n";
+                    return true;
+                }
+                if (token == "@last"sv) {
+                    symbol = std::nullopt;
+                }
+                else if (!token.empty()) {
+                    symbol = std::string{token};
+                }
+            }
+
+            try {
+                auto static_mem_modified_color = std::string_view{};
+                if (should_use_color(cfg.color)) {
+                    auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                    static_mem_modified_color = palette.modified;
+                }
+
+                struct explore_frame_state {
+                    std::string symbol{};
+                    size_t cursor{};
+                };
+
+                auto active = explore_frame_state{
+                        .symbol = symbol.has_value() ? *symbol : std::string{"__sontag_main"}, .cursor = 0U};
+                std::vector<explore_frame_state> frame_stack{};
+                while (true) {
+                    auto request = make_analysis_request(cfg, state);
+                    request.symbol = active.symbol;
+
+                    auto mem_data = collect_mem_analysis_data(request);
+                    if (!mem_data.asm_result.success) {
+                        render_analysis_result(mem_data.asm_result, cfg.output, cfg.verbose, out);
+                        return true;
+                    }
+
+                    std::string_view selected_line_color{};
+                    std::string_view selected_definition_color{};
+                    if (should_use_color(cfg.color)) {
+                        auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                        selected_line_color = palette.unchanged;
+                        selected_definition_color = palette.modified;
+                    }
+                    auto model = build_mem_explorer_model(
+                            mem_data.symbol_display,
+                            mem_data.summary,
+                            mem_data.row_info,
+                            mem_data.resource_pressure,
+                            selected_line_color,
+                            selected_definition_color);
+                    model.initial_cursor = active.cursor;
+
+                    auto launch = internal::explorer::run(model, out);
+                    if (launch.status == internal::explorer::launch_status::fallback) {
+                        out << "{}\n"_format(launch.message);
+                        render_mem_artifact_summary_and_body(
+                                mem_data.symbol_display, mem_data.summary, static_mem_modified_color, out);
                         return true;
                     }
                     if (launch.next_symbol.has_value() && !launch.next_symbol->empty()) {
@@ -6191,10 +7513,16 @@ examples:
             if (process_asm_explore_command(cmd, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
+            if (process_mem_explore_command(cmd, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
             if (process_ir_explore_command(cmd, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
             if (process_analysis_command(cmd, ":asm"sv, analysis_kind::asm_text, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
+            if (process_mem_command(cmd, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
             if (process_analysis_command(cmd, ":ir"sv, analysis_kind::ir, cfg, state, std::cout, std::cerr)) {
@@ -6208,6 +7536,9 @@ examples:
             }
             if (process_analysis_command(
                         cmd, ":inspect asm"sv, analysis_kind::inspect_asm_map, cfg, state, std::cout, std::cerr)) {
+                return true;
+            }
+            if (process_inspect_mem_command(cmd, cfg, state, std::cout, std::cerr)) {
                 return true;
             }
             if (process_analysis_command(

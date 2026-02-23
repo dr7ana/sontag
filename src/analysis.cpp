@@ -5,6 +5,7 @@
 #include "sontag/utils.hpp"
 
 #include "internal/delta.hpp"
+#include "internal/mem.hpp"
 #include "internal/metrics.hpp"
 #include "internal/opcode.hpp"
 #include "internal/platform.hpp"
@@ -21,11 +22,13 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <span>
@@ -747,6 +750,8 @@ namespace sontag {
                     base_args.emplace_back(arg_tokens::output_path);
                     base_args.push_back(artifact_path.string());
                     break;
+                case analysis_kind::mem_trace:
+                    break;
                 case analysis_kind::inspect_asm_map:
                 case analysis_kind::inspect_mca_summary:
                 case analysis_kind::inspect_mca_heatmap:
@@ -1383,6 +1388,653 @@ namespace sontag {
             }
 
             return extracted.str();
+        }
+
+        struct mem_trace_map_entry {
+            uint64_t trace_id{};
+            size_t ir_line{};
+            internal::mem::access_kind access{internal::mem::access_kind::none};
+            std::string pointer_expr{};
+        };
+
+        struct mem_trace_event_entry {
+            uint64_t sequence{};
+            uint64_t trace_id{};
+            internal::mem::access_kind access{internal::mem::access_kind::none};
+            uint64_t address{};
+            uint64_t width_bytes{};
+            uint64_t value{};
+        };
+
+        struct mem_trace_payload {
+            std::string symbol{};
+            bool truncated{false};
+            size_t dropped_events{};
+            std::vector<mem_trace_map_entry> map_entries{};
+            std::vector<mem_trace_event_entry> events{};
+        };
+
+        static constexpr std::string_view mem_trace_tag(internal::mem::access_kind access) noexcept {
+            switch (access) {
+                case internal::mem::access_kind::load:
+                    return "load"sv;
+                case internal::mem::access_kind::store:
+                    return "store"sv;
+                case internal::mem::access_kind::rmw:
+                    return "rmw"sv;
+                case internal::mem::access_kind::none:
+                    return "none"sv;
+            }
+            return "none"sv;
+        }
+
+        static constexpr std::optional<internal::mem::access_kind> parse_mem_trace_tag(std::string_view tag) noexcept {
+            if (tag == "load"sv) {
+                return internal::mem::access_kind::load;
+            }
+            if (tag == "store"sv) {
+                return internal::mem::access_kind::store;
+            }
+            if (tag == "rmw"sv) {
+                return internal::mem::access_kind::rmw;
+            }
+            return std::nullopt;
+        }
+
+        static constexpr size_t find_top_level_comma(std::string_view text, size_t start) noexcept {
+            auto paren_depth = int{0};
+            auto bracket_depth = int{0};
+            auto brace_depth = int{0};
+            for (auto i = start; i < text.size(); ++i) {
+                auto c = text[i];
+                if (c == '(') {
+                    ++paren_depth;
+                    continue;
+                }
+                if (c == ')') {
+                    paren_depth = std::max(0, paren_depth - 1);
+                    continue;
+                }
+                if (c == '[') {
+                    ++bracket_depth;
+                    continue;
+                }
+                if (c == ']') {
+                    bracket_depth = std::max(0, bracket_depth - 1);
+                    continue;
+                }
+                if (c == '{') {
+                    ++brace_depth;
+                    continue;
+                }
+                if (c == '}') {
+                    brace_depth = std::max(0, brace_depth - 1);
+                    continue;
+                }
+                if (c == ',' && paren_depth == 0 && bracket_depth == 0 && brace_depth == 0) {
+                    return i;
+                }
+            }
+            return std::string_view::npos;
+        }
+
+        static std::optional<std::string_view> extract_ptr_operand(std::string_view text, size_t start) {
+            if (start >= text.size()) {
+                return std::nullopt;
+            }
+            auto end = find_top_level_comma(text, start);
+            if (end == std::string_view::npos) {
+                end = text.size();
+            }
+            auto operand = trim_ascii(text.substr(start, end - start));
+            if (operand.empty()) {
+                return std::nullopt;
+            }
+            return operand;
+        }
+
+        static std::optional<size_t> parse_llvm_type_width_bytes(std::string_view llvm_type) {
+            llvm_type = trim_ascii(llvm_type);
+            if (llvm_type.empty()) {
+                return std::nullopt;
+            }
+            if (llvm_type == "half"sv) {
+                return 2U;
+            }
+            if (llvm_type == "float"sv) {
+                return 4U;
+            }
+            if (llvm_type == "double"sv) {
+                return 8U;
+            }
+            if (llvm_type == "ptr"sv || llvm_type.ends_with('*')) {
+                return 8U;
+            }
+            if (llvm_type[0] == 'i') {
+                auto bits_text = llvm_type.substr(1U);
+                if (bits_text.empty()) {
+                    return std::nullopt;
+                }
+                size_t bits = 0U;
+                for (auto c : bits_text) {
+                    if (!ascii_is_digit(c)) {
+                        return std::nullopt;
+                    }
+                    bits = (bits * 10U) + static_cast<size_t>(c - '0');
+                }
+                if (bits == 0U) {
+                    return std::nullopt;
+                }
+                return (bits + 7U) / 8U;
+            }
+            return std::nullopt;
+        }
+
+        static std::optional<std::pair<std::string_view, size_t>> parse_llvm_type_token(std::string_view text) {
+            auto cursor = size_t{0U};
+            while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor])) != 0) {
+                ++cursor;
+            }
+            if (cursor >= text.size()) {
+                return std::nullopt;
+            }
+            auto start = cursor;
+            auto angle_depth = int{0};
+            auto paren_depth = int{0};
+            auto bracket_depth = int{0};
+            auto brace_depth = int{0};
+            for (; cursor < text.size(); ++cursor) {
+                auto c = text[cursor];
+                if (c == '<') {
+                    ++angle_depth;
+                    continue;
+                }
+                if (c == '>') {
+                    angle_depth = std::max(0, angle_depth - 1);
+                    continue;
+                }
+                if (c == '(') {
+                    ++paren_depth;
+                    continue;
+                }
+                if (c == ')') {
+                    paren_depth = std::max(0, paren_depth - 1);
+                    continue;
+                }
+                if (c == '[') {
+                    ++bracket_depth;
+                    continue;
+                }
+                if (c == ']') {
+                    bracket_depth = std::max(0, bracket_depth - 1);
+                    continue;
+                }
+                if (c == '{') {
+                    ++brace_depth;
+                    continue;
+                }
+                if (c == '}') {
+                    brace_depth = std::max(0, brace_depth - 1);
+                    continue;
+                }
+                if (std::isspace(static_cast<unsigned char>(c)) != 0 && angle_depth == 0 && paren_depth == 0 &&
+                    bracket_depth == 0 && brace_depth == 0) {
+                    break;
+                }
+            }
+            auto token = trim_ascii(text.substr(start, cursor - start));
+            if (token.empty()) {
+                return std::nullopt;
+            }
+            return std::pair{token, cursor};
+        }
+
+        struct ir_mem_trace_instruction {
+            internal::mem::access_kind access{internal::mem::access_kind::none};
+            size_t width_bytes{};
+            std::string pointer_operand{};
+        };
+
+        static std::optional<ir_mem_trace_instruction> parse_ir_mem_trace_instruction(std::string_view line) {
+            auto trimmed = trim_ascii(line);
+            if (trimmed.empty()) {
+                return std::nullopt;
+            }
+
+            auto parse_load = [&](std::string_view payload) -> std::optional<ir_mem_trace_instruction> {
+                payload = trim_ascii(payload);
+                if (payload.starts_with("atomic "sv)) {
+                    payload.remove_prefix("atomic "sv.size());
+                    payload = trim_ascii(payload);
+                }
+                if (payload.starts_with("volatile "sv)) {
+                    payload.remove_prefix("volatile "sv.size());
+                    payload = trim_ascii(payload);
+                }
+                auto comma = find_top_level_comma(payload, 0U);
+                if (comma == std::string_view::npos) {
+                    return std::nullopt;
+                }
+                auto type_token = trim_ascii(payload.substr(0U, comma));
+                auto width = parse_llvm_type_width_bytes(type_token).value_or(0U);
+                auto ptr_prefix = payload.find(", ptr ", comma);
+                auto prefix_size = ", ptr "sv.size();
+                if (ptr_prefix == std::string_view::npos) {
+                    ptr_prefix = payload.find(", ptr", comma);
+                    prefix_size = ", ptr"sv.size();
+                    if (ptr_prefix == std::string_view::npos) {
+                        return std::nullopt;
+                    }
+                }
+                auto pointer_operand = extract_ptr_operand(payload, ptr_prefix + prefix_size);
+                if (!pointer_operand.has_value()) {
+                    return std::nullopt;
+                }
+                return ir_mem_trace_instruction{
+                        .access = internal::mem::access_kind::load,
+                        .width_bytes = width,
+                        .pointer_operand = std::string{trim_ascii(*pointer_operand)}};
+            };
+
+            auto parse_store = [&](std::string_view payload) -> std::optional<ir_mem_trace_instruction> {
+                payload = trim_ascii(payload);
+                if (payload.starts_with("atomic "sv)) {
+                    payload.remove_prefix("atomic "sv.size());
+                    payload = trim_ascii(payload);
+                }
+                if (payload.starts_with("volatile "sv)) {
+                    payload.remove_prefix("volatile "sv.size());
+                    payload = trim_ascii(payload);
+                }
+
+                auto type_and_cursor = parse_llvm_type_token(payload);
+                if (!type_and_cursor.has_value()) {
+                    return std::nullopt;
+                }
+                auto width = parse_llvm_type_width_bytes(type_and_cursor->first).value_or(0U);
+                auto ptr_prefix = payload.find(", ptr ", type_and_cursor->second);
+                auto prefix_size = ", ptr "sv.size();
+                if (ptr_prefix == std::string_view::npos) {
+                    ptr_prefix = payload.find(", ptr", type_and_cursor->second);
+                    prefix_size = ", ptr"sv.size();
+                    if (ptr_prefix == std::string_view::npos) {
+                        return std::nullopt;
+                    }
+                }
+                auto pointer_operand = extract_ptr_operand(payload, ptr_prefix + prefix_size);
+                if (!pointer_operand.has_value()) {
+                    return std::nullopt;
+                }
+                return ir_mem_trace_instruction{
+                        .access = internal::mem::access_kind::store,
+                        .width_bytes = width,
+                        .pointer_operand = std::string{trim_ascii(*pointer_operand)}};
+            };
+
+            if (auto eq = trimmed.find('='); eq != std::string_view::npos) {
+                auto rhs = trim_ascii(trimmed.substr(eq + 1U));
+                if (rhs.starts_with("load "sv)) {
+                    return parse_load(rhs.substr("load "sv.size()));
+                }
+            }
+            if (trimmed.starts_with("store "sv)) {
+                return parse_store(trimmed.substr("store "sv.size()));
+            }
+            return std::nullopt;
+        }
+
+        static std::string build_instrumented_mem_trace_ir(
+                std::string_view ir_text,
+                std::string_view target_symbol,
+                std::vector<mem_trace_map_entry>& out_map_entries) {
+            auto lines = split_lines(ir_text);
+            auto out = std::ostringstream{};
+
+            auto declaration_missing = ir_text.find("__sontag_mem_trace_load"sv) == std::string_view::npos;
+            auto declarations_inserted = !declaration_missing;
+
+            auto in_target = false;
+            auto brace_depth = 0;
+            auto function_line = size_t{0U};
+            auto next_trace_id = uint64_t{1U};
+            for (const auto& line : lines) {
+                auto trimmed = trim_ascii(line);
+                if (!declarations_inserted && trimmed.starts_with("define "sv)) {
+                    out << "declare void @__sontag_mem_trace_load(i64, ptr, i64)\n";
+                    out << "declare void @__sontag_mem_trace_store(i64, ptr, i64)\n\n";
+                    declarations_inserted = true;
+                }
+
+                auto entered_target = false;
+                if (!in_target) {
+                    auto function_symbol = parse_ir_function_name_from_define_line(trimmed);
+                    if (function_symbol && symbol_names_equivalent(*function_symbol, target_symbol)) {
+                        in_target = true;
+                        entered_target = true;
+                        function_line = 1U;
+                    }
+                }
+
+                out << line << '\n';
+
+                if (in_target) {
+                    if (auto parsed = parse_ir_mem_trace_instruction(trimmed); parsed.has_value()) {
+                        auto width = parsed->width_bytes == 0U ? 1U : parsed->width_bytes;
+                        auto trace_id = next_trace_id++;
+                        out_map_entries.push_back(
+                                mem_trace_map_entry{
+                                        .trace_id = trace_id,
+                                        .ir_line = function_line,
+                                        .access = parsed->access,
+                                        .pointer_expr = parsed->pointer_operand});
+
+                        auto indent_length = line.find_first_not_of(" \t");
+                        auto indent = indent_length == std::string::npos
+                                            ? std::string_view{}
+                                            : std::string_view{line}.substr(0U, indent_length);
+                        if (parsed->access == internal::mem::access_kind::load) {
+                            out << indent << "  call void @__sontag_mem_trace_load(i64 " << trace_id << ", ptr "
+                                << parsed->pointer_operand << ", i64 " << width << ")\n";
+                        }
+                        else if (parsed->access == internal::mem::access_kind::store) {
+                            out << indent << "  call void @__sontag_mem_trace_store(i64 " << trace_id << ", ptr "
+                                << parsed->pointer_operand << ", i64 " << width << ")\n";
+                        }
+                    }
+                }
+
+                if (in_target) {
+                    for (auto c : line) {
+                        if (c == '{') {
+                            ++brace_depth;
+                        }
+                        else if (c == '}') {
+                            --brace_depth;
+                        }
+                    }
+                    ++function_line;
+                    if (brace_depth <= 0 && trimmed == "}"sv) {
+                        in_target = false;
+                        brace_depth = 0;
+                        function_line = 0U;
+                    }
+                }
+            }
+
+            if (!declarations_inserted) {
+                out << "\ndeclare void @__sontag_mem_trace_load(i64, ptr, i64)\n";
+                out << "declare void @__sontag_mem_trace_store(i64, ptr, i64)\n";
+            }
+
+            return out.str();
+        }
+
+        static std::string escape_c_string_literal(std::string_view value) {
+            auto out = std::string{};
+            out.reserve(value.size());
+            for (auto c : value) {
+                if (c == '\\' || c == '"') {
+                    out.push_back('\\');
+                }
+                out.push_back(c);
+            }
+            return out;
+        }
+
+        static std::string build_mem_trace_runtime_source(std::string_view entry_symbol) {
+            auto escaped_symbol = escape_c_string_literal(entry_symbol);
+            return R"cpp(#include <cinttypes>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+
+extern "C" int __sontag_entrypoint() asm(")cpp" +
+                   escaped_symbol +
+                   R"cpp(");
+
+                         namespace {
+
+                             constexpr uint64_t kMaxTraceEvents = 50000;
+                             std::FILE* g_trace_file = nullptr;
+                             std::FILE* g_stats_file = nullptr;
+                             uint64_t g_sequence = 0;
+                             uint64_t g_written_events = 0;
+                             uint64_t g_dropped_events = 0;
+
+                             uint64_t read_value(const void* address, uint64_t width) {
+                                 if (address == nullptr) {
+                                     return 0;
+                                 }
+                                 if (width == 0) {
+                                     width = 1;
+                                 }
+                                 if (width > 8) {
+                                     width = 8;
+                                 }
+                                 uint64_t value = 0;
+                                 std::memcpy(&value, address, static_cast<size_t>(width));
+                                 return value;
+                             }
+
+                             void write_trace(uint64_t id, char access, const void* address, uint64_t width) {
+                                 if (g_trace_file == nullptr) {
+                                     return;
+                                 }
+                                 ++g_sequence;
+                                 if (g_written_events >= kMaxTraceEvents) {
+                                     ++g_dropped_events;
+                                     return;
+                                 }
+                                 auto addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(address));
+                                 auto value = read_value(address, width);
+                                 std::fprintf(
+                                         g_trace_file,
+                                         "%" PRIu64 "|%" PRIu64 "|%c|0x%016" PRIx64 "|%" PRIu64 "|0x%016" PRIx64 "\n",
+                                         g_sequence,
+                                         id,
+                                         access,
+                                         addr,
+                                         width,
+                                         value);
+                                 ++g_written_events;
+                             }
+
+                         }  // namespace
+
+                         extern "C" void __sontag_mem_trace_load(uint64_t id, const void* address, uint64_t width) {
+                             write_trace(id, 'L', address, width);
+                         }
+
+                         extern "C" void __sontag_mem_trace_store(uint64_t id, const void* address, uint64_t width) {
+                             write_trace(id, 'S', address, width);
+                         }
+
+int main(int argc, char** argv) {
+    if (argc >= 2 && argv[1] != nullptr) {
+        g_trace_file = std::fopen(argv[1], "w");
+    }
+    if (argc >= 3 && argv[2] != nullptr) {
+        g_stats_file = std::fopen(argv[2], "w");
+    }
+    auto exit_code = __sontag_entrypoint();
+    if (g_trace_file != nullptr) {
+        std::fclose(g_trace_file);
+        g_trace_file = nullptr;
+    }
+    if (g_stats_file != nullptr) {
+        std::fprintf(g_stats_file, "truncated=%s\n", g_dropped_events > 0 ? "true" : "false");
+        std::fprintf(g_stats_file, "dropped_events=%" PRIu64 "\n", g_dropped_events);
+        std::fprintf(g_stats_file, "written_events=%" PRIu64 "\n", g_written_events);
+        std::fprintf(g_stats_file, "max_events=%" PRIu64 "\n", kMaxTraceEvents);
+        std::fclose(g_stats_file);
+        g_stats_file = nullptr;
+    }
+                             return exit_code;
+                         }
+            )cpp";
+        }
+
+        struct mem_trace_runtime_stats {
+            bool truncated{false};
+            size_t dropped_events{};
+            std::optional<size_t> max_events{};
+        };
+
+        static mem_trace_runtime_stats parse_mem_trace_runtime_stats(std::string_view text) {
+            auto stats = mem_trace_runtime_stats{};
+            auto lines = split_lines(text);
+            for (const auto& line : lines) {
+                auto trimmed = trim_ascii(line);
+                if (trimmed.empty()) {
+                    continue;
+                }
+                auto split = trimmed.find('=');
+                if (split == std::string_view::npos) {
+                    continue;
+                }
+                auto key = trim_ascii(trimmed.substr(0U, split));
+                auto value = trim_ascii(trimmed.substr(split + 1U));
+                if (key == "truncated"sv) {
+                    stats.truncated = (value == "true"sv);
+                    continue;
+                }
+                auto parsed = uint64_t{0U};
+                if (!parse_unsigned_decimal(value, parsed)) {
+                    continue;
+                }
+                if (key == "dropped_events"sv) {
+                    stats.dropped_events = static_cast<size_t>(parsed);
+                }
+                else if (key == "max_events"sv) {
+                    stats.max_events = static_cast<size_t>(parsed);
+                }
+            }
+            return stats;
+        }
+
+        static bool parse_unsigned_decimal(std::string_view text, uint64_t& out) {
+            text = trim_ascii(text);
+            if (text.empty()) {
+                return false;
+            }
+            auto value = uint64_t{0};
+            auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value, 10);
+            if (ec != std::errc{} || ptr != (text.data() + text.size())) {
+                return false;
+            }
+            out = value;
+            return true;
+        }
+
+        static bool parse_unsigned_hex(std::string_view text, uint64_t& out) {
+            text = trim_ascii(text);
+            if (text.size() >= 2U && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+                text.remove_prefix(2U);
+            }
+            if (text.empty()) {
+                return false;
+            }
+            auto value = uint64_t{0};
+            auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value, 16);
+            if (ec != std::errc{} || ptr != (text.data() + text.size())) {
+                return false;
+            }
+            out = value;
+            return true;
+        }
+
+        static std::vector<std::string_view> split_pipe_fields(std::string_view line) {
+            auto out = std::vector<std::string_view>{};
+            auto begin = size_t{0U};
+            while (begin <= line.size()) {
+                auto end = line.find('|', begin);
+                if (end == std::string_view::npos) {
+                    end = line.size();
+                }
+                out.push_back(line.substr(begin, end - begin));
+                if (end == line.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+            return out;
+        }
+
+        static std::optional<mem_trace_event_entry> parse_mem_trace_event_line(std::string_view line) {
+            auto fields = split_pipe_fields(trim_ascii(line));
+            if (fields.size() != 6U) {
+                return std::nullopt;
+            }
+
+            auto access = internal::mem::access_kind::none;
+            auto access_token = trim_ascii(fields[2]);
+            if (access_token == "L"sv) {
+                access = internal::mem::access_kind::load;
+            }
+            else if (access_token == "S"sv) {
+                access = internal::mem::access_kind::store;
+            }
+            else if (access_token == "R"sv) {
+                access = internal::mem::access_kind::rmw;
+            }
+            else {
+                return std::nullopt;
+            }
+
+            auto sequence = uint64_t{0};
+            auto trace_id = uint64_t{0};
+            auto address = uint64_t{0};
+            auto width = uint64_t{0};
+            auto value = uint64_t{0};
+            if (!parse_unsigned_decimal(fields[0], sequence) || !parse_unsigned_decimal(fields[1], trace_id) ||
+                !parse_unsigned_hex(fields[3], address) || !parse_unsigned_decimal(fields[4], width) ||
+                !parse_unsigned_hex(fields[5], value)) {
+                return std::nullopt;
+            }
+
+            return mem_trace_event_entry{
+                    .sequence = sequence,
+                    .trace_id = trace_id,
+                    .access = access,
+                    .address = address,
+                    .width_bytes = width,
+                    .value = value};
+        }
+
+        static std::string render_mem_trace_payload(const mem_trace_payload& payload) {
+            auto out = std::ostringstream{};
+            out << "symbol=" << payload.symbol << '\n';
+            out << "truncated=" << (payload.truncated ? "true" : "false") << '\n';
+            out << "dropped_events=" << payload.dropped_events << '\n';
+            out << "map_count=" << payload.map_entries.size() << '\n';
+            out << "event_count=" << payload.events.size() << '\n';
+            out << "--map--\n";
+            for (const auto& entry : payload.map_entries) {
+                out << entry.trace_id << '|' << entry.ir_line << '|' << mem_trace_tag(entry.access) << '|'
+                    << entry.pointer_expr << '\n';
+            }
+            out << "--events--\n";
+            for (const auto& event : payload.events) {
+                out << event.sequence << '|' << event.trace_id << '|';
+                switch (event.access) {
+                    case internal::mem::access_kind::load:
+                        out << 'L';
+                        break;
+                    case internal::mem::access_kind::store:
+                        out << 'S';
+                        break;
+                    case internal::mem::access_kind::rmw:
+                        out << 'R';
+                        break;
+                    case internal::mem::access_kind::none:
+                        out << '?';
+                        break;
+                }
+                out << "|0x" << std::hex << std::setw(16) << std::setfill('0') << event.address << std::dec << "|"
+                    << event.width_bytes << "|0x" << std::hex << std::setw(16) << std::setfill('0') << event.value
+                    << std::dec << '\n';
+            }
+            return out.str();
         }
 
         static constexpr std::optional<std::string_view> parse_asm_begin_symbol(std::string_view line) {
@@ -2245,6 +2897,9 @@ namespace sontag {
             case analysis_kind::dump:
                 extension = ".txt";
                 break;
+            case analysis_kind::mem_trace:
+                extension = ".trace.txt";
+                break;
             case analysis_kind::inspect_asm_map:
             case analysis_kind::inspect_mca_summary:
             case analysis_kind::inspect_mca_heatmap:
@@ -2278,6 +2933,149 @@ namespace sontag {
         result.artifact_path = artifact_path;
         result.stdout_path = stdout_path;
         result.stderr_path = stderr_path;
+
+        if (kind == analysis_kind::mem_trace) {
+            auto ir_path = kind_dir / (id + ".trace.ll");
+            auto ir_stdout_path = kind_dir / (id + ".ir.stdout.txt");
+            auto ir_stderr_path = kind_dir / (id + ".ir.stderr.txt");
+
+            auto ir_command = detail::build_command(request, analysis_kind::ir, source_path, ir_path);
+            auto ir_exit = detail::run_process(ir_command, ir_stdout_path, ir_stderr_path);
+            auto ir_stdout = detail::read_text_file(ir_stdout_path);
+            auto ir_stderr = detail::read_text_file(ir_stderr_path);
+            if (ir_exit != 0) {
+                detail::write_text_file(stdout_path, ir_stdout);
+                detail::write_text_file(stderr_path, ir_stderr);
+                detail::write_text_file(artifact_path, ir_stdout);
+
+                result.exit_code = ir_exit;
+                result.success = false;
+                result.command = std::move(ir_command);
+                result.artifact_text = std::move(ir_stdout);
+                result.diagnostics_text = std::move(ir_stderr);
+                return result;
+            }
+
+            auto ir_text = detail::read_text_file(ir_path);
+            auto defined_symbols = detail::try_collect_defined_symbols(request);
+
+            std::optional<std::string> resolved_symbol{};
+            if (request.symbol) {
+                if (defined_symbols) {
+                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, *request.symbol);
+                }
+                if (!resolved_symbol) {
+                    resolved_symbol = detail::resolve_symbol_name(request, *request.symbol);
+                }
+                if (!resolved_symbol) {
+                    resolved_symbol = std::string{*request.symbol};
+                }
+            }
+            else {
+                if (defined_symbols) {
+                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, "__sontag_main"sv);
+                    if (!resolved_symbol && !defined_symbols->empty()) {
+                        resolved_symbol = (*defined_symbols)[0].mangled;
+                    }
+                }
+                if (!resolved_symbol) {
+                    auto lines = detail::split_lines(ir_text);
+                    for (const auto& line : lines) {
+                        if (auto symbol = detail::parse_ir_function_name_from_define_line(line); symbol.has_value()) {
+                            resolved_symbol = std::string{*symbol};
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!resolved_symbol) {
+                throw std::runtime_error("unable to resolve symbol for memory trace");
+            }
+
+            auto map_entries = std::vector<detail::mem_trace_map_entry>{};
+            auto instrumented_ir = detail::build_instrumented_mem_trace_ir(ir_text, *resolved_symbol, map_entries);
+            auto instrumented_ir_path = kind_dir / (id + ".trace.instrumented.ll");
+            detail::write_text_file(instrumented_ir_path, instrumented_ir);
+
+            auto runtime_source_path = kind_dir / (id + ".trace.runtime.cpp");
+            detail::write_text_file(runtime_source_path, detail::build_mem_trace_runtime_source(*resolved_symbol));
+
+            auto trace_binary_path = kind_dir / (id + ".trace.bin");
+            auto compile_stdout_path = kind_dir / (id + ".trace.compile.stdout.txt");
+            auto compile_stderr_path = kind_dir / (id + ".trace.compile.stderr.txt");
+
+            auto compile_command = detail::base_clang_args(request);
+            compile_command.push_back(instrumented_ir_path.string());
+            compile_command.push_back(runtime_source_path.string());
+            compile_command.emplace_back(detail::arg_tokens::output_path);
+            compile_command.push_back(trace_binary_path.string());
+
+            auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
+            auto compile_stdout = detail::read_text_file(compile_stdout_path);
+            auto compile_stderr = detail::read_text_file(compile_stderr_path);
+            if (compile_exit != 0) {
+                auto diagnostics = detail::join_text(ir_stderr, compile_stderr);
+                auto combined_stdout = detail::join_text(ir_stdout, compile_stdout);
+                detail::write_text_file(stdout_path, combined_stdout);
+                detail::write_text_file(stderr_path, diagnostics);
+                detail::write_text_file(artifact_path, combined_stdout);
+
+                result.exit_code = compile_exit;
+                result.success = false;
+                result.command = std::move(compile_command);
+                result.artifact_text = std::move(combined_stdout);
+                result.diagnostics_text = std::move(diagnostics);
+                return result;
+            }
+
+            auto trace_events_path = kind_dir / (id + ".trace.events.log");
+            auto run_command = std::vector<std::string>{trace_binary_path.string(), trace_events_path.string()};
+            auto run_exit = detail::run_process(run_command, stdout_path, stderr_path);
+            auto run_stdout = detail::read_text_file(stdout_path);
+            auto run_stderr = detail::read_text_file(stderr_path);
+
+            if (run_exit != 0) {
+                auto diagnostics = detail::join_text(detail::join_text(ir_stderr, compile_stderr), run_stderr);
+                auto combined_stdout = detail::join_text(detail::join_text(ir_stdout, compile_stdout), run_stdout);
+                detail::write_text_file(stdout_path, combined_stdout);
+                detail::write_text_file(stderr_path, diagnostics);
+                detail::write_text_file(artifact_path, combined_stdout);
+
+                result.exit_code = run_exit;
+                result.success = false;
+                result.command = std::move(run_command);
+                result.artifact_text = std::move(combined_stdout);
+                result.diagnostics_text = std::move(diagnostics);
+                return result;
+            }
+
+            auto events = std::vector<detail::mem_trace_event_entry>{};
+            auto event_lines = detail::split_lines(detail::read_text_file(trace_events_path));
+            for (const auto& line : event_lines) {
+                if (auto parsed = detail::parse_mem_trace_event_line(line); parsed.has_value()) {
+                    events.push_back(std::move(*parsed));
+                }
+            }
+            std::ranges::sort(events, [](const auto& lhs, const auto& rhs) { return lhs.sequence < rhs.sequence; });
+
+            auto payload = detail::mem_trace_payload{
+                    .symbol = *resolved_symbol, .map_entries = std::move(map_entries), .events = std::move(events)};
+            auto artifact_text = detail::render_mem_trace_payload(payload);
+            detail::write_text_file(artifact_path, artifact_text);
+
+            auto diagnostics = detail::join_text(detail::join_text(ir_stderr, compile_stderr), run_stderr);
+            auto combined_stdout = detail::join_text(detail::join_text(ir_stdout, compile_stdout), run_stdout);
+            detail::write_text_file(stdout_path, combined_stdout);
+            detail::write_text_file(stderr_path, diagnostics);
+
+            result.exit_code = run_exit;
+            result.success = (run_exit == 0);
+            result.command = std::move(run_command);
+            result.artifact_text = std::move(artifact_text);
+            result.diagnostics_text = std::move(diagnostics);
+            return result;
+        }
 
         if (kind == analysis_kind::graph_cfg || kind == analysis_kind::graph_call ||
             kind == analysis_kind::graph_defuse) {
