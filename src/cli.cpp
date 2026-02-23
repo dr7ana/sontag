@@ -5157,6 +5157,7 @@ examples:
             auto class_width = std::string_view{"class"}.size();
             auto may_load_width = std::string_view{"may_load"}.size();
             auto may_store_width = std::string_view{"may_store"}.size();
+            auto ir_source_width = std::string_view{"ir source"}.size();
 
             for (const auto& row : summary.rows) {
                 auto offset_value = format_mem_offset_cell(row.offset);
@@ -5169,6 +5170,7 @@ examples:
                 auto class_value = format_mem_class_cell(row);
                 auto may_load_value = row.may_load ? "*"sv : "-"sv;
                 auto may_store_value = row.may_store ? "*"sv : "-"sv;
+                auto ir_source_value = build_mem_ir_source_text(row);
 
                 line_width = std::max(line_width, "  [{}]"_format(row.line).size());
                 offset_width = std::max(offset_width, offset_value.size());
@@ -5183,6 +5185,7 @@ examples:
                 class_width = std::max(class_width, class_value.size());
                 may_load_width = std::max(may_load_width, may_load_value.size());
                 may_store_width = std::max(may_store_width, may_store_value.size());
+                ir_source_width = std::max(ir_source_width, ir_source_value.size());
             }
 
             os << '\n';
@@ -5193,14 +5196,15 @@ examples:
                << pad_asm_cell("address", address_width) << " | " << pad_asm_cell("symbol", symbol_width) << " | "
                << pad_asm_cell("alias", alias_width) << " | " << pad_asm_cell("value", value_width) << " | "
                << pad_asm_cell("class", class_width) << " | " << pad_asm_cell("may_load", may_load_width) << " | "
-               << pad_asm_cell("may_store", may_store_width) << '\n';
+               << pad_asm_cell("may_store", may_store_width) << " | " << pad_asm_cell("ir source", ir_source_width)
+               << '\n';
             os << diff_indent << std::string(line_width, '-') << "-+-" << std::string(offset_width, '-') << "-+-"
                << std::string(encoding_width, '-') << "-+-" << std::string(op_width, '-') << "-+-"
                << std::string(access_width, '-') << "-+-" << std::string(width_width, '-') << "-+-"
                << std::string(address_width, '-') << "-+-" << std::string(symbol_width, '-') << "-+-"
                << std::string(alias_width, '-') << "-+-" << std::string(value_width, '-') << "-+-"
                << std::string(class_width, '-') << "-+-" << std::string(may_load_width, '-') << "-+-"
-               << std::string(may_store_width, '-') << '\n';
+               << std::string(may_store_width, '-') << "-+-" << std::string(ir_source_width, '-') << '\n';
 
             if (summary.rows.empty()) {
                 os << diff_indent << pad_asm_cell("  <none>", line_width) << " | " << pad_asm_cell("", offset_width)
@@ -5209,7 +5213,7 @@ examples:
                    << pad_asm_cell("", address_width) << " | " << pad_asm_cell("", symbol_width) << " | "
                    << pad_asm_cell("", alias_width) << " | " << pad_asm_cell("", value_width) << " | "
                    << pad_asm_cell("", class_width) << " | " << pad_asm_cell("", may_load_width) << " | "
-                   << pad_asm_cell("", may_store_width) << '\n';
+                   << pad_asm_cell("", may_store_width) << " | " << pad_asm_cell("", ir_source_width) << '\n';
                 return;
             }
 
@@ -5224,6 +5228,7 @@ examples:
                 auto class_value = format_mem_class_cell(row);
                 auto may_load_value = row.may_load ? "*"sv : "-"sv;
                 auto may_store_value = row.may_store ? "*"sv : "-"sv;
+                auto ir_source_value = build_mem_ir_source_text(row);
 
                 auto op_cell = pad_asm_cell(row.mnemonic, op_width);
                 if (!modified_color.empty() && !row.mnemonic.empty()) {
@@ -5242,7 +5247,8 @@ examples:
                    << " | " << symbol_cell << " | " << pad_asm_cell(alias_value, alias_width) << " | "
                    << pad_asm_cell(value_value, value_width) << " | " << pad_asm_cell(class_value, class_width) << " | "
                    << pad_asm_cell(may_load_value, may_load_width) << " | "
-                   << pad_asm_cell(may_store_value, may_store_width) << '\n';
+                   << pad_asm_cell(may_store_value, may_store_width) << " | "
+                   << pad_asm_cell(ir_source_value, ir_source_width) << '\n';
             }
         }
 
@@ -7722,6 +7728,14 @@ examples:
             return false;
         }
 
+        static void delimit_frame([[maybe_unused]] const startup_config& cfg) {
+#ifdef SONTAG_MCP
+            if (cfg.frame_delimiter) {
+                std::cout << "\x1e\n" << std::flush;
+            }
+#endif
+        }
+
     }  // namespace detail
 
     static constexpr auto banner = R"(
@@ -7752,12 +7766,32 @@ examples:
                 std::cout << banner << '\n';
             }
         }
-        if (resumed_session) {
-            std::cout << "resumed session from: {}\n"_format(*resumed_session);
+        if (!cfg.eval_command && !cfg.quiet) {
+            if (resumed_session) {
+                std::cout << "resumed session from: {}\n"_format(*resumed_session);
+            }
+            std::cout << "session: {}\n"_format(state.session_id);
+            std::cout << "session dir: {}\n"_format(state.session_dir.string());
+            std::cout << "type :help for commands\n";
         }
-        std::cout << "session: {}\n"_format(state.session_id);
-        std::cout << "session dir: {}\n"_format(state.session_dir.string());
-        std::cout << "type :help for commands\n";
+
+        for (const auto& path : cfg.declfiles) {
+            auto cmd = ":declfile {}"_format(path.string());
+            detail::process_command(cmd, cfg, state, editor, should_quit);
+        }
+        for (const auto& path : cfg.files) {
+            auto cmd = ":file {}"_format(path.string());
+            detail::process_command(cmd, cfg, state, editor, should_quit);
+        }
+        if (cfg.snapshot_name) {
+            auto cmd = ":mark {}"_format(*cfg.snapshot_name);
+            detail::process_command(cmd, cfg, state, editor, should_quit);
+        }
+        if (cfg.eval_command) {
+            detail::process_command(*cfg.eval_command, cfg, state, editor, should_quit);
+            detail::delimit_frame(cfg);
+            return;
+        }
 
         while (!should_quit) {
             std::string prompt{};
@@ -7791,6 +7825,7 @@ examples:
             }
 
             if (pending_cell.empty() && detail::process_command(line, cfg, state, editor, should_quit)) {
+                detail::delimit_frame(cfg);
                 continue;
             }
 
@@ -7805,6 +7840,7 @@ examples:
             }
 
             (void)detail::append_validated_cell(cfg, state, pending_cell, false, std::cout, std::cerr);
+            detail::delimit_frame(cfg);
             pending_cell.clear();
             balance = detail::code_balance_state{};
         }
@@ -7852,6 +7888,17 @@ examples:
         app.add_flag("--print-config", cfg.print_config, "Print resolved config and exit");
         app.add_flag("--quiet", cfg.quiet, "Suppress non-essential output");
         app.add_flag("--verbose", cfg.verbose, "Enable verbose output");
+        app.add_option("--declfile", cfg.declfiles, "Load declaration file(s) at startup");
+        app.add_option("--file", cfg.files, "Load source file(s) at startup");
+        std::string eval_arg{};
+        app.add_option("--eval", eval_arg, "Execute command and exit");
+        std::string snapshot_arg{};
+        app.add_option("--snapshot", snapshot_arg, "Create named snapshot after loading files");
+#ifdef SONTAG_MCP
+        app.add_flag("--frame-delimiter", cfg.frame_delimiter, "Emit \\x1e after each command output");
+        app.add_flag("--mcp", cfg.mcp_mode, "Start MCP server");
+        app.add_option("--mcp-timeout", cfg.mcp_timeout_ms, "MCP subprocess timeout in ms (default 60000)");
+#endif
 
         try {
             app.parse(argc, argv);
@@ -7904,6 +7951,14 @@ examples:
 
         if (app.get_option("--no-color")->count() > 0U) {
             cfg.color = color_mode::never;
+        }
+
+        cfg.eval_command = detail::normalize_optional(eval_arg);
+        cfg.snapshot_name = detail::normalize_optional(snapshot_arg);
+
+        if (cfg.eval_command && cfg.snapshot_name) {
+            std::cerr << "--eval and --snapshot are incompatible\n";
+            return std::optional<int>{2};
         }
 
         if (show_version) {

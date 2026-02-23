@@ -314,6 +314,16 @@ namespace sontag {
         bool print_config{false};
         bool print_clang_version{false};
         bool dump_defaults{false};
+
+        std::vector<std::filesystem::path> declfiles{};
+        std::vector<std::filesystem::path> files{};
+        std::optional<std::string> eval_command{};
+        std::optional<std::string> snapshot_name{};
+#ifdef SONTAG_MCP
+        bool frame_delimiter{false};
+        bool mcp_mode{false};
+        int mcp_timeout_ms{60'000};
+#endif
     };
 
 }  // namespace sontag

@@ -74,15 +74,25 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 configure_build_opts()
 
-add_library(sontag
+set(SONTAG_SOURCES
     src/analysis.cpp
     src/cli.cpp
     src/internal/editor.cpp
     src/graph.cpp
 )
 
+if(SONTAG_MCP)
+    list(APPEND SONTAG_SOURCES src/mcp.cpp)
+endif()
+
+add_library(sontag ${SONTAG_SOURCES})
+
 target_include_directories(sontag PUBLIC include)
 target_compile_features(sontag PUBLIC cxx_std_23)
+
+if(SONTAG_MCP)
+    target_compile_definitions(sontag PUBLIC SONTAG_MCP)
+endif()
 
 add_subdirectory(external)
 

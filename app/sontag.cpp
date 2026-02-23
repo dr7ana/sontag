@@ -10,6 +10,12 @@ int main(int argc, char** argv) {
             return *cli_result;
         }
 
+#ifdef SONTAG_MCP
+        if (cfg.mcp_mode) {
+            return sontag::mcp::run_mcp_server(cfg);
+        }
+#endif
+
         sontag::cli::run_repl(cfg);
         return 0;
     } catch (std::exception& e) {

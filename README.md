@@ -7,9 +7,9 @@
 ╚══════╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝
 ```
 
-a C++ interpreter, assembly explorer, and analysis-focused code execution harness
+get real content out of your code. sontag is a C++ interpreter, assembly explorer, and analysis-focused code execution harness
 
-## Command Paradigm
+## command paradigm
 
 sontag commands are organized by output mode:
 
@@ -20,12 +20,12 @@ sontag commands are organized by output mode:
 - `inspect`: structured JSON export for downstream tooling
   - examples: `:inspect asm`, `:inspect mem`, `:inspect mca summary`, `:inspect mca heatmap`
 
-## Requirements
+## requirements
 
-- Linux or macOS
-- CMake
-- Ninja
-- LLVM/Clang toolchain (clang >= 20), including:
+- linux or macOS
+- cmake
+- ninja
+- llvm/clang toolchain (clang >= 20), including:
   - `clang++`
   - `llvm-mca`
   - `llvm-objdump`
@@ -36,9 +36,9 @@ macOS:
 - install LLVM from Homebrew:
   - `brew install llvm@21`
 
-## Build
+## build
 
-### Linux
+### linux
 
 ```bash
 mkdir -p build
@@ -60,25 +60,25 @@ cmake .. -G Ninja
 ninja -v
 ```
 
-Optional toolchain bin override:
+optional toolchain bin override:
 
 ```bash
 cmake .. -G Ninja -DSONTAG_TOOLCHAIN_BIN_DIR=/custom/llvm/bin
 ```
 
-### Run
+### run
 
 ```bash
 ./build/sontag
 ```
 
-### Tests
+### tests
 
 ```bash
 ./build/tests/alltests
 ```
 
-## Quickstart
+## quickstart
 
 ```text
 :decl int value = 64;
@@ -93,9 +93,9 @@ values[2] = values[0] + values[1];
 :ir explore
 ```
 
-## Explore Mode
+## explore mode
 
-Note: the following examples use the same common code file loaded by `:file`
+note: the following examples use the same common code file loaded by `:file`
 ```cpp
 int value = 64;
 int values[4];
@@ -124,59 +124,59 @@ int __sontag_main() {
 
 ### `:asm explore`
 
-Interactive assembly view with:
+interactive assembly view with:
 
 - opcode summary
 - per-instruction rows (offset, encodings, instruction text, definitions)
 - selected instruction metadata
 - optional enter-on-call traversal into callee symbol
 
-Controls:
+controls:
 
-- `Up`/`Down` or `j`/`k`: move selection
-- `Enter`: follow callable symbol on selected row (when available)
+- `up`/`sown` or `j`/`k`: move selection
+- `enter`: follow callable symbol on selected row (when available)
 - `q`: exit (recursively if you have followed callable symbols)
 
 ![asm explore demo](docs/asm_explore.gif)
 
 ### `:ir explore`
 
-Interactive IR view with:
+interactive IR view with:
 
 - full node table (`id`, `out`, `in`, `label`)
 - Sugiyama layout below the table
 - selected/incoming/outgoing node id coloring in the layout
 
-Controls:
+controls:
 
-- `Up`/`Down` or `j`/`k`: move selection
+- `up`/`down` or `j`/`k`: move selection
 - `q`: exit
 
 ![ir explore demo](docs/ir_explore.gif)
 
 ### `:mem explore`
 
-Interactive memory access view with instrumented runtime tracing (WIP). Rows show access kind, width, address, symbol, alias group, and observed values from execution. Detail pane includes address decomposition, effective address, and traced before→after values for rmw.
+interactive memory access view with instrumented runtime tracing (WIP). rows show access kind, width, address, symbol, alias group, and observed values from execution. detail pane includes address decomposition, effective address, and traced before→after values for rmw.
 
 - `:mem [symbol|@last]`: traced memory table
 - `:mem explore [symbol|@last]`: interactive row navigation
 - `:inspect mem [symbol|@last]`: structured JSON output
 
-Controls:
+controls:
 
-- `Up`/`Down` or `j`/`k`: move selection
+- `up`/`down` or `j`/`k`: move selection
 - `q`: exit
 
 ![ir explore demo](docs/mem_explore.gif)
 
-### ARM Instruction Support
-Currently tested on:
-- Apple Silicon M4 (welcoming any feedback on x86 Intel Mac performance, as I don't own one)
-- Aarch64 Raspberry Pi
+### arm64 instruction support
+currently tested on:
+- apple silicon M4 (welcoming any feedback on x86 Intel Mac performance, as I don't own one)
+- aarch64 Raspberry Pi
 
 ![arm demo](docs/arm.gif)
 
-## State and Session Commands
+## state and session commands
 
 - `:decl <code>`: append declarative cell
 - `:declfile <path>`: import full file as one declarative cell
@@ -189,7 +189,7 @@ Currently tested on:
 - `:help`: print command help
 - `:quit`: exit REPL
 
-## Reset and Snapshot Semantics
+## reset and snapshot semantics
 
 - snapshots persist across normal `:reset`
 - `:mark <name>`: create/update snapshot tag
@@ -199,7 +199,7 @@ Currently tested on:
 - `:reset file <path>`: undo most recent import transaction for that normalized path
 - `:reset snapshots`: clear snapshot store
 
-## Config Semantics
+## config semantics
 
 ` :config` is category-driven:
 
@@ -208,7 +208,7 @@ Currently tested on:
 - `:config <key>=<value>`: set one key
 - `:config reset`: restore mutable keys to defaults
 
-## Static Analysis Commands
+## static analysis commands
 
 ### `:asm [symbol|@last]`
 
@@ -232,46 +232,136 @@ Currently tested on:
 
 ### `:delta`
 
-Modes:
+modes:
 
 - `:delta [target_opt] [symbol|@last]`: pairwise (`O0 -> target_opt`, default target `O2`)
 - `:delta spectrum [target_opt] [symbol|@last]`: multi-level (`O0..target_opt`)
 - `:delta <snapshot> [target_opt]`: current-vs-snapshot comparison
 
-Snapshot mode defaults to implicit symbol scope:
+snapshot mode defaults to implicit symbol scope:
 
 - `:delta <snapshot>` == `:delta <snapshot> __sontag_main`
 - `main` and `__sontag_main` are treated as equivalent
 
-N-way snapshot compare:
+n-way snapshot compare:
 
 - `:delta <snapshot1>,<snapshot2>,<snapshot3>`
   - compares `current` against each listed snapshot in one command
 
 ### `:graph`
 
-Supported graph subcommands:
+supported graph subcommands:
 
 - `:graph cfg [symbol|@last]`
 - `:graph cfg export [symbol|@last]`
 - `:graph call [symbol|@last]`
 - `:graph call export [symbol|@last]`
 
-Behavior:
+behavior:
 
 - `:graph cfg` / `:graph call` render terminal Sugiyama graph and append `dot:` / `rendered:` artifact paths
 - `:graph cfg export` / `:graph call export` print artifact summary and emit DOT (+ rendered image if available)
 
 ### `:inspect`
 
-Structured JSON payload exporters:
+structured JSON payload exporters:
 
 - `:inspect asm [symbol|@last]`
 - `:inspect mca [summary|heatmap] [symbol|@last]`
 
-Artifacts are written under `artifacts/inspect/...`.
+artifacts are written under `artifacts/inspect/...`.
 
-## Full Command List
+## mcp server support
+
+sontag can run as an [MCP](https://modelcontextprotocol.io/) server, exposing its analysis capabilities to LLMs and agentic tools over JSON-RPC via stdio.
+
+build with MCP support:
+
+```bash
+cmake .. -G Ninja -DSONTAG_MCP=ON
+```
+
+run:
+
+```bash
+sontag --mcp
+```
+
+### configuration
+
+for [claude code](https://docs.anthropic.com/en/docs/claude-code/mcp), add to `~/.claude/claude_code_config.json` or `.claude/claude_code_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "sontag": {
+      "command": "/path/to/sontag",
+      "args": ["--mcp", "--std", "c++20"]
+    }
+  }
+}
+```
+
+for [codex cli](https://developers.openai.com/codex/mcp/), add to `~/.codex/config.toml` or `.codex/config.toml`:
+
+```toml
+[mcp_servers.sontag]
+command = "/path/to/sontag"
+args = ["--mcp", "--std", "c++23"]
+```
+
+any CLI flags passed alongside `--mcp` become defaults for all tool invocations (`--std`, `--opt`, `--target`, `--cpu`, `--mca`, etc.).
+
+### tools
+
+two tools are exposed:
+
+- `eval`: stateless, single-shot analysis. spawns an isolated subprocess per call — no state persists between invocations.
+- `session_eval`: stateful, persistent session. commands are sent to a long-lived REPL child process. state (cells, snapshots, config) accumulates across calls.
+
+### `eval`
+
+pass file paths and a REPL command. the MCP server spawns `sontag --file ... --eval ...` as a subprocess and returns captured output.
+
+```json
+{
+  "name": "eval",
+  "arguments": {
+    "declfiles": ["containers.hpp", "math_utils.hpp"],
+    "files": ["matrix_multiply.cpp"],
+    "command": ":delta spectrum O3",
+    "opt_level": "O0",
+    "standard": "c++23",
+    "target": "x86_64-unknown-linux-gnu",
+    "cpu": "znver4"
+  }
+}
+```
+
+### `session_eval`
+
+send any REPL command or single-line expression to the persistent session. the full command set is available (`:file`, `:declfile`, `:asm`, `:inspect`, `:mark`, `:delta`, `:config`, etc.).
+
+```json
+{ "name": "session_eval", "arguments": { "input": ":declfile simd_types.hpp" } }
+{ "name": "session_eval", "arguments": { "input": ":file sort_benchmark.cpp" } }
+{ "name": "session_eval", "arguments": { "input": ":config opt=O2" } }
+{ "name": "session_eval", "arguments": { "input": ":mark v1_scalar" } }
+{ "name": "session_eval", "arguments": { "input": ":file sort_benchmark_v2.cpp" } }
+{ "name": "session_eval", "arguments": { "input": ":delta v1_scalar" } }
+{ "name": "session_eval", "arguments": { "input": ":inspect mca heatmap sort" } }
+{ "name": "session_eval", "arguments": { "input": ":graph cfg sort" } }
+```
+
+### multi-instance
+
+each `sontag --mcp` process gets an independent session directory (`.sontag/mcp-1/`, `.sontag/mcp-2/`, ...). orphaned instances from dead processes are cleaned up on startup.
+
+### crash recovery
+
+if the persistent child crashes, the next `session_eval` returns an error and automatically respawns a fresh child. the MCP server stays alive — no client-side restart needed.
+
+## full command list
 
 ```text
 :help
@@ -312,7 +402,7 @@ Artifacts are written under `artifacts/inspect/...`.
 :quit
 ```
 
-## Notes
+## notes
 
 - `color_scheme` currently supports `classic` and `vaporwave` (default).
 - default `build.opt` is `O0`.

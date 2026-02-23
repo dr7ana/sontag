@@ -113,10 +113,12 @@ namespace sontag::internal::explorer {
     };
 
     namespace detail {
+        static constexpr size_t default_rows{48};
+        static constexpr size_t default_cols{120};
 
         struct terminal_dims {
-            size_t rows{24U};
-            size_t cols{80U};
+            size_t rows{default_rows};
+            size_t cols{default_cols};
         };
 
         static terminal_dims query_terminal_dims() {
@@ -870,7 +872,7 @@ namespace sontag::internal::explorer {
             auto safe_cursor = data.nodes.empty() ? 0U : std::min(cursor, data.nodes.size() - 1U);
 
             auto append_line = [&](std::string_view line) {
-                frame.append(clip_to_width(line, terminal_cols));
+                frame.append(line);
                 frame.push_back('\n');
             };
 
@@ -1277,7 +1279,7 @@ namespace sontag::internal::explorer {
             frame.reserve(4096U);
 
             auto append_line = [&](std::string_view line) {
-                frame.append(clip_to_width(line, terminal_cols));
+                frame.append(line);
                 frame.push_back('\n');
             };
 
@@ -1922,7 +1924,7 @@ namespace sontag::internal::explorer {
                 bool include_header = true,
                 const std::unordered_map<std::string, std::string_view>* node_id_colors = nullptr) {
             auto terminal_cols = isatty(STDOUT_FILENO) ? query_terminal_dims().cols : size_t{4096U};
-            auto append_line = [&](std::string_view line) { out << clip_to_width(line, terminal_cols) << '\n'; };
+            auto append_line = [&](std::string_view line) { out << line << '\n'; };
 
             if (include_header) {
                 append_line("graph:");

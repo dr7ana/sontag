@@ -34,6 +34,7 @@ if(SONTAG_SMOKE)
         smoketests
 
         007.cpp
+        012.cpp
     )
 
     target_link_libraries(smoketests PRIVATE tests_common Catch2::Catch2WithMain)

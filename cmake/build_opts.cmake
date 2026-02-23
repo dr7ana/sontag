@@ -2,6 +2,7 @@ function(configure_build_opts)
     option(WARNINGS_AS_ERRORS "Treat all warnings as errors. turn off for development, on for release" OFF)
     option(SONTAG_BUILD_TESTS "Build sontag test suite" ${SONTAG_IS_TOPLEVEL_PROJECT})
     option(SONTAG_SMOKE "Build sontag smoke tests" OFF)
+    option(SONTAG_MCP "Build MCP server support" OFF)
     option(SONTAG_USE_LIBCXX "Build C++ targets with libc++ instead of libstdc++ when using clang" ON)
     set(SONTAG_TOOLCHAIN_BIN_DIR "" CACHE PATH
         "Optional override for LLVM toolchain bin directory (used to resolve llvm-* tools)")
