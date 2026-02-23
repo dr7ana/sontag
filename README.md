@@ -95,6 +95,33 @@ values[2] = values[0] + values[1];
 
 ## Explore Mode
 
+Note: the following examples use the same common code file loaded by `:file`
+```cpp
+int value = 64;
+int values[4];
+
+constexpr int add(int a, int b) {
+    return a + b;
+}
+
+constexpr int fold(int a, int b, int c) {
+    if (--c > 0) {
+        return fold(a, add(a, b), c);
+    }
+    return add(a, b);
+}
+
+int __sontag_main() {
+    auto double_value = value * 2;
+    values[0] = value;
+    values[1] = double_value;
+    values[2] = add(values[0], values[1]);
+    values[3] = fold(values[0], values[1], 3);
+
+    return 0;
+}
+```
+
 ### `:asm explore`
 
 Interactive assembly view with:
