@@ -110,6 +110,20 @@ add_executable(
 target_link_libraries(sontag_bin PRIVATE sontag)
 set_target_properties(sontag_bin PROPERTIES OUTPUT_NAME sontag)
 
+if(SONTAG_INSTALL)
+    install(TARGETS sontag_bin RUNTIME DESTINATION bin)
+
+    if(SONTAG_PLATFORM_MACOS AND SONTAG_USE_LIBCXX)
+        get_filename_component(sontag_install_toolchain_root "${SONTAG_TOOLCHAIN_BIN_DIR_RESOLVED}" DIRECTORY)
+        set(sontag_install_libcxx_dir "${sontag_install_toolchain_root}/lib/c++")
+        if(EXISTS "${sontag_install_libcxx_dir}")
+            set_target_properties(sontag_bin PROPERTIES
+                INSTALL_RPATH "${sontag_install_libcxx_dir}"
+            )
+        endif()
+    endif()
+endif()
+
 set(warning_flags -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-function -Werror=vla -Wno-deprecated-declaration)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     list(APPEND warning_flags -Wno-unknown-warning-option)
