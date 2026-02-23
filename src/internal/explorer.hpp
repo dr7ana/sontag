@@ -61,6 +61,8 @@ namespace sontag::internal::explorer {
         std::vector<instruction_info> row_info{};
         resource_pressure_table resource_pressure{};
         std::vector<std::string> instruction_definitions{};
+        std::vector<std::string> ir_source_lines{};
+        std::vector<std::vector<std::string>> row_detail_lines{};
         std::string_view selected_line_color{};
         std::string_view selected_definition_color{};
         std::string_view call_target_color{};
@@ -1358,7 +1360,10 @@ namespace sontag::internal::explorer {
             auto offset_width = std::string_view{"offset"}.size();
             auto encoding_width = std::string_view{"encodings"}.size();
             auto instruction_width = std::string_view{"instruction"}.size();
-            auto definition_width = std::string_view{"definition"}.size();
+            auto has_definitions = !data.instruction_definitions.empty();
+            auto has_ir_source = !data.ir_source_lines.empty();
+            auto definition_width = has_definitions ? std::string_view{"definition"}.size() : size_t{0U};
+            auto ir_source_width = has_ir_source ? std::string_view{"ir source"}.size() : size_t{0U};
             auto extra_column_widths = std::vector<size_t>{};
             extra_column_widths.reserve(data.table_extra_headers.size());
             for (size_t i = 0U; i < data.table_extra_headers.size(); ++i) {
@@ -1380,8 +1385,11 @@ namespace sontag::internal::explorer {
                 offset_width = std::max(offset_width, format_offset(data.rows[i].offset).size());
                 encoding_width = std::max(encoding_width, data.rows[i].encodings.size());
                 instruction_width = std::max(instruction_width, aligned_instruction.size());
-                if (i < data.instruction_definitions.size()) {
+                if (has_definitions && i < data.instruction_definitions.size()) {
                     definition_width = std::max(definition_width, data.instruction_definitions[i].size());
+                }
+                if (has_ir_source && i < data.ir_source_lines.size()) {
+                    ir_source_width = std::max(ir_source_width, data.ir_source_lines[i].size());
                 }
             }
 
@@ -1403,10 +1411,18 @@ namespace sontag::internal::explorer {
                 separator_row.append("-+-");
                 separator_row.append(std::string(extra_column_widths[i], '-'));
             }
-            header_row.append(" | ");
-            header_row.append(pad_cell("definition", definition_width));
-            separator_row.append("-+-");
-            separator_row.append(std::string(definition_width, '-'));
+            if (has_definitions) {
+                header_row.append(" | ");
+                header_row.append(pad_cell("definition", definition_width));
+                separator_row.append("-+-");
+                separator_row.append(std::string(definition_width, '-'));
+            }
+            if (has_ir_source) {
+                header_row.append(" | ");
+                header_row.append(pad_cell("ir source", ir_source_width));
+                separator_row.append("-+-");
+                separator_row.append(std::string(ir_source_width, '-'));
+            }
 
             append_line(header_row);
             append_line(separator_row);
@@ -1421,8 +1437,14 @@ namespace sontag::internal::explorer {
                     empty_row.append(" | ");
                     empty_row.append(pad_cell("", extra_column_widths[i]));
                 }
-                empty_row.append(" | ");
-                empty_row.append(pad_cell("", definition_width));
+                if (has_definitions) {
+                    empty_row.append(" | ");
+                    empty_row.append(pad_cell("", definition_width));
+                }
+                if (has_ir_source) {
+                    empty_row.append(" | ");
+                    empty_row.append(pad_cell("", ir_source_width));
+                }
                 append_line(empty_row);
             }
             else {
@@ -1467,9 +1489,24 @@ namespace sontag::internal::explorer {
                             row_prefix.append(pad_cell("", extra_column_widths[j]));
                         }
                     }
-                    auto selected_definition = std::string_view{};
-                    if (i == cursor && i < data.instruction_definitions.size()) {
-                        selected_definition = data.instruction_definitions[i];
+                    auto trailing_columns = std::string{};
+                    auto trailing_empty = std::string{};
+                    if (has_definitions) {
+                        auto def = (i < data.instruction_definitions.size())
+                                         ? std::string_view{data.instruction_definitions[i]}
+                                         : std::string_view{};
+                        trailing_columns.append(" | ");
+                        trailing_columns.append(pad_cell(i == cursor ? def : std::string_view{}, definition_width));
+                        trailing_empty.append(" | ");
+                        trailing_empty.append(pad_cell("", definition_width));
+                    }
+                    if (has_ir_source) {
+                        auto ir = (i < data.ir_source_lines.size()) ? std::string_view{data.ir_source_lines[i]}
+                                                                    : std::string_view{};
+                        trailing_columns.append(" | ");
+                        trailing_columns.append(pad_cell(i == cursor ? ir : std::string_view{}, ir_source_width));
+                        trailing_empty.append(" | ");
+                        trailing_empty.append(pad_cell("", ir_source_width));
                     }
                     if (i == cursor) {
                         if (data.selected_line_color.empty()) {
@@ -1478,19 +1515,19 @@ namespace sontag::internal::explorer {
                         else {
                             frame.append(data.selected_line_color);
                         }
-                        frame.append("{} | "_format(row_prefix));
+                        frame.append("{}"_format(row_prefix));
                         frame.append("\x1b[0m");
                         if (!data.selected_definition_color.empty()) {
                             frame.append(data.selected_definition_color);
                         }
-                        frame.append(pad_cell(selected_definition, definition_width));
+                        frame.append(trailing_columns);
                         if (!data.selected_definition_color.empty()) {
                             frame.append("\x1b[0m");
                         }
                         frame.push_back('\n');
                     }
                     else {
-                        append_line("{} | {}"_format(row_prefix, pad_cell("", definition_width)));
+                        append_line("{}{}"_format(row_prefix, trailing_empty));
                     }
                 }
             }
@@ -1559,6 +1596,12 @@ namespace sontag::internal::explorer {
                                     has_info && !info.encoding_size.empty() ? std::string_view{info.encoding_size}
                                                                             : "na",
                                     value_width)));
+            if (cursor < data.row_detail_lines.size() && !data.row_detail_lines[cursor].empty()) {
+                append_line("");
+                for (const auto& detail_line : data.row_detail_lines[cursor]) {
+                    append_line(detail_line);
+                }
+            }
             return frame;
         }
 

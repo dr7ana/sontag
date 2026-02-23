@@ -16,9 +16,9 @@ sontag commands are organized by output mode:
 - `static`: base command, deterministic text output
   - examples: `:asm`, `:ir`, `:graph cfg`, `:graph call`
 - `explore`: interactive TTY mode (arrows, `j/k`, enter/quit depending on command)
-  - examples: `:asm explore`, `:ir explore`
+  - examples: `:asm explore`, `:ir explore`, `:mem_explore`
 - `inspect`: structured JSON export for downstream tooling
-  - examples: `:inspect asm`, `:inspect mca summary`, `:inspect mca heatmap`
+  - examples: `:inspect asm`, `:inspect mem`, `:inspect mca summary`, `:inspect mca heatmap`
 
 ## Requirements
 
@@ -126,6 +126,21 @@ Controls:
 - `q`: exit
 
 ![ir explore demo](docs/ir_explore.gif)
+
+### `:mem explore`
+
+Interactive memory access view with instrumented runtime tracing (WIP). Rows show access kind, width, address, symbol, alias group, and observed values from execution. Detail pane includes address decomposition, effective address, and traced before→after values for rmw.
+
+- `:mem [symbol|@last]`: traced memory table
+- `:mem explore [symbol|@last]`: interactive row navigation
+- `:inspect mem [symbol|@last]`: structured JSON output
+
+Controls:
+
+- `Up`/`Down` or `j`/`k`: move selection
+- `q`: exit
+
+![ir explore demo](docs/mem_explore.gif)
 
 ### ARM Instruction Support
 Currently tested on:
@@ -254,6 +269,9 @@ Artifacts are written under `artifacts/inspect/...`.
 :asm explore [symbol|@last]
 :ir [symbol|@last]
 :ir explore [symbol|@last]
+:mem [symbol|@last]
+:mem explore [symbol|@last]
+:inspect mem [symbol|@last]
 :diag [symbol|@last]
 :mca [symbol|@last]
 :delta [spectrum] [target_opt] [symbol|@last]

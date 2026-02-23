@@ -1671,10 +1671,90 @@ namespace sontag {
                         .pointer_operand = std::string{trim_ascii(*pointer_operand)}};
             };
 
+            auto parse_atomicrmw = [&](std::string_view payload) -> std::optional<ir_mem_trace_instruction> {
+                // atomicrmw <op> ptr %addr, <type> %val <ordering>
+                payload = trim_ascii(payload);
+                // skip the operation keyword (add, sub, xchg, etc.)
+                auto space = payload.find(' ');
+                if (space == std::string_view::npos) {
+                    return std::nullopt;
+                }
+                payload = trim_ascii(payload.substr(space + 1U));
+                if (payload.starts_with("volatile "sv)) {
+                    payload.remove_prefix("volatile "sv.size());
+                    payload = trim_ascii(payload);
+                }
+                // expect "ptr %addr, <type> %val"
+                if (!payload.starts_with("ptr "sv) && !payload.starts_with("ptr,"sv)) {
+                    return std::nullopt;
+                }
+                payload.remove_prefix("ptr"sv.size());
+                payload = trim_ascii(payload);
+                auto pointer_operand = extract_ptr_operand(payload, 0U);
+                if (!pointer_operand.has_value()) {
+                    return std::nullopt;
+                }
+                // type is after the comma following the pointer
+                auto comma = find_top_level_comma(payload, 0U);
+                size_t width = 0U;
+                if (comma != std::string_view::npos) {
+                    auto after_comma = trim_ascii(payload.substr(comma + 1U));
+                    auto type_and_cursor = parse_llvm_type_token(after_comma);
+                    if (type_and_cursor.has_value()) {
+                        width = parse_llvm_type_width_bytes(type_and_cursor->first).value_or(0U);
+                    }
+                }
+                return ir_mem_trace_instruction{
+                        .access = internal::mem::access_kind::rmw,
+                        .width_bytes = width,
+                        .pointer_operand = std::string{trim_ascii(*pointer_operand)}};
+            };
+
+            auto parse_cmpxchg = [&](std::string_view payload) -> std::optional<ir_mem_trace_instruction> {
+                // cmpxchg [weak] [volatile] ptr %addr, <type> %expected, <type> %new <ord> <ord>
+                payload = trim_ascii(payload);
+                if (payload.starts_with("weak "sv)) {
+                    payload.remove_prefix("weak "sv.size());
+                    payload = trim_ascii(payload);
+                }
+                if (payload.starts_with("volatile "sv)) {
+                    payload.remove_prefix("volatile "sv.size());
+                    payload = trim_ascii(payload);
+                }
+                if (!payload.starts_with("ptr "sv) && !payload.starts_with("ptr,"sv)) {
+                    return std::nullopt;
+                }
+                payload.remove_prefix("ptr"sv.size());
+                payload = trim_ascii(payload);
+                auto pointer_operand = extract_ptr_operand(payload, 0U);
+                if (!pointer_operand.has_value()) {
+                    return std::nullopt;
+                }
+                auto comma = find_top_level_comma(payload, 0U);
+                size_t width = 0U;
+                if (comma != std::string_view::npos) {
+                    auto after_comma = trim_ascii(payload.substr(comma + 1U));
+                    auto type_and_cursor = parse_llvm_type_token(after_comma);
+                    if (type_and_cursor.has_value()) {
+                        width = parse_llvm_type_width_bytes(type_and_cursor->first).value_or(0U);
+                    }
+                }
+                return ir_mem_trace_instruction{
+                        .access = internal::mem::access_kind::rmw,
+                        .width_bytes = width,
+                        .pointer_operand = std::string{trim_ascii(*pointer_operand)}};
+            };
+
             if (auto eq = trimmed.find('='); eq != std::string_view::npos) {
                 auto rhs = trim_ascii(trimmed.substr(eq + 1U));
                 if (rhs.starts_with("load "sv)) {
                     return parse_load(rhs.substr("load "sv.size()));
+                }
+                if (rhs.starts_with("atomicrmw "sv)) {
+                    return parse_atomicrmw(rhs.substr("atomicrmw "sv.size()));
+                }
+                if (rhs.starts_with("cmpxchg "sv)) {
+                    return parse_cmpxchg(rhs.substr("cmpxchg "sv.size()));
                 }
             }
             if (trimmed.starts_with("store "sv)) {
@@ -1715,8 +1795,6 @@ namespace sontag {
                     }
                 }
 
-                out << line << '\n';
-
                 if (in_target) {
                     if (auto parsed = parse_ir_mem_trace_instruction(trimmed); parsed.has_value()) {
                         auto width = parsed->width_bytes == 0U ? 1U : parsed->width_bytes;
@@ -1733,14 +1811,31 @@ namespace sontag {
                                             ? std::string_view{}
                                             : std::string_view{line}.substr(0U, indent_length);
                         if (parsed->access == internal::mem::access_kind::load) {
+                            out << line << '\n';
                             out << indent << "  call void @__sontag_mem_trace_load(i64 " << trace_id << ", ptr "
                                 << parsed->pointer_operand << ", i64 " << width << ")\n";
                         }
                         else if (parsed->access == internal::mem::access_kind::store) {
+                            out << line << '\n';
+                            out << indent << "  call void @__sontag_mem_trace_store(i64 " << trace_id << ", ptr "
+                                << parsed->pointer_operand << ", i64 " << width << ")\n";
+                        }
+                        else if (parsed->access == internal::mem::access_kind::rmw) {
+                            // emit load hook BEFORE the instruction (captures before-value)
+                            out << indent << "  call void @__sontag_mem_trace_load(i64 " << trace_id << ", ptr "
+                                << parsed->pointer_operand << ", i64 " << width << ")\n";
+                            out << line << '\n';
+                            // emit store hook AFTER the instruction (captures after-value)
                             out << indent << "  call void @__sontag_mem_trace_store(i64 " << trace_id << ", ptr "
                                 << parsed->pointer_operand << ", i64 " << width << ")\n";
                         }
                     }
+                    else {
+                        out << line << '\n';
+                    }
+                }
+                else {
+                    out << line << '\n';
                 }
 
                 if (in_target) {
@@ -1792,7 +1887,7 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
                    escaped_symbol +
                    R"cpp(");
 
-                         namespace {
+                                 namespace {
 
                              constexpr uint64_t kMaxTraceEvents = 50000;
                              std::FILE* g_trace_file = nullptr;
@@ -1849,29 +1944,29 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
                              write_trace(id, 'S', address, width);
                          }
 
-int main(int argc, char** argv) {
-    if (argc >= 2 && argv[1] != nullptr) {
-        g_trace_file = std::fopen(argv[1], "w");
-    }
-    if (argc >= 3 && argv[2] != nullptr) {
-        g_stats_file = std::fopen(argv[2], "w");
-    }
-    auto exit_code = __sontag_entrypoint();
-    if (g_trace_file != nullptr) {
-        std::fclose(g_trace_file);
-        g_trace_file = nullptr;
-    }
-    if (g_stats_file != nullptr) {
-        std::fprintf(g_stats_file, "truncated=%s\n", g_dropped_events > 0 ? "true" : "false");
-        std::fprintf(g_stats_file, "dropped_events=%" PRIu64 "\n", g_dropped_events);
-        std::fprintf(g_stats_file, "written_events=%" PRIu64 "\n", g_written_events);
-        std::fprintf(g_stats_file, "max_events=%" PRIu64 "\n", kMaxTraceEvents);
-        std::fclose(g_stats_file);
-        g_stats_file = nullptr;
-    }
+                         int main(int argc, char** argv) {
+                             if (argc >= 2 && argv[1] != nullptr) {
+                                 g_trace_file = std::fopen(argv[1], "w");
+                             }
+                             if (argc >= 3 && argv[2] != nullptr) {
+                                 g_stats_file = std::fopen(argv[2], "w");
+                             }
+                             auto exit_code = __sontag_entrypoint();
+                             if (g_trace_file != nullptr) {
+                                 std::fclose(g_trace_file);
+                                 g_trace_file = nullptr;
+                             }
+                             if (g_stats_file != nullptr) {
+                                 std::fprintf(g_stats_file, "truncated=%s\n", g_dropped_events > 0 ? "true" : "false");
+                                 std::fprintf(g_stats_file, "dropped_events=%" PRIu64 "\n", g_dropped_events);
+                                 std::fprintf(g_stats_file, "written_events=%" PRIu64 "\n", g_written_events);
+                                 std::fprintf(g_stats_file, "max_events=%" PRIu64 "\n", kMaxTraceEvents);
+                                 std::fclose(g_stats_file);
+                                 g_stats_file = nullptr;
+                             }
                              return exit_code;
                          }
-            )cpp";
+                   )cpp";
         }
 
         struct mem_trace_runtime_stats {
@@ -1879,6 +1974,20 @@ int main(int argc, char** argv) {
             size_t dropped_events{};
             std::optional<size_t> max_events{};
         };
+
+        static bool parse_unsigned_decimal(std::string_view text, uint64_t& out) {
+            text = trim_ascii(text);
+            if (text.empty()) {
+                return false;
+            }
+            auto value = uint64_t{0};
+            auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value, 10);
+            if (ec != std::errc{} || ptr != (text.data() + text.size())) {
+                return false;
+            }
+            out = value;
+            return true;
+        }
 
         static mem_trace_runtime_stats parse_mem_trace_runtime_stats(std::string_view text) {
             auto stats = mem_trace_runtime_stats{};
@@ -1910,20 +2019,6 @@ int main(int argc, char** argv) {
                 }
             }
             return stats;
-        }
-
-        static bool parse_unsigned_decimal(std::string_view text, uint64_t& out) {
-            text = trim_ascii(text);
-            if (text.empty()) {
-                return false;
-            }
-            auto value = uint64_t{0};
-            auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value, 10);
-            if (ec != std::errc{} || ptr != (text.data() + text.size())) {
-                return false;
-            }
-            out = value;
-            return true;
         }
 
         static bool parse_unsigned_hex(std::string_view text, uint64_t& out) {
@@ -2916,6 +3011,22 @@ int main(int argc, char** argv) {
         auto stdout_path = kind_dir / (id + ".stdout.txt");
         auto stderr_path = kind_dir / (id + ".stderr.txt");
 
+        if (kind == analysis_kind::mem_trace) {
+            auto cached = detail::read_text_file(artifact_path);
+            if (!cached.empty()) {
+                auto cached_result = analysis_result{};
+                cached_result.kind = kind;
+                cached_result.source_path = source_path;
+                cached_result.artifact_path = artifact_path;
+                cached_result.stdout_path = stdout_path;
+                cached_result.stderr_path = stderr_path;
+                cached_result.exit_code = 0;
+                cached_result.success = true;
+                cached_result.artifact_text = std::move(cached);
+                return cached_result;
+            }
+        }
+
         {
             std::ofstream out{source_path};
             if (!out) {
@@ -3030,7 +3141,9 @@ int main(int argc, char** argv) {
             }
 
             auto trace_events_path = kind_dir / (id + ".trace.events.log");
-            auto run_command = std::vector<std::string>{trace_binary_path.string(), trace_events_path.string()};
+            auto trace_stats_path = kind_dir / (id + ".trace.stats.txt");
+            auto run_command = std::vector<std::string>{
+                    trace_binary_path.string(), trace_events_path.string(), trace_stats_path.string()};
             auto run_exit = detail::run_process(run_command, stdout_path, stderr_path);
             auto run_stdout = detail::read_text_file(stdout_path);
             auto run_stderr = detail::read_text_file(stderr_path);
@@ -3059,8 +3172,13 @@ int main(int argc, char** argv) {
             }
             std::ranges::sort(events, [](const auto& lhs, const auto& rhs) { return lhs.sequence < rhs.sequence; });
 
+            auto stats = detail::parse_mem_trace_runtime_stats(detail::read_text_file(trace_stats_path));
             auto payload = detail::mem_trace_payload{
-                    .symbol = *resolved_symbol, .map_entries = std::move(map_entries), .events = std::move(events)};
+                    .symbol = *resolved_symbol,
+                    .truncated = stats.truncated,
+                    .dropped_events = stats.dropped_events,
+                    .map_entries = std::move(map_entries),
+                    .events = std::move(events)};
             auto artifact_text = detail::render_mem_trace_payload(payload);
             detail::write_text_file(artifact_path, artifact_text);
 

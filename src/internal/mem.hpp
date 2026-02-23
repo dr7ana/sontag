@@ -67,6 +67,7 @@ namespace sontag::internal::mem {
         std::optional<uint64_t> runtime_address{};
         std::optional<std::string> observed_value{};
         size_t value_variation_count{};
+        std::vector<std::string> trace_samples{};
     };
 
     struct summary {
