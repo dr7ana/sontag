@@ -7,7 +7,7 @@
 ╚══════╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝
 ```
 
-a C++ interpreter, assembly explorer, analysis-focused code execution harness
+a C++ interpreter, assembly explorer, and analysis-focused code execution harness
 
 ## Command Paradigm
 
