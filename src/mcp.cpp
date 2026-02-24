@@ -149,7 +149,7 @@ namespace sontag::mcp {
         static constexpr auto eval_description =
                 R"(Load C++ source files and execute a sontag REPL command in an isolated subprocess. Files are specified as ordered arrays of paths — declfiles for headers/declarations, files for executable code. No state persists between calls.)";
         static constexpr auto eval_input_schema =
-                R"json({"type": "object","properties": {"declfiles": {"type": "array","items": { "type": "string" },"description": "Paths to declaration/header files (loaded as --declfile, in order). Loaded before files."},"files": {"type": "array","items": { "type": "string" },"description": "Paths to executable source files (loaded as --file, in order). Loaded after declfiles."},"command": {"type": "string","description": "REPL command to execute, e.g. ':asm', ':ir', ':inspect asm', ':inspect mem', ':delta O3', ':symbols', ':mca', ':graph cfg'"},"opt_level": {"type": "string","enum": ["O0","O1","O2","O3","Ofast","Oz"]},"standard": {"type": "string","enum": ["c++20","c++23","c++2c"]},"target": {"type": "string","description": "LLVM target triple"},"cpu": {"type": "string","description": "Target CPU model"},"color": {"type": "boolean","description": "ANSI color output. Default true.","default": true}},"required": ["files", "command"]})json"sv;
+                R"json({"type": "object","properties": {"declfiles": {"type": "array","items": { "type": "string" },"description": "Paths to declaration/header files (loaded as --declfile, in order). Loaded before files."},"files": {"type": "array","items": { "type": "string" },"description": "Paths to executable source files (loaded as --file, in order). Loaded after declfiles."},"command": {"type": "string","description": "REPL command to execute, e.g. ':asm', ':ir', ':inspect asm', ':inspect mem', ':delta O3', ':symbols', ':mca', ':graph cfg'"},"opt_level": {"type": "string","enum": ["O0","O1","O2","O3","Ofast","Oz"]},"standard": {"type": "string","enum": ["c++20","c++23","c++2c"]},"target": {"type": "string","description": "LLVM target triple"},"cpu": {"type": "string","description": "Target CPU model"},"color": {"type": "boolean","description": "ANSI color output. Default false.","default": false}},"required": ["files", "command"]})json"sv;
 
         static constexpr auto session_eval_description =
                 R"(Send a command to the persistent sontag session. Commands start with ':' (e.g. ':asm', ':inspect mem', ':config opt=O2', ':reset', ':file path', ':declfile path', ':mark name', ':delta snapshot_name'). Single-line expressions can be sent directly to add executable cells. For multi-line code, write a file and use ':file path'.)";
@@ -331,7 +331,7 @@ namespace sontag::mcp {
             cmd.push_back("--banner");
             cmd.push_back("false");
 
-            bool use_color = args.color.value_or(true);
+            bool use_color = args.color.value_or(false);
             cmd.push_back("--color");
             cmd.push_back(use_color ? "always" : "never");
 
@@ -567,7 +567,7 @@ namespace sontag::mcp {
                         "false",
                         "--quiet",
                         "--color",
-                        "always",
+                        "never",
                         "--frame-delimiter",
                         "--cache-dir",
                         instance.cache_dir.string(),

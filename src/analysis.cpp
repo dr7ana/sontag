@@ -479,7 +479,10 @@ namespace sontag {
             return ss.str();
         }
 
-        static void write_text_file(const fs::path& path, std::string_view text) {
+        static bool write_text_file(const fs::path& path, std::string_view text) {
+            if (text.empty()) {
+                return false;
+            }
             std::ofstream out{path};
             if (!out) {
                 throw std::runtime_error("failed to open file for write: {}"_format(path.string()));
@@ -488,6 +491,7 @@ namespace sontag {
             if (!out) {
                 throw std::runtime_error("failed to write file: {}"_format(path.string()));
             }
+            return true;
         }
 
         static std::string render_source(
@@ -554,6 +558,13 @@ namespace sontag {
             }
         }
 
+        static void remove_if_empty(const fs::path& path) {
+            std::error_code ec{};
+            if (fs::exists(path, ec) && fs::file_size(path, ec) == 0U) {
+                fs::remove(path, ec);
+            }
+        }
+
         static int open_write_file(const fs::path& path) {
             auto fd = ::open(path.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
             if (fd < 0) {
@@ -603,6 +614,9 @@ namespace sontag {
             if (::waitpid(pid, &status, 0) < 0) {
                 throw std::runtime_error("waitpid failed");
             }
+
+            remove_if_empty(stdout_path);
+            remove_if_empty(stderr_path);
 
             if (WIFEXITED(status)) {
                 return WEXITSTATUS(status);
