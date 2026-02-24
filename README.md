@@ -289,7 +289,7 @@ sontag --mcp
 
 ### configuration
 
-for [claude code](https://docs.anthropic.com/en/docs/claude-code/mcp), add to `~/.claude/claude_code_config.json` or `.claude/claude_code_config.json`:
+for [claude code](https://docs.anthropic.com/en/docs/claude-code/mcp), add to `~/.claude/settings.json`:
 
 ```json
 {

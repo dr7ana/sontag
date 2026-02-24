@@ -4907,7 +4907,8 @@ examples:
                 std::span<const internal::explorer::instruction_info> original_info,
                 const internal::explorer::resource_pressure_table& original_resource_pressure,
                 std::string_view selected_line_color,
-                std::string_view selected_definition_color) {
+                std::string_view selected_definition_color,
+                std::string_view call_target_color) {
             auto model = internal::explorer::model{};
             model.mode_label = "mem";
             model.symbol_display = std::string{symbol_display};
@@ -4958,7 +4959,7 @@ examples:
             model.resource_pressure = std::move(remapped_pressure);
             model.selected_line_color = selected_line_color;
             model.selected_definition_color = selected_definition_color;
-            model.call_target_color = {};
+            model.call_target_color = call_target_color;
             model.initial_cursor = 0U;
             return model;
         }
@@ -7208,10 +7209,12 @@ examples:
 
                     std::string_view selected_line_color{};
                     std::string_view selected_definition_color{};
+                    std::string_view call_target_color{};
                     if (should_use_color(cfg.color)) {
                         auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
                         selected_line_color = palette.unchanged;
                         selected_definition_color = palette.modified;
+                        call_target_color = palette.removed;
                     }
                     auto model = build_mem_explorer_model(
                             mem_data.symbol_display,
@@ -7219,7 +7222,8 @@ examples:
                             mem_data.row_info,
                             mem_data.resource_pressure,
                             selected_line_color,
-                            selected_definition_color);
+                            selected_definition_color,
+                            call_target_color);
                     model.initial_cursor = active.cursor;
 
                     auto launch = internal::explorer::run(model, out);
