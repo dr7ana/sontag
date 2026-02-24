@@ -113,7 +113,7 @@ namespace sontag::internal::explorer {
     };
 
     namespace detail {
-        static constexpr size_t default_rows{48};
+        static constexpr size_t default_rows{32};
         static constexpr size_t default_cols{120};
 
         struct terminal_dims {
@@ -355,18 +355,21 @@ namespace sontag::internal::explorer {
             bool active{false};
         };
 
+        static constexpr size_t detail_lines_reserve = 16U;
+
         static size_t calculate_rows_visible(size_t total_rows, size_t opcode_rows, bool has_resource_pressure) {
             // Fixed rows:
             // 3 (title/symbol/operations) + 2 (opcode header) + opcode rows +
             // 1 (blank before pressure) + pressure section +
             // 1 (blank before assembly) + 3 (assembly heading/header/separator) +
             // 1 (controls) + 1 (blank before info) +
-            // 3 (info heading/header/separator) + 7 (info body)
+            // 3 (info heading/header/separator) + 7 (info body) +
+            // detail_lines_reserve (row detail lines below info table)
             //
             // pressure section:
             // - with data: 4 rows (heading/header/separator/values)
             // - no data:  2 rows (heading/"unavailable")
-            auto fixed_rows = (has_resource_pressure ? 26U : 24U) + opcode_rows;
+            auto fixed_rows = (has_resource_pressure ? 26U : 24U) + opcode_rows + detail_lines_reserve;
             if (total_rows <= fixed_rows) {
                 return 1U;
             }
