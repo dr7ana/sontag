@@ -172,6 +172,111 @@ namespace sontag::test {
               diag_result.command.end());
     }
 
+    TEST_CASE("003: analysis namespaces source and artifacts by build hash", "[003][analysis][cache]") {
+        detail::temp_dir temp{"sontag_m1_analysis_build_hash_namespace"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+
+        auto asm_result = run_analysis(request, analysis_kind::asm_text);
+        auto ir_result = run_analysis(request, analysis_kind::ir);
+
+        REQUIRE(asm_result.success);
+        REQUIRE(ir_result.success);
+        REQUIRE_FALSE(asm_result.command.empty());
+        REQUIRE_FALSE(ir_result.command.empty());
+        CHECK(asm_result.source_path.parent_path() == ir_result.source_path.parent_path());
+        CHECK(asm_result.source_path.parent_path().filename() == asm_result.artifact_path.parent_path().filename());
+        CHECK(ir_result.source_path.parent_path().filename() == ir_result.artifact_path.parent_path().filename());
+        CHECK(asm_result.source_path.string().find("/artifacts/inputs/") != std::string::npos);
+
+        auto asm_cached_result = run_analysis(request, analysis_kind::asm_text);
+        auto ir_cached_result = run_analysis(request, analysis_kind::ir);
+
+        REQUIRE(asm_cached_result.success);
+        REQUIRE(ir_cached_result.success);
+        CHECK(asm_cached_result.command.empty());
+        CHECK(ir_cached_result.command.empty());
+        CHECK(asm_cached_result.artifact_text == asm_result.artifact_text);
+        CHECK(ir_cached_result.artifact_text == ir_result.artifact_text);
+    }
+
+    TEST_CASE("003: build hash changes when linker-arg order changes", "[003][analysis][cache]") {
+        detail::temp_dir temp{"sontag_m1_analysis_build_hash_order"};
+
+        analysis_request first_request{};
+        first_request.clang_path = "/usr/bin/clang++";
+        first_request.session_dir = temp.path / "session";
+        first_request.language_standard = cxx_standard::cxx23;
+        first_request.opt_level = optimization_level::o2;
+        first_request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        first_request.linker_args = {"-Wl,--as-needed", "-Wl,--gc-sections"};
+
+        auto second_request = first_request;
+        second_request.linker_args = {"-Wl,--gc-sections", "-Wl,--as-needed"};
+
+        auto first_result = run_analysis(first_request, analysis_kind::asm_text);
+        auto second_result = run_analysis(second_request, analysis_kind::asm_text);
+
+        REQUIRE(first_result.success);
+        REQUIRE(second_result.success);
+        CHECK(first_result.source_path.parent_path() != second_result.source_path.parent_path());
+    }
+
+    TEST_CASE("003: mem_trace cache hit preserves trace payload exit code", "[003][analysis][cache][mem]") {
+        detail::temp_dir temp{"sontag_m1_mem_trace_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.static_link = true;
+        request.decl_cells = {"int square(int x) { int y = x * x; return y; }"};
+        request.exec_cells = {"volatile int sink = square(3);", "return sink;"};
+        request.symbol = "square";
+
+        auto cold_result = run_analysis(request, analysis_kind::mem_trace);
+        REQUIRE(cold_result.success);
+        REQUIRE(cold_result.exit_code == 9);
+        CHECK_FALSE(cold_result.command.empty());
+
+        auto cached_result = run_analysis(request, analysis_kind::mem_trace);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.exit_code == cold_result.exit_code);
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+        CHECK(cached_result.command.empty());
+    }
+
+    TEST_CASE("003: dump cache hit preserves disassembly and opcode mapping", "[003][analysis][cache][dump]") {
+        detail::temp_dir temp{"sontag_m1_dump_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        request.exec_cells = {"volatile int sink = add(1, 2);", "return sink;"};
+
+        auto cold_result = run_analysis(request, analysis_kind::dump);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        REQUIRE_FALSE(cold_result.opcode_table.empty());
+
+        auto cached_result = run_analysis(request, analysis_kind::dump);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+        CHECK_FALSE(cached_result.opcode_table.empty());
+        CHECK(cached_result.opcode_table.size() == cold_result.opcode_table.size());
+        CHECK(cached_result.operations.size() == cold_result.operations.size());
+    }
+
     TEST_CASE("003: mem_trace command reflects static vs dynamic link policy", "[003][analysis][link]") {
         detail::temp_dir temp{"sontag_m1_link_policy"};
 

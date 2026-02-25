@@ -610,33 +610,295 @@ namespace sontag {
             return source.str();
         }
 
-        static std::string make_artifact_id(const analysis_request& request, analysis_kind kind) {
-            std::ostringstream key{};
-            key << "{}\n{}\n{}\n"_format(kind, request.language_standard, request.opt_level);
-            key << request.asm_syntax << '\n';
+        static void ensure_dir(const fs::path& path);
+        static void attach_opcode_mapping(
+                analysis_result& result, std::span<const opcode::operation_stream_input> streams);
+
+        static std::string hash_fnv1a_64_hex(std::string_view text) {
+            auto hash = uint64_t{14695981039346656037ULL};
+            constexpr auto prime = uint64_t{1099511628211ULL};
+            for (unsigned char c : text) {
+                hash ^= static_cast<uint64_t>(c);
+                hash *= prime;
+            }
+            std::ostringstream out{};
+            out << std::hex << hash;
+            return out.str();
+        }
+
+        static std::string format_optional_value(const std::optional<std::string>& value) {
+            if (!value) {
+                return "<none>";
+            }
+            return *value;
+        }
+
+        static std::string normalize_requested_symbol_for_cache(const analysis_request& request) {
             if (request.symbol) {
-                key << *request.symbol << '\n';
+                return *request.symbol;
             }
-            if (request.target_triple) {
-                key << *request.target_triple << '\n';
+            return "<default>";
+        }
+
+        static std::string render_build_unit_payload(const analysis_request& request, std::string_view source_text) {
+            std::ostringstream payload{};
+            payload << "clang_path=" << request.clang_path.string() << '\n';
+            payload << "language_standard=" << "{}"_format(request.language_standard) << '\n';
+            payload << "opt_level=" << "{}"_format(request.opt_level) << '\n';
+            payload << "target_triple=" << format_optional_value(request.target_triple) << '\n';
+            payload << "cpu=" << format_optional_value(request.cpu) << '\n';
+            payload << "mca_cpu=" << format_optional_value(request.mca_cpu) << '\n';
+            payload << "objdump_path=" << request.objdump_path.string() << '\n';
+            payload << "nm_path=" << request.nm_path.string() << '\n';
+            payload << "mca_path=" << request.mca_path.string() << '\n';
+            payload << "asm_syntax=" << request.asm_syntax << '\n';
+            payload << "static_link=" << (request.static_link ? "true" : "false") << '\n';
+            payload << "no_link=" << (request.no_link ? "true" : "false") << '\n';
+            payload << "graph_format=" << request.graph_format << '\n';
+            payload << "source_digest=" << hash_fnv1a_64_hex(source_text) << '\n';
+            payload << "source_bytes=" << source_text.size() << '\n';
+
+            for (size_t i = 0U; i < request.library_dirs.size(); ++i) {
+                payload << "library_dir[" << i << "]=" << request.library_dirs[i].string() << '\n';
             }
-            if (request.cpu) {
-                key << *request.cpu << '\n';
+            for (size_t i = 0U; i < request.libraries.size(); ++i) {
+                payload << "library[" << i << "]=" << request.libraries[i] << '\n';
             }
-            if (request.mca_cpu) {
-                key << *request.mca_cpu << '\n';
-            }
-            for (const auto& cell : request.decl_cells) {
-                key << "decl:" << cell << '\n';
-            }
-            for (const auto& cell : request.exec_cells) {
-                key << "exec:" << cell << '\n';
+            for (size_t i = 0U; i < request.linker_args.size(); ++i) {
+                payload << "linker_arg[" << i << "]=" << request.linker_args[i] << '\n';
             }
 
-            auto hash_value = std::hash<std::string>{}(key.str());
-            std::ostringstream id{};
-            id << std::hex << hash_value;
-            return id.str();
+            return payload.str();
+        }
+
+        static std::string render_symbol_view_payload(
+                std::string_view build_unit_hash, const analysis_request& request, analysis_kind kind) {
+            std::ostringstream payload{};
+            payload << "build_unit_hash=" << build_unit_hash << '\n';
+            payload << "analysis_kind=" << to_string(kind) << '\n';
+            payload << "requested_symbol=" << normalize_requested_symbol_for_cache(request) << '\n';
+            payload << "asm_syntax=" << request.asm_syntax << '\n';
+            payload << "graph_format=" << request.graph_format << '\n';
+            return payload.str();
+        }
+
+        static std::string render_trace_payload(std::string_view build_unit_hash, const analysis_request& request) {
+            std::ostringstream payload{};
+            payload << "build_unit_hash=" << build_unit_hash << '\n';
+            payload << "analysis_kind=mem_trace\n";
+            payload << "requested_symbol=" << normalize_requested_symbol_for_cache(request) << '\n';
+            payload << "trace_mode=runtime_instrumented\n";
+            return payload.str();
+        }
+
+        static std::string make_merkle_node_hash(
+                std::string_view node_kind, std::string_view payload_hash, std::span<const std::string> child_hashes) {
+            std::ostringstream key{};
+            key << "node_kind=" << node_kind << '\n';
+            key << "payload_hash=" << payload_hash << '\n';
+            for (size_t i = 0U; i < child_hashes.size(); ++i) {
+                key << "child[" << i << "]=" << child_hashes[i] << '\n';
+            }
+            return hash_fnv1a_64_hex(key.str());
+        }
+
+        static std::string make_build_unit_hash(const analysis_request& request, std::string_view source_text) {
+            auto build_payload = render_build_unit_payload(request, source_text);
+            auto build_payload_hash = hash_fnv1a_64_hex(build_payload);
+            auto empty_children = std::array<std::string, 0U>{};
+            return make_merkle_node_hash("build_unit", build_payload_hash, empty_children);
+        }
+
+        static std::string make_symbol_view_hash(
+                std::string_view build_unit_hash, const analysis_request& request, analysis_kind kind) {
+            auto symbol_payload = render_symbol_view_payload(build_unit_hash, request, kind);
+            auto symbol_payload_hash = hash_fnv1a_64_hex(symbol_payload);
+            auto symbol_children = std::array<std::string, 1U>{std::string{build_unit_hash}};
+            return make_merkle_node_hash("symbol_view", symbol_payload_hash, symbol_children);
+        }
+
+        static std::string make_trace_hash(std::string_view build_unit_hash, const analysis_request& request) {
+            auto trace_payload = render_trace_payload(build_unit_hash, request);
+            auto trace_payload_hash = hash_fnv1a_64_hex(trace_payload);
+            auto trace_children = std::array<std::string, 1U>{std::string{build_unit_hash}};
+            return make_merkle_node_hash("trace", trace_payload_hash, trace_children);
+        }
+
+        static std::string make_artifact_id(
+                std::string_view build_unit_hash, const analysis_request& request, analysis_kind kind) {
+            if (kind == analysis_kind::mem_trace) {
+                return make_trace_hash(build_unit_hash, request);
+            }
+            return make_symbol_view_hash(build_unit_hash, request, kind);
+        }
+
+        static void persist_merkle_node(
+                const fs::path& root_dir,
+                std::string_view node_kind,
+                std::string_view payload,
+                std::span<const std::string> child_hashes,
+                std::span<const fs::path> artifacts) {
+            auto payload_hash = hash_fnv1a_64_hex(payload);
+            auto node_hash = make_merkle_node_hash(node_kind, payload_hash, child_hashes);
+            auto node_dir = root_dir / node_hash;
+            ensure_dir(node_dir);
+
+            auto payload_path = node_dir / "payload.txt";
+            auto manifest_path = node_dir / "manifest.txt";
+            (void)write_text_file(payload_path, payload);
+
+            std::ostringstream manifest{};
+            manifest << "node_kind=" << node_kind << '\n';
+            manifest << "node_hash=" << node_hash << '\n';
+            manifest << "payload_hash=" << payload_hash << '\n';
+            manifest << "payload_file=payload.txt\n";
+            for (size_t i = 0U; i < child_hashes.size(); ++i) {
+                manifest << "child[" << i << "]=" << child_hashes[i] << '\n';
+            }
+            for (size_t i = 0U; i < artifacts.size(); ++i) {
+                manifest << "artifact[" << i << "]=" << artifacts[i].string() << '\n';
+            }
+            (void)write_text_file(manifest_path, manifest.str());
+        }
+
+        static void persist_merkle_cache_manifests(
+                const analysis_request& request,
+                analysis_kind kind,
+                std::string_view source_text,
+                std::string_view build_unit_hash,
+                const fs::path& source_path,
+                const fs::path& artifact_path) {
+            try {
+                auto cache_root = request.session_dir / "artifacts" / "cache";
+                auto units_root = cache_root / "units";
+                auto symbols_root = cache_root / "symbols";
+                auto traces_root = cache_root / "traces";
+                ensure_dir(units_root);
+                ensure_dir(symbols_root);
+                ensure_dir(traces_root);
+
+                auto build_payload = render_build_unit_payload(request, source_text);
+                auto empty_children = std::array<std::string, 0U>{};
+                auto build_artifacts = std::array<fs::path, 1U>{source_path};
+                persist_merkle_node(units_root, "build_unit", build_payload, empty_children, build_artifacts);
+
+                auto symbol_payload = render_symbol_view_payload(build_unit_hash, request, kind);
+                auto symbol_children = std::array<std::string, 1U>{std::string{build_unit_hash}};
+                auto symbol_artifacts = std::array<fs::path, 1U>{artifact_path};
+                persist_merkle_node(symbols_root, "symbol_view", symbol_payload, symbol_children, symbol_artifacts);
+
+                if (kind == analysis_kind::mem_trace) {
+                    auto trace_payload = render_trace_payload(build_unit_hash, request);
+                    auto trace_children = std::array<std::string, 1U>{std::string{build_unit_hash}};
+                    auto trace_artifacts = std::array<fs::path, 1U>{artifact_path};
+                    persist_merkle_node(traces_root, "trace", trace_payload, trace_children, trace_artifacts);
+                }
+            } catch (...) {
+                // Cache-manifest writes are best-effort and must not affect analysis behavior.
+            }
+        }
+
+        static bool looks_like_mem_trace_payload(std::string_view text) {
+            return text.find("symbol="sv) != std::string_view::npos &&
+                   text.find("tracee_exit_code="sv) != std::string_view::npos &&
+                   text.find("--events--"sv) != std::string_view::npos;
+        }
+
+        static std::optional<int> parse_mem_trace_exit_code(std::string_view text) {
+            constexpr auto prefix = "tracee_exit_code="sv;
+            size_t begin = 0U;
+            while (begin <= text.size()) {
+                auto end = text.find('\n', begin);
+                if (end == std::string_view::npos) {
+                    end = text.size();
+                }
+
+                auto line = text.substr(begin, end - begin);
+                if (line.starts_with(prefix)) {
+                    auto value_text = line.substr(prefix.size());
+                    int value = 0;
+                    auto* value_begin = value_text.data();
+                    auto* value_end = value_begin + value_text.size();
+                    auto parsed = std::from_chars(value_begin, value_end, value);
+                    if (parsed.ec == std::errc{} && parsed.ptr == value_end) {
+                        return value;
+                    }
+                    return std::nullopt;
+                }
+
+                if (end == text.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+            return std::nullopt;
+        }
+
+        static std::optional<analysis_result> try_load_cached_mem_trace_result(
+                const fs::path& source_path,
+                const fs::path& artifact_path,
+                const fs::path& stdout_path,
+                const fs::path& stderr_path) {
+            auto cached = read_text_file(artifact_path);
+            if (cached.empty() || !looks_like_mem_trace_payload(cached)) {
+                return std::nullopt;
+            }
+
+            auto cached_result = analysis_result{
+                    .kind = analysis_kind::mem_trace,
+                    .success = true,
+                    .exit_code = parse_mem_trace_exit_code(cached).value_or(0),
+                    .source_path = source_path,
+                    .artifact_path = artifact_path,
+                    .stdout_path = stdout_path,
+                    .stderr_path = stderr_path,
+                    .artifact_text = std::move(cached)};
+            return cached_result;
+        }
+
+        static bool supports_text_cache_hit(analysis_kind kind) {
+            return kind == analysis_kind::asm_text || kind == analysis_kind::ir || kind == analysis_kind::dump;
+        }
+
+        static std::optional<analysis_result> try_load_cached_text_artifact_result(
+                analysis_kind kind,
+                const fs::path& source_path,
+                const fs::path& artifact_path,
+                const fs::path& stdout_path,
+                const fs::path& stderr_path) {
+            if (!supports_text_cache_hit(kind)) {
+                return std::nullopt;
+            }
+
+            auto cached = read_text_file(artifact_path);
+            if (trim_ascii(cached).empty()) {
+                return std::nullopt;
+            }
+
+            auto cached_result = analysis_result{
+                    .kind = kind,
+                    .success = true,
+                    .exit_code = 0,
+                    .source_path = source_path,
+                    .artifact_path = artifact_path,
+                    .stdout_path = stdout_path,
+                    .stderr_path = stderr_path,
+                    .artifact_text = std::move(cached),
+                    .diagnostics_text = read_text_file(stderr_path)};
+            if (kind == analysis_kind::dump) {
+                auto dump_streams = std::array{
+                        opcode::operation_stream_input{.name = "asm", .disassembly = cached_result.artifact_text}};
+                attach_opcode_mapping(cached_result, dump_streams);
+            }
+            return cached_result;
+        }
+
+        template <typename T, typename TryLoadFn, typename BuildFn>
+        static T get_or_create(TryLoadFn&& try_load, BuildFn&& build) {
+            if (auto loaded = std::invoke(std::forward<TryLoadFn>(try_load)); loaded.has_value()) {
+                return std::move(*loaded);
+            }
+            return std::invoke(std::forward<BuildFn>(build));
         }
 
         static void ensure_dir(const fs::path& path) {
@@ -3548,35 +3810,39 @@ namespace sontag {
             throw std::runtime_error("analysis requires at least one stored cell");
         }
 
+        auto source_text = detail::render_source(request.decl_cells, request.exec_cells);
+        auto build_unit_hash = detail::make_build_unit_hash(request, source_text);
+
         auto artifacts_root = request.session_dir / "artifacts";
-        auto inputs_dir = artifacts_root / "inputs";
-        fs::path kind_dir{};
+        auto inputs_dir = artifacts_root / "inputs" / build_unit_hash;
+        fs::path kind_root{};
         switch (kind) {
             case analysis_kind::graph_cfg:
-                kind_dir = artifacts_root / "graphs" / "cfg";
+                kind_root = artifacts_root / "graphs" / "cfg";
                 break;
             case analysis_kind::graph_call:
-                kind_dir = artifacts_root / "graphs" / "call";
+                kind_root = artifacts_root / "graphs" / "call";
                 break;
             case analysis_kind::graph_defuse:
-                kind_dir = artifacts_root / "graphs" / "defuse";
+                kind_root = artifacts_root / "graphs" / "defuse";
                 break;
             case analysis_kind::inspect_asm_map:
-                kind_dir = artifacts_root / "inspect" / "asm";
+                kind_root = artifacts_root / "inspect" / "asm";
                 break;
             case analysis_kind::inspect_mca_summary:
             case analysis_kind::inspect_mca_heatmap:
-                kind_dir = artifacts_root / "inspect" / "mca";
+                kind_root = artifacts_root / "inspect" / "mca";
                 break;
             default:
-                kind_dir = artifacts_root / "{}"_format(kind);
+                kind_root = artifacts_root / "{}"_format(kind);
                 break;
         }
+        auto kind_dir = kind_root / build_unit_hash;
 
         detail::ensure_dir(inputs_dir);
         detail::ensure_dir(kind_dir);
 
-        auto id = detail::make_artifact_id(request, kind);
+        auto id = detail::make_artifact_id(build_unit_hash, request, kind);
         auto source_path = inputs_dir / (id + ".cpp");
 
         std::string extension{};
@@ -3611,28 +3877,14 @@ namespace sontag {
         auto stdout_path = kind_dir / (id + ".stdout.txt");
         auto stderr_path = kind_dir / (id + ".stderr.txt");
 
-        if (kind == analysis_kind::mem_trace) {
-            auto cached = detail::read_text_file(artifact_path);
-            if (!cached.empty()) {
-                auto cached_result = analysis_result{};
-                cached_result.kind = kind;
-                cached_result.source_path = source_path;
-                cached_result.artifact_path = artifact_path;
-                cached_result.stdout_path = stdout_path;
-                cached_result.stderr_path = stderr_path;
-                cached_result.exit_code = 0;
-                cached_result.success = true;
-                cached_result.artifact_text = std::move(cached);
-                return cached_result;
-            }
-        }
+        detail::persist_merkle_cache_manifests(request, kind, source_text, build_unit_hash, source_path, artifact_path);
 
         {
             std::ofstream out{source_path};
             if (!out) {
                 throw std::runtime_error("failed to write source file: {}"_format(source_path.string()));
             }
-            out << detail::render_source(request.decl_cells, request.exec_cells);
+            out << source_text;
             if (!out) {
                 throw std::runtime_error("failed to write source file: {}"_format(source_path.string()));
             }
@@ -3645,166 +3897,188 @@ namespace sontag {
         result.stdout_path = stdout_path;
         result.stderr_path = stderr_path;
 
+        if (auto cached_text_result =
+                    detail::try_load_cached_text_artifact_result(kind, source_path, artifact_path, stdout_path, stderr_path);
+            cached_text_result.has_value()) {
+            return std::move(*cached_text_result);
+        }
+
         if (kind == analysis_kind::mem_trace) {
-            auto ir_path = kind_dir / (id + ".trace.ll");
-            auto ir_stdout_path = kind_dir / (id + ".ir.stdout.txt");
-            auto ir_stderr_path = kind_dir / (id + ".ir.stderr.txt");
+            auto try_load = [&]() -> std::optional<analysis_result> {
+                return detail::try_load_cached_mem_trace_result(source_path, artifact_path, stdout_path, stderr_path);
+            };
 
-            auto ir_command = detail::build_command(request, analysis_kind::ir, source_path, ir_path);
-            auto ir_exit = detail::run_process(ir_command, ir_stdout_path, ir_stderr_path);
-            auto ir_stdout = detail::read_text_file(ir_stdout_path);
-            auto ir_stderr = detail::read_text_file(ir_stderr_path);
-            if (ir_exit != 0) {
-                detail::write_text_file(stdout_path, ir_stdout);
-                detail::write_text_file(stderr_path, ir_stderr);
-                detail::write_text_file(artifact_path, ir_stdout);
+            auto build = [&]() -> analysis_result {
+                auto mem_result = analysis_result{};
+                mem_result.kind = kind;
+                mem_result.source_path = source_path;
+                mem_result.artifact_path = artifact_path;
+                mem_result.stdout_path = stdout_path;
+                mem_result.stderr_path = stderr_path;
 
-                result.exit_code = ir_exit;
-                result.success = false;
-                result.command = std::move(ir_command);
-                result.artifact_text = std::move(ir_stdout);
-                result.diagnostics_text = std::move(ir_stderr);
-                return result;
-            }
+                auto ir_path = kind_dir / (id + ".trace.ll");
+                auto ir_stdout_path = kind_dir / (id + ".ir.stdout.txt");
+                auto ir_stderr_path = kind_dir / (id + ".ir.stderr.txt");
 
-            auto ir_text = detail::read_text_file(ir_path);
-            auto defined_symbols = detail::try_collect_defined_symbols(request);
+                auto ir_command = detail::build_command(request, analysis_kind::ir, source_path, ir_path);
+                auto ir_exit = detail::run_process(ir_command, ir_stdout_path, ir_stderr_path);
+                auto ir_stdout = detail::read_text_file(ir_stdout_path);
+                auto ir_stderr = detail::read_text_file(ir_stderr_path);
+                if (ir_exit != 0) {
+                    detail::write_text_file(stdout_path, ir_stdout);
+                    detail::write_text_file(stderr_path, ir_stderr);
+                    detail::write_text_file(artifact_path, ir_stdout);
 
-            std::optional<std::string> resolved_symbol{};
-            if (request.symbol) {
-                if (defined_symbols) {
-                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, *request.symbol);
+                    mem_result.exit_code = ir_exit;
+                    mem_result.success = false;
+                    mem_result.command = std::move(ir_command);
+                    mem_result.artifact_text = std::move(ir_stdout);
+                    mem_result.diagnostics_text = std::move(ir_stderr);
+                    return mem_result;
                 }
-                if (!resolved_symbol) {
-                    resolved_symbol = detail::resolve_symbol_name(request, *request.symbol);
-                }
-                if (!resolved_symbol) {
-                    resolved_symbol = std::string{*request.symbol};
-                }
-            }
-            else {
-                if (defined_symbols) {
-                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, "main"sv);
-                    if (!resolved_symbol && !defined_symbols->empty()) {
-                        resolved_symbol = (*defined_symbols)[0].mangled;
+
+                auto ir_text = detail::read_text_file(ir_path);
+                auto defined_symbols = detail::try_collect_defined_symbols(request);
+
+                std::optional<std::string> resolved_symbol{};
+                if (request.symbol) {
+                    if (defined_symbols) {
+                        resolved_symbol = detail::resolve_symbol_name(*defined_symbols, *request.symbol);
+                    }
+                    if (!resolved_symbol) {
+                        resolved_symbol = detail::resolve_symbol_name(request, *request.symbol);
+                    }
+                    if (!resolved_symbol) {
+                        resolved_symbol = std::string{*request.symbol};
                     }
                 }
-                if (!resolved_symbol) {
-                    auto lines = detail::split_lines(ir_text);
-                    for (const auto& line : lines) {
-                        if (auto symbol = detail::parse_ir_function_name_from_define_line(line); symbol.has_value()) {
-                            resolved_symbol = std::string{*symbol};
-                            break;
+                else {
+                    if (defined_symbols) {
+                        resolved_symbol = detail::resolve_symbol_name(*defined_symbols, "main"sv);
+                        if (!resolved_symbol && !defined_symbols->empty()) {
+                            resolved_symbol = (*defined_symbols)[0].mangled;
+                        }
+                    }
+                    if (!resolved_symbol) {
+                        auto lines = detail::split_lines(ir_text);
+                        for (const auto& line : lines) {
+                            if (auto symbol = detail::parse_ir_function_name_from_define_line(line);
+                                symbol.has_value()) {
+                                resolved_symbol = std::string{*symbol};
+                                break;
+                            }
                         }
                     }
                 }
-            }
 
-            if (!resolved_symbol) {
-                throw std::runtime_error("unable to resolve symbol for memory trace");
-            }
+                if (!resolved_symbol) {
+                    throw std::runtime_error("unable to resolve symbol for memory trace");
+                }
 
-            auto map_entries = std::vector<detail::mem_trace_map_entry>{};
-            auto instrumented_ir = detail::build_instrumented_mem_trace_ir(ir_text, *resolved_symbol, map_entries);
-            auto instrumented_ir_path = kind_dir / (id + ".trace.instrumented.ll");
-            detail::write_text_file(instrumented_ir_path, instrumented_ir);
+                auto map_entries = std::vector<detail::mem_trace_map_entry>{};
+                auto instrumented_ir = detail::build_instrumented_mem_trace_ir(ir_text, *resolved_symbol, map_entries);
+                auto instrumented_ir_path = kind_dir / (id + ".trace.instrumented.ll");
+                detail::write_text_file(instrumented_ir_path, instrumented_ir);
 
-            auto trace_events_path = kind_dir / (id + ".trace.events.log");
-            auto trace_stats_path = kind_dir / (id + ".trace.stats.txt");
-            auto runtime_source_path = kind_dir / (id + ".trace.runtime.cpp");
-            detail::write_text_file(
-                    runtime_source_path,
-                    detail::build_mem_trace_runtime_source(trace_events_path.string(), trace_stats_path.string()));
+                auto trace_events_path = kind_dir / (id + ".trace.events.log");
+                auto trace_stats_path = kind_dir / (id + ".trace.stats.txt");
+                auto runtime_source_path = kind_dir / (id + ".trace.runtime.cpp");
+                detail::write_text_file(
+                        runtime_source_path,
+                        detail::build_mem_trace_runtime_source(trace_events_path.string(), trace_stats_path.string()));
 
-            auto trace_binary_path = kind_dir / (id + ".trace.bin");
-            auto compile_stdout_path = kind_dir / (id + ".trace.compile.stdout.txt");
-            auto compile_stderr_path = kind_dir / (id + ".trace.compile.stderr.txt");
+                auto trace_binary_path = kind_dir / (id + ".trace.bin");
+                auto compile_stdout_path = kind_dir / (id + ".trace.compile.stdout.txt");
+                auto compile_stderr_path = kind_dir / (id + ".trace.compile.stderr.txt");
 
-            auto compile_command = detail::base_clang_args(request);
-            compile_command.push_back(instrumented_ir_path.string());
-            compile_command.push_back(runtime_source_path.string());
-            compile_command.emplace_back(detail::arg_tokens::output_path);
-            compile_command.push_back(trace_binary_path.string());
-            detail::append_link_flags(compile_command, request);
+                auto compile_command = detail::base_clang_args(request);
+                compile_command.push_back(instrumented_ir_path.string());
+                compile_command.push_back(runtime_source_path.string());
+                compile_command.emplace_back(detail::arg_tokens::output_path);
+                compile_command.push_back(trace_binary_path.string());
+                detail::append_link_flags(compile_command, request);
 
-            auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
-            auto compile_stdout = detail::read_text_file(compile_stdout_path);
-            auto compile_stderr = detail::read_text_file(compile_stderr_path);
-            if (compile_exit != 0) {
-                auto diagnostics = detail::join_text(ir_stderr, compile_stderr);
-                auto combined_stdout = detail::join_text(ir_stdout, compile_stdout);
-                detail::write_text_file(stdout_path, combined_stdout);
-                detail::write_text_file(stderr_path, diagnostics);
-                detail::write_text_file(artifact_path, combined_stdout);
+                auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
+                auto compile_stdout = detail::read_text_file(compile_stdout_path);
+                auto compile_stderr = detail::read_text_file(compile_stderr_path);
+                if (compile_exit != 0) {
+                    auto diagnostics = detail::join_text(ir_stderr, compile_stderr);
+                    auto combined_stdout = detail::join_text(ir_stdout, compile_stdout);
+                    detail::write_text_file(stdout_path, combined_stdout);
+                    detail::write_text_file(stderr_path, diagnostics);
+                    detail::write_text_file(artifact_path, combined_stdout);
 
-                result.exit_code = compile_exit;
-                result.success = false;
-                result.command = std::move(compile_command);
-                result.artifact_text = std::move(combined_stdout);
-                result.diagnostics_text = std::move(diagnostics);
-                return result;
-            }
+                    mem_result.exit_code = compile_exit;
+                    mem_result.success = false;
+                    mem_result.command = std::move(compile_command);
+                    mem_result.artifact_text = std::move(combined_stdout);
+                    mem_result.diagnostics_text = std::move(diagnostics);
+                    return mem_result;
+                }
 
-            auto run_command = std::vector<std::string>{trace_binary_path.string()};
-            auto run_exit = detail::run_process(run_command, stdout_path, stderr_path);
-            auto run_stdout = detail::read_text_file(stdout_path);
-            auto run_stderr = detail::read_text_file(stderr_path);
+                auto run_command = std::vector<std::string>{trace_binary_path.string()};
+                auto run_exit = detail::run_process(run_command, stdout_path, stderr_path);
+                auto run_stdout = detail::read_text_file(stdout_path);
+                auto run_stderr = detail::read_text_file(stderr_path);
 
-            {
-                std::error_code ec{};
-                fs::remove(trace_binary_path, ec);
-            }
+                {
+                    std::error_code ec{};
+                    fs::remove(trace_binary_path, ec);
+                }
 
-            auto run_likely_signaled = run_exit >= 128;
-            if (run_likely_signaled) {
+                auto run_likely_signaled = run_exit >= 128;
+                if (run_likely_signaled) {
+                    auto diagnostics = detail::join_text(detail::join_text(ir_stderr, compile_stderr), run_stderr);
+                    auto combined_stdout = detail::join_text(detail::join_text(ir_stdout, compile_stdout), run_stdout);
+                    detail::write_text_file(stdout_path, combined_stdout);
+                    detail::write_text_file(stderr_path, diagnostics);
+                    detail::write_text_file(artifact_path, combined_stdout);
+
+                    mem_result.exit_code = run_exit;
+                    mem_result.success = false;
+                    mem_result.command = std::move(run_command);
+                    mem_result.artifact_text = std::move(combined_stdout);
+                    mem_result.diagnostics_text = std::move(diagnostics);
+                    return mem_result;
+                }
+
+                auto events = std::vector<detail::mem_trace_event_entry>{};
+                auto event_lines = detail::split_lines(detail::read_text_file(trace_events_path));
+                for (const auto& line : event_lines) {
+                    if (auto parsed = detail::parse_mem_trace_event_line(line); parsed.has_value()) {
+                        events.push_back(std::move(*parsed));
+                    }
+                }
+                std::ranges::sort(events, [](const auto& lhs, const auto& rhs) { return lhs.sequence < rhs.sequence; });
+
+                auto stats = detail::parse_mem_trace_runtime_stats(detail::read_text_file(trace_stats_path));
+                auto payload = detail::mem_trace_payload{
+                        .symbol = *resolved_symbol,
+                        .tracee_exit_code = run_exit,
+                        .truncated = stats.truncated,
+                        .dropped_events = stats.dropped_events,
+                        .map_entries = std::move(map_entries),
+                        .events = std::move(events)};
+                auto artifact_text = detail::render_mem_trace_payload(payload);
+                detail::write_text_file(artifact_path, artifact_text);
+
                 auto diagnostics = detail::join_text(detail::join_text(ir_stderr, compile_stderr), run_stderr);
+                if (run_exit != 0) {
+                    diagnostics = detail::join_text(diagnostics, "tracee_exit_code={}"_format(run_exit));
+                }
                 auto combined_stdout = detail::join_text(detail::join_text(ir_stdout, compile_stdout), run_stdout);
                 detail::write_text_file(stdout_path, combined_stdout);
                 detail::write_text_file(stderr_path, diagnostics);
-                detail::write_text_file(artifact_path, combined_stdout);
 
-                result.exit_code = run_exit;
-                result.success = false;
-                result.command = std::move(run_command);
-                result.artifact_text = std::move(combined_stdout);
-                result.diagnostics_text = std::move(diagnostics);
-                return result;
-            }
+                mem_result.exit_code = run_exit;
+                mem_result.success = true;
+                mem_result.command = std::move(run_command);
+                mem_result.artifact_text = std::move(artifact_text);
+                mem_result.diagnostics_text = std::move(diagnostics);
+                return mem_result;
+            };
 
-            auto events = std::vector<detail::mem_trace_event_entry>{};
-            auto event_lines = detail::split_lines(detail::read_text_file(trace_events_path));
-            for (const auto& line : event_lines) {
-                if (auto parsed = detail::parse_mem_trace_event_line(line); parsed.has_value()) {
-                    events.push_back(std::move(*parsed));
-                }
-            }
-            std::ranges::sort(events, [](const auto& lhs, const auto& rhs) { return lhs.sequence < rhs.sequence; });
-
-            auto stats = detail::parse_mem_trace_runtime_stats(detail::read_text_file(trace_stats_path));
-            auto payload = detail::mem_trace_payload{
-                    .symbol = *resolved_symbol,
-                    .tracee_exit_code = run_exit,
-                    .truncated = stats.truncated,
-                    .dropped_events = stats.dropped_events,
-                    .map_entries = std::move(map_entries),
-                    .events = std::move(events)};
-            auto artifact_text = detail::render_mem_trace_payload(payload);
-            detail::write_text_file(artifact_path, artifact_text);
-
-            auto diagnostics = detail::join_text(detail::join_text(ir_stderr, compile_stderr), run_stderr);
-            if (run_exit != 0) {
-                diagnostics = detail::join_text(diagnostics, "tracee_exit_code={}"_format(run_exit));
-            }
-            auto combined_stdout = detail::join_text(detail::join_text(ir_stdout, compile_stdout), run_stdout);
-            detail::write_text_file(stdout_path, combined_stdout);
-            detail::write_text_file(stderr_path, diagnostics);
-
-            result.exit_code = run_exit;
-            result.success = true;
-            result.command = std::move(run_command);
-            result.artifact_text = std::move(artifact_text);
-            result.diagnostics_text = std::move(diagnostics);
-            return result;
+            return detail::get_or_create<analysis_result>(try_load, build);
         }
 
         if (kind == analysis_kind::graph_cfg || kind == analysis_kind::graph_call ||

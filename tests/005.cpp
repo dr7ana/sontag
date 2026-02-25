@@ -178,6 +178,33 @@ namespace sontag::test { namespace detail {
         return session_dirs;
     }
 
+    static std::vector<fs::path> list_directory_children(const fs::path& root) {
+        std::error_code ec{};
+        if (!fs::exists(root, ec) || ec) {
+            return {};
+        }
+
+        std::vector<fs::path> children{};
+        for (const auto& entry : fs::directory_iterator(root)) {
+            children.push_back(entry.path());
+        }
+        std::ranges::sort(children);
+        return children;
+    }
+
+    static bool has_merkle_node_artifacts(const fs::path& root) {
+        auto children = list_directory_children(root);
+        for (const auto& child : children) {
+            if (!fs::is_directory(child)) {
+                continue;
+            }
+            if (fs::exists(child / "manifest.txt") && fs::exists(child / "payload.txt")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     static void set_tree_last_write_time(const fs::path& path, fs::file_time_type time_point) {
         std::error_code ec{};
         if (fs::is_directory(path, ec) && !ec) {
@@ -476,6 +503,51 @@ namespace sontag::test {
 
         CHECK(detail::fs::exists(preserved_session));
         CHECK_FALSE(detail::fs::exists(stale_peer));
+    }
+
+    TEST_CASE("005: asm analysis writes merkle cache nodes for units and symbols", "[005][session][cache]") {
+        detail::temp_dir temp{"sontag_cache_merkle_asm"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        detail::run_repl_script(
+                cfg,
+                ":decl int square(int x) { return x * x; }\n"
+                ":asm\n"
+                ":quit\n");
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto cache_root = session_dir / "artifacts" / "cache";
+        CHECK(detail::has_merkle_node_artifacts(cache_root / "units"));
+        CHECK(detail::has_merkle_node_artifacts(cache_root / "symbols"));
+    }
+
+    TEST_CASE("005: mem trace analysis writes merkle trace cache nodes", "[005][session][cache][mem]") {
+        detail::temp_dir temp{"sontag_cache_merkle_mem_trace"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.color = color_mode::never;
+        cfg.static_link = true;
+
+        detail::run_repl_script(
+                cfg,
+                ":decl int square(int x) { return x * x; }\n"
+                "volatile int sink = square(3);\n"
+                "return sink;\n"
+                ":mem square\n"
+                ":quit\n");
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto cache_root = session_dir / "artifacts" / "cache";
+        CHECK(detail::has_merkle_node_artifacts(cache_root / "units"));
+        CHECK(detail::has_merkle_node_artifacts(cache_root / "symbols"));
+        CHECK(detail::has_merkle_node_artifacts(cache_root / "traces"));
     }
 
     TEST_CASE("005: reset snapshots clears named snapshots and keeps current", "[005][session][reset_snapshots]") {
@@ -817,6 +889,7 @@ namespace sontag::test {
         cfg.cache_dir = temp.path / "cache";
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
+        cfg.color = color_mode::never;
         cfg.static_link = true;
 
         auto output = detail::run_repl_script_capture_output(
@@ -839,6 +912,7 @@ namespace sontag::test {
         cfg.cache_dir = temp.path / "cache";
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
+        cfg.color = color_mode::never;
         cfg.static_link = true;
 
         auto output = detail::run_repl_script_capture_output(
