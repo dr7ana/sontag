@@ -884,6 +884,31 @@ namespace sontag::test {
         CHECK(output.err.empty());
     }
 
+    TEST_CASE("005: ir explore fallback bounds node and layout rows", "[005][session][ir][explore]") {
+        detail::temp_dir temp{"sontag_ir_explore_bounded_rows"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto script = std::string{};
+        script.append(":decl volatile int ir_explore_sink = 0;\n");
+        for (int i = 0; i < 96; ++i) {
+            script.append("ir_explore_sink += 1;\n");
+        }
+        script.append(":ir explore\n");
+        script.append(":quit\n");
+
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("graph explore: requires an interactive tty") != std::string::npos);
+        CHECK(output.out.find("type: ir") != std::string::npos);
+        CHECK(output.out.find("note: node table truncated (showing first ") != std::string::npos);
+        CHECK(output.out.find("note: layout truncated (showing first ") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
     TEST_CASE("005: asm explore falls back on non-interactive terminals", "[005][session][asm][explore]") {
         detail::temp_dir temp{"sontag_asm_explore_fallback"};
 

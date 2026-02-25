@@ -143,9 +143,12 @@ controls:
 
 interactive IR view with:
 
-- full node table (`id`, `out`, `in`, `label`)
-- Sugiyama layout below the table
+- viewported node table (`id`, `out`, `in`, `label`)
+- Sugiyama layout preview below the table
 - selected/incoming/outgoing node id coloring in the layout
+
+notes:
+- non-interactive fallback (`:ir explore` without a TTY, including MCP stateless calls) prints bounded node/layout sections and includes truncation notes when clipped
 
 controls:
 
