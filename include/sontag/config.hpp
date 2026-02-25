@@ -88,6 +88,7 @@ namespace sontag {
     enum class debug_info_level : uint8_t { none, line, full };
     enum class cxx_standard : uint8_t { cxx20, cxx23, cxx2c };
     enum class optimization_level : uint8_t { o0, o1, o2, o3, ofast, oz };
+    enum class link_mode : uint8_t { nolink, dynamiclink, staticlink };
 
     inline constexpr std::string_view to_string(output_mode mode) {
         switch (mode) {
@@ -161,6 +162,18 @@ namespace sontag {
                 return "full"sv;
         }
         return "c++23"sv;
+    }
+
+    inline constexpr std::string_view to_string(link_mode mode) {
+        switch (mode) {
+            case link_mode::nolink:
+                return "nolink"sv;
+            case link_mode::dynamiclink:
+                return "dynamic"sv;
+            case link_mode::staticlink:
+                return "static"sv;
+        }
+        return "static"sv;
     }
 
     inline constexpr bool try_parse_cxx_standard(std::string_view text, cxx_standard& out) {
@@ -291,8 +304,7 @@ namespace sontag {
         std::vector<std::filesystem::path> library_dirs{};
         std::vector<std::string> libraries{};
         std::vector<std::string> linker_args{};
-        bool static_link{false};
-        bool no_link{false};
+        link_mode link{link_mode::staticlink};
 
         int compile_timeout_ms{30'000};
         int run_timeout_ms{30'000};
@@ -378,6 +390,14 @@ namespace std {
     struct formatter<sontag::optimization_level, char> : formatter<std::string_view> {
         template <typename FormatContext>
         auto format(const sontag::optimization_level& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+
+    template <>
+    struct formatter<sontag::link_mode, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::link_mode& val, FormatContext& ctx) const {
             return formatter<std::string_view>::format(sontag::to_string(val), ctx);
         }
     };

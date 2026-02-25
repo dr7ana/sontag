@@ -2604,7 +2604,7 @@ namespace sontag::cli {
                            effective_cpu_value(cfg),
                            internal::platform::toolchain_bin_prefix,
                            effective_mca_cpu_value(cfg),
-                           cfg.static_link,
+                           cfg.link == link_mode::staticlink,
                            display_absolute_path(cfg.cache_dir),
                            cfg.cache_ttl_days,
                            cfg.output,
@@ -2950,7 +2950,7 @@ namespace sontag::cli {
                 os << "  cpu={}\n"_format(effective_cpu_value(cfg));
                 os << "  toolchain_dir={}\n"_format(internal::platform::toolchain_bin_prefix);
                 os << "  mca_cpu={}\n"_format(effective_mca_cpu_value(cfg));
-                os << "  static={}\n"_format(cfg.static_link ? "true" : "false");
+                os << "  static={}\n"_format(cfg.link == link_mode::staticlink ? "true" : "false");
                 os << "  libraries={}\n"_format(utils::join_with_separator(cfg.libraries, ","sv));
                 return true;
             }
@@ -3008,7 +3008,7 @@ namespace sontag::cli {
                     return true;
                 }
                 if (selected_key == "static"sv) {
-                    os << "build:\n  static={}\n"_format(cfg.static_link ? "true" : "false");
+                    os << "build:\n  static={}\n"_format(cfg.link == link_mode::staticlink ? "true" : "false");
                     return true;
                 }
                 if (selected_key == "libraries"sv) {
@@ -3069,6 +3069,7 @@ namespace sontag::cli {
             cfg.target_triple = defaults.target_triple;
             cfg.cpu = defaults.cpu;
             cfg.mca_cpu = defaults.mca_cpu;
+            cfg.link = defaults.link;
             apply_build_tool_paths(cfg);
             cfg.output = defaults.output;
             cfg.color = defaults.color;
@@ -3149,10 +3150,12 @@ namespace sontag::cli {
                 return true;
             }
             if (key == "build.static"sv) {
-                if (!try_parse_bool(value, cfg.static_link)) {
+                auto static_enabled = false;
+                if (!try_parse_bool(value, static_enabled)) {
                     err << "invalid build.static: {} (expected true|false)\n"_format(value);
                     return false;
                 }
+                cfg.link = static_enabled ? link_mode::staticlink : link_mode::dynamiclink;
                 return true;
             }
             if (key == "build.libraries"sv) {
@@ -3390,8 +3393,7 @@ examples:
             request.graph_format = cfg.graph_format;
             request.dot_path = cfg.dot_path;
             request.verbose = cfg.verbose;
-            request.static_link = cfg.static_link;
-            request.no_link = cfg.no_link;
+            request.link = cfg.link;
             request.library_dirs = cfg.library_dirs;
             request.libraries = cfg.libraries;
             request.linker_args = cfg.linker_args;
@@ -5117,6 +5119,9 @@ examples:
             }
 
             summary.rows = parse_dump_rows(dump_text);
+            if (summary.rows.size() > summary.operations) {
+                summary.rows.resize(summary.operations);
+            }
             if (summary.rows.empty()) {
                 summary.rows.reserve(operations.size());
                 for (const auto& operation : operations) {
@@ -6300,7 +6305,7 @@ examples:
             if (ir_result.success) {
                 attach_mem_ir_hints(data.summary, ir_result.artifact_text);
             }
-            if (request.static_link) {
+            if (request.link == link_mode::staticlink) {
                 auto trace_result = run_analysis(request, analysis_kind::mem_trace);
                 if (trace_result.success) {
                     apply_mem_runtime_trace(data.summary, trace_result.artifact_text);
@@ -6523,7 +6528,7 @@ examples:
                 const mem_summary& summary,
                 std::string_view unchanged_color,
                 std::string_view modified_color,
-                bool static_link_enabled,
+                link_mode active_link_mode,
                 std::ostream& os) {
             os << "mem:\n";
             os << "symbol: {}\n"_format(symbol_display);
@@ -6556,8 +6561,11 @@ examples:
                 os << '\n';
             }
             else if (!summary.trace_enabled) {
-                if (!static_link_enabled) {
+                if (active_link_mode == link_mode::dynamiclink) {
                     os << "  trace: disabled in dynamic mode (set build.static=true)\n";
+                }
+                else if (active_link_mode == link_mode::nolink) {
+                    os << "  trace: disabled in no-link mode (disable --nolink or set build.static=true)\n";
                 }
                 else {
                     os << "  trace: unavailable (compilation or execution failed)\n";
@@ -8297,12 +8305,7 @@ examples:
                     modified_color = palette.modified;
                 }
                 render_mem_artifact_summary_and_body(
-                        mem_data.symbol_display,
-                        mem_data.summary,
-                        unchanged_color,
-                        modified_color,
-                        request.static_link,
-                        out);
+                        mem_data.symbol_display, mem_data.summary, unchanged_color, modified_color, request.link, out);
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());
             }
@@ -8384,12 +8387,7 @@ examples:
                     modified_color = palette.modified;
                 }
                 render_mem_artifact_summary_and_body(
-                        mem_data.symbol_display,
-                        mem_data.summary,
-                        unchanged_color,
-                        modified_color,
-                        request.static_link,
-                        out);
+                        mem_data.symbol_display, mem_data.summary, unchanged_color, modified_color, request.link, out);
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());
             }
@@ -8619,7 +8617,7 @@ examples:
                                 mem_data.summary,
                                 static_mem_unchanged_color,
                                 static_mem_modified_color,
-                                request.static_link,
+                                request.link,
                                 out);
                         return true;
                     }
@@ -9258,6 +9256,7 @@ examples:
         std::string banner_arg{cfg.banner_enabled ? "true" : "false"};
         bool no_history = false;
         bool no_banner = false;
+        bool no_link = false;
 
         app.add_flag("--version", show_version, "Print version and exit");
         app.add_option("--std", std_arg, "C++ standard: c++20|c++23|c++2c");
@@ -9286,7 +9285,7 @@ examples:
         app.add_option("--eval", eval_arg, "Execute command and exit");
         std::string snapshot_arg{};
         app.add_option("--snapshot", snapshot_arg, "Create named snapshot after loading files");
-        app.add_flag("--nolink", cfg.no_link, "Disable linking for dump analysis (fall back to .o)");
+        app.add_flag("--nolink", no_link, "Disable linking for dump analysis (fall back to .o)");
 #ifdef SONTAG_MCP
         app.add_flag("--frame-delimiter", cfg.frame_delimiter, "Emit \\x1e after each command output");
         app.add_flag("--mcp", cfg.mcp_mode, "Start MCP server");
@@ -9346,6 +9345,9 @@ examples:
         }
         if (no_banner) {
             cfg.banner_enabled = false;
+        }
+        if (no_link) {
+            cfg.link = link_mode::nolink;
         }
 
         if (app.get_option("--no-color")->count() > 0U) {

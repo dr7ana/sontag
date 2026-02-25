@@ -301,7 +301,7 @@ namespace sontag::test {
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
-        request.static_link = true;
+        request.link = link_mode::staticlink;
         request.decl_cells = {"int square(int x) { int y = x * x; return y; }"};
         request.exec_cells = {"volatile int sink = square(3);", "return sink;"};
         request.symbol = "square";
@@ -650,6 +650,7 @@ namespace sontag::test {
         dynamic_request.session_dir = temp.path / "session_dynamic";
         dynamic_request.language_standard = cxx_standard::cxx23;
         dynamic_request.opt_level = optimization_level::o0;
+        dynamic_request.link = link_mode::dynamiclink;
         dynamic_request.decl_cells = {"int square(int x) { return x * x; }"};
         dynamic_request.exec_cells = {"volatile int sink = square(2);", "return sink;"};
         dynamic_request.symbol = "main";
@@ -664,7 +665,7 @@ namespace sontag::test {
 
         auto static_request = dynamic_request;
         static_request.session_dir = temp.path / "session_static";
-        static_request.static_link = true;
+        static_request.link = link_mode::staticlink;
 
         auto static_result = run_analysis(static_request, analysis_kind::mem_trace);
         CHECK_FALSE(static_result.success);
@@ -1071,7 +1072,7 @@ namespace sontag::test {
 
         auto static_request = linked_request;
         static_request.session_dir = temp.path / "session_static_linked";
-        static_request.static_link = true;
+        static_request.link = link_mode::staticlink;
         auto static_indirect_info = resolve_symbol_info(static_request, "add@GOT");
         REQUIRE(static_indirect_info.has_value());
         CHECK(static_indirect_info->status == symbol_resolution_status::unresolved_indirect);
@@ -1080,7 +1081,7 @@ namespace sontag::test {
 
         auto object_only_request = linked_request;
         object_only_request.session_dir = temp.path / "session_object_only";
-        object_only_request.no_link = true;
+        object_only_request.link = link_mode::nolink;
 
         auto object_only_info = resolve_symbol_info(object_only_request, "add");
         REQUIRE(object_only_info.has_value());
@@ -1166,7 +1167,7 @@ namespace sontag::test {
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
-        request.static_link = true;
+        request.link = link_mode::staticlink;
         request.decl_cells = {"int square(int x) { int y = x * x; return y; }"};
         request.exec_cells = {"volatile int sink = square(3);", "return sink;"};
         request.symbol = "square";
@@ -1246,7 +1247,7 @@ namespace sontag::test {
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
-        request.static_link = true;
+        request.link = link_mode::staticlink;
         request.decl_cells = {"int __import_mem_anchor = 0;"};
         request.symbol = "square";
         request.import_context = analysis_import_context{
@@ -1265,7 +1266,9 @@ namespace sontag::test {
         CHECK(trace_result.artifact_text.find("event_count=0") == std::string::npos);
     }
 
-    TEST_CASE("003: import-backed graph cfg resolves symbol from selected translation unit", "[003][analysis][import][graph]") {
+    TEST_CASE(
+            "003: import-backed graph cfg resolves symbol from selected translation unit",
+            "[003][analysis][import][graph]") {
         detail::temp_dir temp{"sontag_m1_import_graph_cfg_symbol"};
         auto project_dir = temp.path / "project";
         auto src_dir = project_dir / "src";
@@ -1299,7 +1302,9 @@ namespace sontag::test {
         CHECK(dot_text.find("digraph cfg_") != std::string::npos);
     }
 
-    TEST_CASE("003: import-backed inspect asm resolves symbol from selected translation unit", "[003][analysis][import][inspect]") {
+    TEST_CASE(
+            "003: import-backed inspect asm resolves symbol from selected translation unit",
+            "[003][analysis][import][inspect]") {
         detail::temp_dir temp{"sontag_m1_import_inspect_asm_symbol"};
         auto project_dir = temp.path / "project";
         auto src_dir = project_dir / "src";

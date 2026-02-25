@@ -135,6 +135,16 @@ namespace sontag::test {
         CHECK_FALSE(cfg.history_enabled);
     }
 
+    TEST_CASE("002: parse_cli defaults to static link enabled", "[002][cli]") {
+        startup_config cfg{};
+        std::vector<std::string> args{"sontag"};
+        auto argv = detail::to_argv(args);
+
+        auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);
+        CHECK(!result);
+        CHECK(cfg.link == link_mode::staticlink);
+    }
+
     TEST_CASE("002: parse_cli handles banner toggles", "[002][cli]") {
         startup_config cfg{};
         std::vector<std::string> args{"sontag", "--no-banner"};

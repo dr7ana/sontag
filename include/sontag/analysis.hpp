@@ -135,22 +135,6 @@ namespace sontag {
         std::string source{};
     };
 
-    // TODO: replace `static_link` and `no_link` args with unified link_mode
-    enum class link_mode : uint8_t { nolink, dynamiclink, staticlink };
-
-    inline constexpr std::string_view to_string(link_mode mode) {
-        switch (mode) {
-            case link_mode::nolink:
-                return "nolink"sv;
-            case link_mode::dynamiclink:
-                return "dynamic"sv;
-            case link_mode::staticlink:
-                return "static"sv;
-            default:
-                [[unlikely]] return "na"sv;
-        }
-    }
-
     struct analysis_import_context {
         std::string mode{};
         std::vector<std::filesystem::path> roots{};
@@ -177,8 +161,7 @@ namespace sontag {
         std::string graph_format{"png"};
         std::optional<std::filesystem::path> dot_path{};
         bool verbose{false};
-        bool static_link{false};
-        bool no_link{false};
+        link_mode link{link_mode::staticlink};
         std::vector<std::filesystem::path> library_dirs{};
         std::vector<std::string> libraries{};
         std::vector<std::string> linker_args{};
@@ -269,11 +252,4 @@ namespace std {
         }
     };
 
-    template <>
-    struct formatter<sontag::link_mode, char> : formatter<std::string_view> {
-        template <typename FormatContext>
-        auto format(const sontag::link_mode& val, FormatContext& ctx) const {
-            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
-        }
-    };
 }  // namespace std

@@ -190,6 +190,9 @@ currently tested on:
 - `:decl <code>`: append declarative cell
 - `:declfile <path>`: import full file as one declarative cell
 - `:file <path>`: import file as decl + exec split from `main`
+- `:import <dir> [<dir> ...]`: import one or more directories (auto mode)
+- `:import <dir> [<dir> ...] entry <file>`: force app entry when multiple `main()` candidates exist
+- `:import <dir> [<dir> ...] library`: ignore discovered `main()` files and load as library
 - `:openfile <path>`: open editor, run repo `.clang-format`, import with `:file` semantics
 - bare input (non-command): append executable cell
 - `:show <config|decl|exec|all>`: inspect current state
@@ -207,6 +210,7 @@ currently tested on:
 - `:reset`: clear active state (cells + transactions), keep snapshots
 - `:reset last`: undo last successful mutation transaction
 - `:reset file <path>`: undo most recent import transaction for that normalized path
+- `:reset import <dir> [<dir> ...]`: undo the matching directory import transaction
 - `:reset snapshots`: clear snapshot store
 
 ## config semantics
@@ -222,12 +226,12 @@ currently tested on:
 
 ### link and resolution modes
 
-- dynamic mode (default): `build.static=false`
-  - faster iteration
-  - `:mem` runtime trace is skipped (`trace: disabled in dynamic mode ...`)
-- static mode: `build.static=true`
+- static mode (default): `build.static=true`
   - enables runtime tracing used by `:mem` value resolution
   - increases symbol coverage from linked runtime/library code (so `:symbols` can be much larger)
+- dynamic mode: `build.static=false`
+  - faster iteration
+  - `:mem` runtime trace is skipped (`trace: disabled in dynamic mode ...`)
 
 resolution behavior:
 
@@ -288,6 +292,8 @@ behavior:
 
 - `:graph cfg` / `:graph call` render terminal Sugiyama graph and append `dot:` / `rendered:` artifact paths
 - `:graph cfg export` / `:graph call export` print artifact summary and emit DOT (+ rendered image if available)
+- when current state comes from `:import`, graph analysis runs on import-backed IR (per translation unit) and resolves symbols across imported files
+- import-backed graph compilation honors per-file `compile_commands.json` flags (with CMake export fallback when needed)
 
 ### `:inspect`
 
@@ -297,6 +303,8 @@ structured JSON payload exporters:
 - `:inspect mca [summary|heatmap] [symbol|@last]`
 
 artifacts are written under `artifacts/inspect/...`.
+
+- `:inspect asm` now consumes the same import-backed asm/ir analysis path used by `:asm`/`:ir`, so imported projects resolve symbols consistently
 
 ## mcp server support
 
@@ -403,6 +411,9 @@ if the persistent child crashes, the next `session_eval` returns an error and au
 :decl <code>
 :declfile <path>
 :file <path>
+:import <dir> [<dir> ...]
+:import <dir> [<dir> ...] entry <file>
+:import <dir> [<dir> ...] library
 :openfile <path>
 :config
 :config <category>
@@ -412,6 +423,7 @@ if the persistent child crashes, the next `session_eval` returns an error and au
 :reset last
 :reset snapshots
 :reset file <path>
+:reset import <dir> [<dir> ...]
 :mark <name>
 :snapshots
 :asm [symbol|@last]

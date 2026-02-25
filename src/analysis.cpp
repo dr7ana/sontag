@@ -713,8 +713,7 @@ namespace sontag {
             payload << "nm_path=" << request.nm_path.string() << '\n';
             payload << "mca_path=" << request.mca_path.string() << '\n';
             payload << "asm_syntax=" << request.asm_syntax << '\n';
-            payload << "static_link=" << (request.static_link ? "true" : "false") << '\n';
-            payload << "no_link=" << (request.no_link ? "true" : "false") << '\n';
+            payload << "link_mode=" << "{}"_format(request.link) << '\n';
             payload << "graph_format=" << request.graph_format << '\n';
             payload << "source_digest=" << hash_fnv1a_64_hex(source_text) << '\n';
             payload << "source_bytes=" << source_text.size() << '\n';
@@ -1424,7 +1423,7 @@ namespace sontag {
             args.emplace_back("-Wl,--pop-state");
 
             args.emplace_back("-lc++abi");
-            if (request.static_link) {
+            if (request.link == link_mode::staticlink) {
                 args.emplace_back("-static");
                 args.emplace_back("-static-libgcc");
             }
@@ -2338,16 +2337,18 @@ namespace sontag {
                 compile_args.emplace_back("-o");
                 compile_args.push_back(module_path.string());
 
-                auto compile_exit = run_process(compile_args, clang_stdout_path, clang_stderr_path, compile_working_dir);
+                auto compile_exit =
+                        run_process(compile_args, clang_stdout_path, clang_stderr_path, compile_working_dir);
                 if (compile_exit != 0) {
                     return std::nullopt;
                 }
 
-                modules.push_back(import_ir_module_artifact{
-                        .source_path = source_file,
-                        .module_path = module_path,
-                        .source_key = source_key,
-                        .command = std::move(compile_args)});
+                modules.push_back(
+                        import_ir_module_artifact{
+                                .source_path = source_file,
+                                .module_path = module_path,
+                                .source_key = source_key,
+                                .command = std::move(compile_args)});
             }
 
             return modules;
@@ -2383,7 +2384,7 @@ namespace sontag {
 
             auto linked = false;
             auto binary_path = import_dir / "symbol_index.bin";
-            if (!request.no_link && !build->object_paths.empty()) {
+            if (request.link != link_mode::nolink && !build->object_paths.empty()) {
                 auto link_args = base_clang_args(request);
                 for (const auto& object_path : build->object_paths) {
                     link_args.push_back(object_path.string());
@@ -2482,7 +2483,7 @@ namespace sontag {
             auto binary_path = inputs_dir / "symbol_index.bin";
             bool linked = false;
 
-            if (!request.no_link) {
+            if (request.link != link_mode::nolink) {
                 auto link_args = base_clang_args(request);
                 link_args.push_back(source_path.string());
                 link_args.emplace_back("-o");
@@ -4920,7 +4921,8 @@ namespace sontag {
                     }
 
                     if (!selected_import_module.has_value() || ir_text.empty()) {
-                        throw std::runtime_error("unable to locate import IR module for symbol: {}"_format(*resolved_symbol));
+                        throw std::runtime_error(
+                                "unable to locate import IR module for symbol: {}"_format(*resolved_symbol));
                     }
                 }
 
@@ -5700,7 +5702,7 @@ namespace sontag {
                     if (import_build && !import_build->object_paths.empty()) {
                         auto linked = false;
                         auto link_command = std::vector<std::string>{};
-                        if (!request.no_link) {
+                        if (request.link != link_mode::nolink) {
                             link_command = detail::base_clang_args(request);
                             for (const auto& object_path : import_build->object_paths) {
                                 link_command.push_back(object_path.string());
@@ -5819,7 +5821,7 @@ namespace sontag {
                     bool linked = false;
                     std::vector<std::string> compile_command{};
 
-                    if (!request.no_link) {
+                    if (request.link != link_mode::nolink) {
                         compile_command = detail::base_clang_args(request);
                         compile_command.push_back(source_path.string());
                         compile_command.emplace_back("-o");

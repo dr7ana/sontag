@@ -716,7 +716,7 @@ namespace sontag::test {
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
         cfg.color = color_mode::never;
-        cfg.static_link = true;
+        cfg.link = link_mode::staticlink;
 
         detail::run_repl_script(
                 cfg,
@@ -866,6 +866,7 @@ namespace sontag::test {
         auto output = detail::run_repl_script_capture_output(
                 cfg,
                 ":config build.opt=O3\n"
+                ":config build.static=false\n"
                 ":config ui.color=always\n"
                 ":config editor.editor=vim\n"
                 ":config editor.formatter=clang-format-21\n"
@@ -883,6 +884,7 @@ namespace sontag::test {
                 ":quit\n");
 
         CHECK(output.out.find("updated build.opt=O3") != std::string::npos);
+        CHECK(output.out.find("updated build.static=false") != std::string::npos);
         CHECK(output.out.find("updated ui.color=always") != std::string::npos);
         CHECK(output.out.find("updated editor.editor=vim") != std::string::npos);
         CHECK(output.out.find("updated editor.formatter=clang-format-21") != std::string::npos);
@@ -890,6 +892,7 @@ namespace sontag::test {
         CHECK(output.out.find("updated session.cache_ttl_days=7") != std::string::npos);
 
         CHECK(output.out.find("  opt=O3") != std::string::npos);
+        CHECK(output.out.find("  static=false") != std::string::npos);
         CHECK(output.out.find("  color=always") != std::string::npos);
         CHECK(output.out.find("  editor=vim") != std::string::npos);
         CHECK(output.out.find("  formatter=clang-format-21") != std::string::npos);
@@ -898,6 +901,7 @@ namespace sontag::test {
 
         CHECK(output.out.find("config reset") != std::string::npos);
         CHECK(output.out.find("  opt=O0") != std::string::npos);
+        CHECK(output.out.find("  static=true") != std::string::npos);
         CHECK(output.out.find("  color=auto") != std::string::npos);
         CHECK(output.out.find("  editor=") != std::string::npos);
         CHECK(output.out.find("  editor=auto") == std::string::npos);
@@ -1045,6 +1049,31 @@ namespace sontag::test {
         CHECK(output.err.empty());
     }
 
+    TEST_CASE("005: asm output omits trailing linker int3 padding rows", "[005][session][asm]") {
+        detail::temp_dir temp{"sontag_asm_trim_int3_padding"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl double sq_root(int x) { return static_cast<double>(x); }\n"
+                ":decl int mySqrt(int x) { return x; }\n"
+                "auto root = sq_root(9);\n"
+                "auto value = mySqrt(9);\n"
+                "(void)root;\n"
+                "(void)value;\n"
+                ":asm\n"
+                ":quit\n");
+
+        CHECK(output.out.find("asm:") != std::string::npos);
+        CHECK(output.out.find("symbol: main") != std::string::npos);
+        CHECK(output.out.find("| int3") == std::string::npos);
+        CHECK(output.err.empty());
+    }
+
     TEST_CASE("005: ir command defaults to main when no symbol is provided", "[005][session][ir]") {
         detail::temp_dir temp{"sontag_ir_default_symbol"};
 
@@ -1143,6 +1172,7 @@ namespace sontag::test {
         cfg.cache_dir = temp.path / "cache";
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
+        cfg.link = link_mode::dynamiclink;
 
         auto output = detail::run_repl_script_capture_output(
                 cfg,
@@ -1164,7 +1194,7 @@ namespace sontag::test {
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
         cfg.color = color_mode::never;
-        cfg.static_link = true;
+        cfg.link = link_mode::staticlink;
 
         auto output = detail::run_repl_script_capture_output(
                 cfg,
@@ -1187,7 +1217,7 @@ namespace sontag::test {
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
         cfg.color = color_mode::never;
-        cfg.static_link = true;
+        cfg.link = link_mode::staticlink;
 
         auto output = detail::run_repl_script_capture_output(
                 cfg,
@@ -1211,7 +1241,7 @@ namespace sontag::test {
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
         cfg.color = color_mode::never;
-        cfg.static_link = true;
+        cfg.link = link_mode::staticlink;
 
         auto output = detail::run_repl_script_capture_output(
                 cfg,
@@ -1237,7 +1267,7 @@ namespace sontag::test {
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
         cfg.output = output_mode::json;
-        cfg.static_link = true;
+        cfg.link = link_mode::staticlink;
 
         auto output = detail::run_repl_script_capture_output(
                 cfg,
@@ -1263,7 +1293,7 @@ namespace sontag::test {
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
         cfg.output = output_mode::json;
-        cfg.static_link = true;
+        cfg.link = link_mode::staticlink;
 
         auto output = detail::run_repl_script_capture_output(
                 cfg,
@@ -1289,6 +1319,7 @@ namespace sontag::test {
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
         cfg.output = output_mode::json;
+        cfg.link = link_mode::dynamiclink;
         auto output = detail::run_repl_script_capture_output(
                 cfg,
                 ":decl int square(int x) { int y = x * x; return y; }\n"
