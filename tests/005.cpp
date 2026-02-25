@@ -161,6 +161,42 @@ namespace sontag::test { namespace detail {
         return session_dirs[0];
     }
 
+    static std::vector<fs::path> list_session_dirs(const fs::path& cache_dir) {
+        auto sessions_root = cache_dir / "sessions";
+        std::error_code ec{};
+        if (!fs::exists(sessions_root, ec) || ec) {
+            return {};
+        }
+
+        std::vector<fs::path> session_dirs{};
+        for (const auto& entry : fs::directory_iterator(sessions_root)) {
+            if (entry.is_directory()) {
+                session_dirs.push_back(entry.path());
+            }
+        }
+        std::ranges::sort(session_dirs);
+        return session_dirs;
+    }
+
+    static void set_tree_last_write_time(const fs::path& path, fs::file_time_type time_point) {
+        std::error_code ec{};
+        if (fs::is_directory(path, ec) && !ec) {
+            for (fs::recursive_directory_iterator it(path, fs::directory_options::skip_permission_denied, ec), end;
+                 it != end;
+                 it.increment(ec)) {
+                REQUIRE_FALSE(static_cast<bool>(ec));
+                std::error_code ts_ec{};
+                fs::last_write_time(it->path(), time_point, ts_ec);
+                REQUIRE_FALSE(static_cast<bool>(ts_ec));
+            }
+            REQUIRE_FALSE(static_cast<bool>(ec));
+        }
+
+        ec.clear();
+        fs::last_write_time(path, time_point, ec);
+        REQUIRE_FALSE(static_cast<bool>(ec));
+    }
+
     static void write_all(int fd, std::string_view text) {
         size_t offset = 0U;
         while (offset < text.size()) {
@@ -278,6 +314,7 @@ namespace sontag::test {
         CHECK(persisted_cfg.mca_path == SONTAG_LLVM_MCA_EXECUTABLE_PATH);
         CHECK(persisted_cfg.nm_path == SONTAG_LLVM_NM_EXECUTABLE_PATH);
         CHECK(persisted_cfg.cache_dir == cfg.cache_dir.string());
+        CHECK(persisted_cfg.cache_ttl_days == 3U);
         CHECK(persisted_cfg.output == "json");
         CHECK(persisted_cfg.color == "never");
         CHECK(persisted_cfg.color_scheme == "classic");
@@ -311,6 +348,7 @@ namespace sontag::test {
         startup_config initial_cfg{};
         initial_cfg.cache_dir = temp.path / "cache";
         initial_cfg.history_enabled = false;
+        initial_cfg.cache_ttl_days = 11U;
         initial_cfg.language_standard = cxx_standard::cxx20;
         initial_cfg.opt_level = optimization_level::o3;
         initial_cfg.output = output_mode::json;
@@ -329,6 +367,7 @@ namespace sontag::test {
         startup_config resumed_cfg{};
         resumed_cfg.cache_dir = initial_cfg.cache_dir;
         resumed_cfg.history_enabled = false;
+        resumed_cfg.cache_ttl_days = 1U;
         resumed_cfg.resume_session = "latest";
         resumed_cfg.language_standard = cxx_standard::cxx2c;
         resumed_cfg.opt_level = optimization_level::oz;
@@ -347,6 +386,7 @@ namespace sontag::test {
 
         CHECK(resumed_cfg.language_standard == initial_cfg.language_standard);
         CHECK(resumed_cfg.opt_level == initial_cfg.opt_level);
+        CHECK(resumed_cfg.cache_ttl_days == initial_cfg.cache_ttl_days);
         CHECK(resumed_cfg.output == initial_cfg.output);
         CHECK(resumed_cfg.color == initial_cfg.color);
         CHECK(resumed_cfg.delta_color_scheme == initial_cfg.delta_color_scheme);
@@ -376,6 +416,66 @@ namespace sontag::test {
         CHECK(current->cell_count == 0U);
         CHECK(current->decl_cells.empty());
         CHECK(current->exec_cells.empty());
+    }
+
+    TEST_CASE("005: startup prunes stale session directories by cache_ttl_days", "[005][session][cache]") {
+        detail::temp_dir temp{"sontag_session_prune_stale"};
+
+        auto sessions_root = temp.path / "cache" / "sessions";
+        auto stale_dir = sessions_root / "stale_session";
+        auto fresh_dir = sessions_root / "fresh_session";
+        detail::fs::create_directories(stale_dir);
+        detail::fs::create_directories(fresh_dir);
+        detail::write_text_file(stale_dir / "note.txt", "stale");
+        detail::write_text_file(fresh_dir / "note.txt", "fresh");
+
+        auto stale_time = detail::fs::file_time_type::clock::now() - std::chrono::hours{24 * 10};
+        detail::set_tree_last_write_time(stale_dir, stale_time);
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.cache_ttl_days = 3U;
+
+        detail::run_repl_script(cfg, ":quit\n");
+
+        CHECK_FALSE(detail::fs::exists(stale_dir));
+        CHECK(detail::fs::exists(fresh_dir));
+
+        auto session_dirs = detail::list_session_dirs(cfg.cache_dir);
+        CHECK(std::ranges::find(session_dirs, fresh_dir) != session_dirs.end());
+    }
+
+    TEST_CASE("005: resume preserves target session while pruning stale peers", "[005][session][cache][resume]") {
+        detail::temp_dir temp{"sontag_session_prune_resume_preserve"};
+
+        startup_config seed_cfg{};
+        seed_cfg.cache_dir = temp.path / "cache";
+        seed_cfg.history_enabled = false;
+        seed_cfg.banner_enabled = false;
+        seed_cfg.cache_ttl_days = 3U;
+
+        detail::run_repl_script(seed_cfg, ":quit\n");
+        auto preserved_session = detail::find_single_session_dir(seed_cfg.cache_dir);
+        auto stale_peer = seed_cfg.cache_dir / "sessions" / "stale_peer";
+        detail::fs::create_directories(stale_peer);
+        detail::write_text_file(stale_peer / "note.txt", "stale");
+        auto stale_time = detail::fs::file_time_type::clock::now() - std::chrono::hours{24 * 10};
+        detail::set_tree_last_write_time(preserved_session, stale_time);
+        detail::set_tree_last_write_time(stale_peer, stale_time);
+
+        startup_config resume_cfg{};
+        resume_cfg.cache_dir = seed_cfg.cache_dir;
+        resume_cfg.history_enabled = false;
+        resume_cfg.banner_enabled = false;
+        resume_cfg.cache_ttl_days = 3U;
+        resume_cfg.resume_session = preserved_session.filename().string();
+
+        detail::run_repl_script(resume_cfg, ":quit\n");
+
+        CHECK(detail::fs::exists(preserved_session));
+        CHECK_FALSE(detail::fs::exists(stale_peer));
     }
 
     TEST_CASE("005: reset snapshots clears named snapshots and keeps current", "[005][session][reset_snapshots]") {
@@ -453,6 +553,7 @@ namespace sontag::test {
         CHECK(output.out.find("session:\n") != std::string::npos);
         CHECK(output.out.find("  cache_dir=") != std::string::npos);
         CHECK(output.out.find("  history_file=") != std::string::npos);
+        CHECK(output.out.find("  cache_ttl_days=") != std::string::npos);
 
         CHECK(output.out.find("editor:\n") != std::string::npos);
         CHECK(output.out.find("  editor=") != std::string::npos);
@@ -474,6 +575,7 @@ namespace sontag::test {
                 ":config editor.editor=vim\n"
                 ":config editor.formatter=clang-format-21\n"
                 ":config session.history_file=.sontag/test_history\n"
+                ":config session.cache_ttl_days=7\n"
                 ":config build\n"
                 ":config ui\n"
                 ":config editor\n"
@@ -490,12 +592,14 @@ namespace sontag::test {
         CHECK(output.out.find("updated editor.editor=vim") != std::string::npos);
         CHECK(output.out.find("updated editor.formatter=clang-format-21") != std::string::npos);
         CHECK(output.out.find("updated session.history_file=.sontag/test_history") != std::string::npos);
+        CHECK(output.out.find("updated session.cache_ttl_days=7") != std::string::npos);
 
         CHECK(output.out.find("  opt=O3") != std::string::npos);
         CHECK(output.out.find("  color=always") != std::string::npos);
         CHECK(output.out.find("  editor=vim") != std::string::npos);
         CHECK(output.out.find("  formatter=clang-format-21") != std::string::npos);
         CHECK(output.out.find("  history_file=.sontag/test_history") != std::string::npos);
+        CHECK(output.out.find("  cache_ttl_days=7") != std::string::npos);
 
         CHECK(output.out.find("config reset") != std::string::npos);
         CHECK(output.out.find("  opt=O0") != std::string::npos);
@@ -504,6 +608,7 @@ namespace sontag::test {
         CHECK(output.out.find("  editor=auto") == std::string::npos);
         CHECK(output.out.find("  formatter=clang-format") != std::string::npos);
         CHECK(output.out.find("  history_file=.sontag/history") != std::string::npos);
+        CHECK(output.out.find("  cache_ttl_days=3") != std::string::npos);
     }
 
     TEST_CASE("005: config menu accepts category key=value updates", "[005][session][config]") {
@@ -561,12 +666,14 @@ namespace sontag::test {
                 ":config build.opt=Og\n"
                 ":config nope=value\n"
                 ":config build.opt=\n"
+                ":config session.cache_ttl_days=abc\n"
                 ":quit\n");
 
         CHECK(output.err.find("invalid :config, expected category|key=value|reset") != std::string::npos);
         CHECK(output.err.find("invalid build.opt: Og (expected O0|O1|O2|O3|Ofast|Oz)") != std::string::npos);
         CHECK(output.err.find("unknown :config key: nope") != std::string::npos);
         CHECK(output.err.find("invalid :config, key and value must be non-empty") != std::string::npos);
+        CHECK(output.err.find("invalid session.cache_ttl_days: abc (expected unsigned integer)") != std::string::npos);
     }
 
     TEST_CASE("005: show all prints declarative and executable regions", "[005][session][show]") {

@@ -1359,6 +1359,7 @@ namespace sontag::cli {
             data.nm_path = cfg.nm_path.string();
             data.cache_dir = cfg.cache_dir.string();
             data.history_file = cfg.history_file.string();
+            data.cache_ttl_days = static_cast<uint32_t>(cfg.cache_ttl_days);
             data.output = "{}"_format(cfg.output);
             data.color = "{}"_format(cfg.color);
             data.color_scheme = "{}"_format(cfg.delta_color_scheme);
@@ -1392,6 +1393,7 @@ namespace sontag::cli {
             if (!data.history_file.empty()) {
                 cfg.history_file = data.history_file;
             }
+            cfg.cache_ttl_days = data.cache_ttl_days;
             cfg.editor = data.editor;
             if (data.formatter.empty()) {
                 cfg.formatter = "clang-format";
@@ -1708,6 +1710,101 @@ namespace sontag::cli {
             return latest;
         }
 
+        static std::optional<fs::path> resolve_resume_session_directory(
+                const startup_config& cfg, std::string_view resume_id) {
+            auto sessions_root = session_root(cfg);
+            if (resume_id == "latest"sv) {
+                return find_latest_session(sessions_root);
+            }
+
+            auto candidate = sessions_root / std::string(resume_id);
+            std::error_code ec{};
+            if (fs::exists(candidate, ec) && !ec && fs::is_directory(candidate, ec) && !ec) {
+                return candidate;
+            }
+            return std::nullopt;
+        }
+
+        static fs::path require_resume_session_directory(const startup_config& cfg, std::string_view resume_id) {
+            auto resolved = resolve_resume_session_directory(cfg, resume_id);
+            if (!resolved) {
+                throw std::runtime_error("unable to resolve --resume target: {}"_format(resume_id));
+            }
+            return *resolved;
+        }
+
+        static std::optional<fs::file_time_type> newest_write_time_recursive(const fs::path& path) {
+            std::error_code ec{};
+            auto latest = fs::last_write_time(path, ec);
+            if (ec) {
+                return std::nullopt;
+            }
+
+            if (!fs::is_directory(path, ec) || ec) {
+                return latest;
+            }
+
+            for (fs::recursive_directory_iterator it(path, fs::directory_options::skip_permission_denied, ec), end;
+                 it != end;
+                 it.increment(ec)) {
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
+                std::error_code ts_ec{};
+                auto current = fs::last_write_time(it->path(), ts_ec);
+                if (!ts_ec && current > latest) {
+                    latest = current;
+                }
+            }
+
+            return latest;
+        }
+
+        static void prune_stale_session_entries(
+                const startup_config& cfg, const std::optional<fs::path>& preserved_session_dir) {
+            if (cfg.cache_ttl_days == 0U) {
+                return;
+            }
+
+            auto sessions_root = session_root(cfg);
+            std::error_code ec{};
+            if (!fs::exists(sessions_root, ec) || ec) {
+                return;
+            }
+
+            auto retention_window = std::chrono::hours{24} * static_cast<int64_t>(cfg.cache_ttl_days);
+            auto cutoff = fs::file_time_type::clock::now() -
+                          std::chrono::duration_cast<fs::file_time_type::duration>(retention_window);
+
+            for (fs::directory_iterator it(sessions_root, fs::directory_options::skip_permission_denied, ec), end;
+                 it != end;
+                 it.increment(ec)) {
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
+
+                std::error_code is_dir_ec{};
+                if (!it->is_directory(is_dir_ec) || is_dir_ec) {
+                    continue;
+                }
+
+                auto entry_path = it->path();
+                if (preserved_session_dir && entry_path == *preserved_session_dir) {
+                    continue;
+                }
+
+                auto newest_write_time = newest_write_time_recursive(entry_path);
+                if (!newest_write_time || *newest_write_time >= cutoff) {
+                    continue;
+                }
+
+                std::error_code remove_ec{};
+                fs::remove_all(entry_path, remove_ec);
+            }
+        }
+
         static repl_state bootstrap_session(const startup_config& cfg) {
             auto sessions_root = cfg.cache_dir / "sessions";
             std::error_code ec{};
@@ -1733,26 +1830,8 @@ namespace sontag::cli {
             return state;
         }
 
-        static repl_state resume_session(startup_config& cfg, std::string_view resume_id) {
-            auto sessions_root = session_root(cfg);
-
-            std::optional<fs::path> session_dir{};
-            if (resume_id == "latest"sv) {
-                session_dir = find_latest_session(sessions_root);
-            }
-            else {
-                auto candidate = sessions_root / std::string(resume_id);
-                std::error_code ec{};
-                if (fs::exists(candidate, ec) && !ec && fs::is_directory(candidate, ec) && !ec) {
-                    session_dir = candidate;
-                }
-            }
-
-            if (!session_dir) {
-                throw std::runtime_error("unable to resolve --resume target: {}"_format(resume_id));
-            }
-
-            auto state = make_state_paths(*session_dir);
+        static repl_state resume_session_from_directory(startup_config& cfg, const fs::path& session_dir) {
+            auto state = make_state_paths(session_dir);
             auto persisted_cfg = read_json_file<persisted_config>(state.config_path, true);
             validate_supported_schema_version(persisted_cfg.schema_version, state.config_path);
             apply_persisted_config(persisted_cfg, cfg);
@@ -1822,8 +1901,12 @@ namespace sontag::cli {
 
         static repl_state start_session(startup_config& cfg) {
             if (cfg.resume_session) {
-                return resume_session(cfg, *cfg.resume_session);
+                auto session_dir = require_resume_session_directory(cfg, *cfg.resume_session);
+                auto preserved_session_dir = std::optional<fs::path>{session_dir};
+                prune_stale_session_entries(cfg, preserved_session_dir);
+                return resume_session_from_directory(cfg, session_dir);
             }
+            prune_stale_session_entries(cfg, std::nullopt);
             return bootstrap_session(cfg);
         }
 
@@ -1839,6 +1922,7 @@ namespace sontag::cli {
                    "  mca_cpu={}\n"
                    "  static={}\n"
                    "  cache_dir={}\n"
+                   "  cache_ttl_days={}\n"
                    "  output={}\n"
                    "  banner={}\n"
                    "  color={}\n"
@@ -1853,6 +1937,7 @@ namespace sontag::cli {
                            effective_mca_cpu_value(cfg),
                            cfg.static_link,
                            display_absolute_path(cfg.cache_dir),
+                           cfg.cache_ttl_days,
                            cfg.output,
                            cfg.banner_enabled,
                            cfg.color,
@@ -1944,7 +2029,8 @@ namespace sontag::cli {
                 "color_scheme=vaporwave",
                 "q",
                 nullptr};
-        static std::array<const char*, 4> config_session_menu_completions{"cache_dir", "history_file", "q", nullptr};
+        static std::array<const char*, 5> config_session_menu_completions{
+                "cache_dir", "history_file", "cache_ttl_days", "q", nullptr};
         static std::array<const char*, 9> config_editor_menu_completions{
                 "editor",
                 "editor=auto",
@@ -2079,7 +2165,7 @@ namespace sontag::cli {
                 return key == "output"sv || key == "color"sv || key == "color_scheme"sv;
             }
             if (category == "session"sv) {
-                return key == "cache_dir"sv || key == "history_file"sv;
+                return key == "cache_dir"sv || key == "history_file"sv || key == "cache_ttl_days"sv;
             }
             if (category == "editor"sv) {
                 return key == "editor"sv || key == "formatter"sv;
@@ -2210,6 +2296,7 @@ namespace sontag::cli {
                 os << "session:\n";
                 os << "  cache_dir={}\n"_format(display_absolute_path(cfg.cache_dir));
                 os << "  history_file={}\n"_format(cfg.history_file.string());
+                os << "  cache_ttl_days={}\n"_format(cfg.cache_ttl_days);
                 return true;
             }
             if (key == "editor"sv) {
@@ -2285,6 +2372,10 @@ namespace sontag::cli {
                     os << "session:\n  history_file={}\n"_format(cfg.history_file.string());
                     return true;
                 }
+                if (selected_key == "cache_ttl_days"sv) {
+                    os << "session:\n  cache_ttl_days={}\n"_format(cfg.cache_ttl_days);
+                    return true;
+                }
                 return false;
             }
             if (category_key == "editor"sv) {
@@ -2315,6 +2406,7 @@ namespace sontag::cli {
             cfg.delta_color_scheme = defaults.delta_color_scheme;
             cfg.cache_dir = defaults.cache_dir;
             cfg.history_file = defaults.history_file;
+            cfg.cache_ttl_days = defaults.cache_ttl_days;
             cfg.editor = defaults.editor;
             cfg.formatter = defaults.formatter;
         }
@@ -2437,6 +2529,15 @@ namespace sontag::cli {
             }
             if (key == "session.history_file"sv) {
                 cfg.history_file = fs::path{value};
+                return true;
+            }
+            if (key == "session.cache_ttl_days"sv) {
+                auto parsed = utils::parse_arithmetic<size_t>(value);
+                if (!parsed) {
+                    err << "invalid session.cache_ttl_days: {} (expected unsigned integer)\n"_format(value);
+                    return false;
+                }
+                cfg.cache_ttl_days = *parsed;
                 return true;
             }
             if (key == "editor.editor"sv) {
@@ -8134,6 +8235,7 @@ examples:
         std::string resume_arg{};
         std::string cache_dir_arg{cfg.cache_dir.string()};
         std::string history_file_arg{cfg.history_file.string()};
+        std::string cache_ttl_days_arg{"{}"_format(cfg.cache_ttl_days)};
         std::string banner_arg{cfg.banner_enabled ? "true" : "false"};
         bool no_history = false;
         bool no_banner = false;
@@ -8148,6 +8250,7 @@ examples:
         app.add_option("--resume", resume_arg, "Resume session id or latest");
         app.add_option("--cache-dir", cache_dir_arg, "Cache/artifact directory");
         app.add_option("--history-file", history_file_arg, "Persistent REPL history path");
+        app.add_option("--cache-ttl-days", cache_ttl_days_arg, "Prune cache/session entries older than N days");
         app.add_flag("--no-history", no_history, "Disable persistent REPL history");
         app.add_option("--banner", banner_arg, "Show startup banner: true|false");
         app.add_flag("--no-banner", no_banner, "Disable startup banner");
@@ -8206,6 +8309,12 @@ examples:
             std::cerr << "invalid --banner value: {} (expected true|false)\n"_format(banner_arg);
             return std::optional<int>{2};
         }
+        auto parsed_cache_ttl_days = utils::parse_arithmetic<size_t>(cache_ttl_days_arg);
+        if (!parsed_cache_ttl_days) {
+            std::cerr << "invalid --cache-ttl-days value: {} (expected unsigned integer)\n"_format(cache_ttl_days_arg);
+            return std::optional<int>{2};
+        }
+        cfg.cache_ttl_days = *parsed_cache_ttl_days;
 
         cfg.target_triple = detail::normalize_optional(target_arg);
         cfg.cpu = detail::normalize_optional(cpu_arg);

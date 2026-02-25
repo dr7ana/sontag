@@ -21,6 +21,7 @@ namespace sontag {
      * - resume_session: Session id (or "latest") to resume previous state/artifacts.
      * - cache_dir: Root directory for all session metadata and generated artifacts.
      * - history_file: Path to persisted interactive command history.
+     * - cache_ttl_days: Prune stale cache/session entries older than N days (0 disables pruning).
      * - history_enabled: Enable/disable persistent history writes.
      * - banner_enabled: Show/hide the startup ASCII banner in REPL sessions.
      * - color_mode: ANSI color behavior for terminal output.
@@ -259,6 +260,7 @@ namespace sontag {
         std::optional<std::string> resume_session{};
         std::filesystem::path cache_dir{".sontag"};
         std::filesystem::path history_file{".sontag/history"};
+        size_t cache_ttl_days{3U};
         bool history_enabled{true};
         std::optional<std::string> editor{};
         std::filesystem::path formatter{"clang-format"};
