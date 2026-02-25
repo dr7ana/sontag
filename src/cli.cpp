@@ -1825,11 +1825,12 @@ namespace sontag::cli {
 
                 auto manifest_path = node_path / "manifest.txt";
                 auto child_hashes = parse_merkle_manifest_child_hashes(manifest_path);
-                nodes.push_back(merkle_cache_node_entry{
-                        .path = std::move(node_path),
-                        .node_hash = it->path().filename().string(),
-                        .newest_write_time = *newest_write_time,
-                        .child_hashes = std::move(child_hashes)});
+                nodes.push_back(
+                        merkle_cache_node_entry{
+                                .path = std::move(node_path),
+                                .node_hash = it->path().filename().string(),
+                                .newest_write_time = *newest_write_time,
+                                .child_hashes = std::move(child_hashes)});
             }
 
             return nodes;
@@ -1872,8 +1873,9 @@ namespace sontag::cli {
             std::unordered_set<std::string> keep_symbols{};
             std::unordered_set<std::string> keep_traces{};
 
-            auto mark_recent_nodes = [cutoff](std::span<const merkle_cache_node_entry> nodes,
-                                              std::unordered_set<std::string>& keep_set) {
+            auto mark_recent_nodes = [cutoff](
+                                             std::span<const merkle_cache_node_entry> nodes,
+                                             std::unordered_set<std::string>& keep_set) {
                 for (const auto& node : nodes) {
                     if (node.newest_write_time >= cutoff) {
                         keep_set.insert(node.node_hash);

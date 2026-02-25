@@ -595,7 +595,9 @@ namespace sontag::test {
         CHECK_FALSE(detail::fs::exists(units_root / "unit_stale"));
     }
 
-    TEST_CASE("005: shared cache GC preserves stale build units referenced by fresh nodes", "[005][session][cache][shared]") {
+    TEST_CASE(
+            "005: shared cache GC preserves stale build units referenced by fresh nodes",
+            "[005][session][cache][shared]") {
         detail::temp_dir temp{"sontag_shared_cache_preserve_referenced_units"};
 
         auto cache_root = temp.path / "cache" / "cache";

@@ -172,6 +172,28 @@ namespace sontag::test {
             script << "EOF\n";
             return script.str();
         }
+
+        static std::string make_mca_reject_intel_syntax_wrapper_script() {
+            std::ostringstream script{};
+            script << "#!/usr/bin/env bash\n";
+            script << "set -eu\n";
+            script << "input=\"${@: -1}\"\n";
+            script << "if grep -Eq '^\\\\.intel_syntax|^\\\\.att_syntax' \"$input\"; then\n";
+            script << "  echo unexpected-x86-syntax-directive >&2\n";
+            script << "  exit 91\n";
+            script << "fi\n";
+            script << "cat <<'EOF'\n";
+            script << "Iterations:        5\n";
+            script << "Instructions:      2\n";
+            script << "Total Cycles:      2\n";
+            script << "Total uOps:        2\n";
+            script << "Dispatch Width:    2\n";
+            script << "uOps Per Cycle:    1.00\n";
+            script << "IPC:               1.00\n";
+            script << "Block RThroughput: 1.0\n";
+            script << "EOF\n";
+            return script.str();
+        }
     }  // namespace detail
 
     TEST_CASE("003: analysis pipeline emits asm ir and diagnostics", "[003][analysis]") {
@@ -474,6 +496,36 @@ namespace sontag::test {
         REQUIRE(cached_result.success);
         CHECK(cached_result.command.empty());
         CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: mca cross-target aarch64 avoids x86 syntax directives", "[003][analysis][mca][cross_target]") {
+        detail::temp_dir temp{"sontag_m3_mca_cross_target_aarch64"};
+        auto tool_dir = temp.path / "tools";
+        detail::fs::create_directories(tool_dir);
+
+        auto mca_wrapper = tool_dir / "llvm-mca";
+        detail::make_executable_file(mca_wrapper, detail::make_mca_reject_intel_syntax_wrapper_script());
+
+        for (auto cpu : {std::string_view{"generic"}, std::string_view{"apple-m4"}}) {
+            analysis_request request{};
+            request.clang_path = "/usr/bin/clang++";
+            request.mca_path = mca_wrapper;
+            request.session_dir = temp.path / ("session_" + std::string{cpu});
+            request.language_standard = cxx_standard::cxx23;
+            request.opt_level = optimization_level::o0;
+            request.target_triple = "aarch64-unknown-linux-gnu";
+            request.cpu = std::string{cpu};
+            request.decl_cells = {"__attribute__((used,noinline)) int square(int x) { return x * x; }"};
+            request.exec_cells = {"volatile int sink = square(3);", "return sink;"};
+            request.symbol = "square";
+
+            auto result = run_analysis(request, analysis_kind::mca);
+            REQUIRE(result.success);
+            REQUIRE_FALSE(result.command.empty());
+            CHECK(detail::has_exact_arg(result.command, "-mtriple=aarch64-unknown-linux-gnu"));
+            CHECK(detail::has_exact_arg(result.command, std::string{"-mcpu="} + std::string{cpu}));
+            CHECK(result.diagnostics_text.find("unexpected-x86-syntax-directive") == std::string::npos);
+        }
     }
 
     TEST_CASE(
@@ -832,15 +884,8 @@ namespace sontag::test {
         auto args = detail::read_lines(args_path);
         CHECK(detail::has_exact_arg(args, "--disassemble"));
         CHECK(detail::has_exact_arg(args, "--demangle"));
-#if SONTAG_ARCH_ARM64
         CHECK(detail::has_exact_arg(args, "--disassembler-options=no-aliases"));
         CHECK_FALSE(detail::has_prefixed_arg(args, "--x86-asm-syntax="));
-#elif SONTAG_ARCH_X86_64
-        CHECK_FALSE(detail::has_exact_arg(args, "--disassembler-options=no-aliases"));
-        CHECK(detail::has_prefixed_arg(args, "--x86-asm-syntax="));
-#else
-#error "unsupported architecture for dump argument checks"
-#endif
         CHECK(detail::has_exact_arg(args, "--symbolize-operands"));
         CHECK(detail::has_exact_arg(args, "--show-all-symbols"));
     }

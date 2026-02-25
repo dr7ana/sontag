@@ -131,17 +131,17 @@ namespace glz {
     template <>
     struct meta<sontag::analysis_symbol> {
         using T = sontag::analysis_symbol;
-        static constexpr auto value = object(
-                "kind",
-                &T::kind,
-                "mangled",
-                &T::mangled,
-                "demangled",
-                &T::demangled,
-                "present_in_object",
-                &T::present_in_object,
-                "present_in_binary",
-                &T::present_in_binary);
+        static constexpr auto value =
+                object("kind",
+                       &T::kind,
+                       "mangled",
+                       &T::mangled,
+                       "demangled",
+                       &T::demangled,
+                       "present_in_object",
+                       &T::present_in_object,
+                       "present_in_binary",
+                       &T::present_in_binary);
     };
 
     template <>
@@ -1115,7 +1115,69 @@ namespace sontag {
             }
         }
 
-        static void append_host_objdump_arch_args(std::vector<std::string>& args, const analysis_request& request) {
+        static std::string normalize_target_triple(const analysis_request& request) {
+            if (!request.target_triple.has_value()) {
+                return {};
+            }
+
+            auto normalized = std::string{trim_ascii(*request.target_triple)};
+            std::ranges::transform(normalized, normalized.begin(), [](unsigned char c) {
+                return static_cast<char>(utils::char_tolower(static_cast<char>(c)));
+            });
+            return normalized;
+        }
+
+        static bool is_x86_target_triple(std::string_view target_triple) {
+            return target_triple.starts_with("x86_64"sv) || target_triple.starts_with("amd64"sv) ||
+                   target_triple.starts_with("i386"sv) || target_triple.starts_with("i486"sv) ||
+                   target_triple.starts_with("i586"sv) || target_triple.starts_with("i686"sv);
+        }
+
+        static bool is_aarch64_target_triple(std::string_view target_triple) {
+            return target_triple.starts_with("aarch64"sv) || target_triple.starts_with("arm64"sv);
+        }
+
+        static bool is_x86_target(const analysis_request& request) {
+            auto target = normalize_target_triple(request);
+            if (target.empty()) {
+#if SONTAG_ARCH_X86_64
+                return true;
+#else
+                return false;
+#endif
+            }
+            return is_x86_target_triple(target);
+        }
+
+        static bool is_aarch64_target(const analysis_request& request) {
+            auto target = normalize_target_triple(request);
+            if (target.empty()) {
+#if SONTAG_ARCH_ARM64
+                return true;
+#else
+                return false;
+#endif
+            }
+            return is_aarch64_target_triple(target);
+        }
+
+        static void append_target_objdump_arch_args(std::vector<std::string>& args, const analysis_request& request) {
+            if (is_x86_target(request)) {
+                if (request.asm_syntax == "intel"sv) {
+                    args.emplace_back(arg_tokens::objdump_x86_intel_syntax);
+                }
+                else {
+                    args.emplace_back(arg_tokens::objdump_x86_att_syntax);
+                }
+                return;
+            }
+
+            if (is_aarch64_target(request)) {
+                append_prefixed_arg(
+                        args, arg_tokens::objdump_disassembler_options_prefix, arg_tokens::objdump_no_aliases);
+                return;
+            }
+
 #if SONTAG_ARCH_X86_64
             if (request.asm_syntax == "intel"sv) {
                 args.emplace_back(arg_tokens::objdump_x86_intel_syntax);
@@ -1160,11 +1222,9 @@ namespace sontag {
                 case analysis_kind::asm_text:
                     base_args.emplace_back(arg_tokens::compile_to_text);
                     base_args.emplace_back(arg_tokens::verbose_asm);
-#if SONTAG_ARCH_X86_64
-                    if (request.asm_syntax == "intel") {
+                    if (is_x86_target(request) && request.asm_syntax == "intel") {
                         base_args.emplace_back(arg_tokens::intel_syntax);
                     }
-#endif
                     base_args.push_back(source_path.string());
                     base_args.emplace_back(arg_tokens::output_path);
                     base_args.push_back(artifact_path.string());
@@ -1235,7 +1295,7 @@ namespace sontag {
             base_args.emplace_back(objdump_executable);
             base_args.emplace_back(arg_tokens::objdump_disassemble);
             base_args.emplace_back(arg_tokens::objdump_demangle);
-            append_host_objdump_arch_args(base_args, request);
+            append_target_objdump_arch_args(base_args, request);
             base_args.emplace_back(arg_tokens::objdump_symbolize_operands);
 
             if (symbol) {
@@ -3203,7 +3263,12 @@ namespace sontag {
 #endif
         }
 
-        static std::string sanitize_mca_input(std::string_view asm_text, bool strip_cfi_directives) {
+        static constexpr bool is_x86_syntax_directive(std::string_view trimmed_line) noexcept {
+            return trimmed_line.starts_with(".intel_syntax"sv) || trimmed_line.starts_with(".att_syntax"sv);
+        }
+
+        static std::string sanitize_mca_input(
+                std::string_view asm_text, bool strip_cfi_directives, bool strip_x86_syntax_directives) {
             auto lines = split_lines(asm_text);
             std::string sanitized{};
             sanitized.reserve(asm_text.size());
@@ -3215,29 +3280,28 @@ namespace sontag {
                 if (should_strip_mca_line(trimmed)) {
                     continue;
                 }
+                if (strip_x86_syntax_directives && is_x86_syntax_directive(trimmed)) {
+                    continue;
+                }
                 sanitized.append(line);
                 sanitized.push_back('\n');
             }
             return sanitized;
         }
 
-        static std::string prepare_mca_symbol_input(
-                std::string_view extracted_asm, [[maybe_unused]] std::string_view asm_syntax) {
-            auto sanitized_input = sanitize_mca_input(extracted_asm, true);
+        static std::string prepare_mca_symbol_input(const analysis_request& request, std::string_view extracted_asm) {
+            auto sanitized_input = sanitize_mca_input(extracted_asm, true, !is_x86_target(request));
             std::string prepared{};
             prepared.reserve(sanitized_input.size() + 64U);
             prepared.append(".text\n");
-#if SONTAG_ARCH_X86_64
-            if (asm_syntax == "intel"sv) {
+            if (is_x86_target(request) && request.asm_syntax == "intel"sv) {
                 prepared.append(".intel_syntax noprefix\n");
             }
-#endif
             prepared.append(sanitized_input);
             return prepared;
         }
 
-        static std::string prepare_mca_from_objdump(
-                std::string_view objdump_text, [[maybe_unused]] std::string_view asm_syntax) {
+        static std::string prepare_mca_from_objdump(const analysis_request& request, std::string_view objdump_text) {
             auto lines = split_lines(objdump_text);
             std::string instructions{};
             instructions.reserve(objdump_text.size());
@@ -3295,12 +3359,10 @@ namespace sontag {
             std::string prepared{};
             prepared.reserve(instructions.size() + 64U);
             prepared.append(".text\n");
-#if SONTAG_ARCH_X86_64
-            if (asm_syntax == "intel"sv) {
+            if (is_x86_target(request) && request.asm_syntax == "intel"sv) {
                 prepared.append(".intel_syntax noprefix\n");
             }
-#endif
-            prepared.append(instructions);
+            prepared.append(sanitize_mca_input(instructions, false, !is_x86_target(request)));
             return prepared;
         }
 
@@ -4652,18 +4714,18 @@ namespace sontag {
                 if (extracted.empty()) {
                     auto dump_result = run_analysis(request, analysis_kind::dump);
                     if (dump_result.success && !dump_result.artifact_text.empty()) {
-                        asm_text = detail::prepare_mca_from_objdump(dump_result.artifact_text, request.asm_syntax);
+                        asm_text = detail::prepare_mca_from_objdump(request, dump_result.artifact_text);
                     }
                     else {
                         throw std::runtime_error("symbol not found in artifact: {}"_format(*resolved));
                     }
                 }
                 else {
-                    asm_text = detail::prepare_mca_symbol_input(extracted, request.asm_syntax);
+                    asm_text = detail::prepare_mca_symbol_input(request, extracted);
                 }
             }
             else {
-                asm_text = detail::sanitize_mca_input(asm_text, false);
+                asm_text = detail::sanitize_mca_input(asm_text, false, !detail::is_x86_target(request));
             }
 
             detail::write_text_file(asm_path, asm_text);
@@ -4852,8 +4914,8 @@ namespace sontag {
                 }
                 else {
                     output_text.clear();
-                    diagnostics_text =
-                            detail::join_text(diagnostics_text, "symbol not found in artifact: {}"_format(*resolved_symbol));
+                    diagnostics_text = detail::join_text(
+                            diagnostics_text, "symbol not found in artifact: {}"_format(*resolved_symbol));
                     exit_code = 1;
                 }
             }
