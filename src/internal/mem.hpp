@@ -37,6 +37,18 @@ namespace sontag::internal::mem {
         unknown,
     };
 
+    enum class value_status : uint8_t {
+        unknown,
+        known,
+        varied,
+    };
+
+    enum class value_source : uint8_t {
+        inferred_none,
+        runtime_trace_exact,
+        runtime_trace_sampled,
+    };
+
     struct row_input {
         size_t line{};
         std::string_view offset{};
@@ -67,6 +79,8 @@ namespace sontag::internal::mem {
         std::vector<size_t> ir_line_hints{};
         std::optional<uint64_t> runtime_address{};
         std::optional<std::string> observed_value{};
+        value_status observed_value_status{value_status::unknown};
+        value_source observed_value_source{value_source::inferred_none};
         size_t value_variation_count{};
         std::vector<std::string> trace_samples{};
     };
@@ -121,6 +135,30 @@ namespace sontag::internal::mem {
                 return "unknown"sv;
         }
         return "unknown"sv;
+    }
+
+    inline constexpr std::string_view to_string(value_status status) {
+        switch (status) {
+            case value_status::unknown:
+                return "unknown"sv;
+            case value_status::known:
+                return "known"sv;
+            case value_status::varied:
+                return "varied"sv;
+        }
+        return "unknown"sv;
+    }
+
+    inline constexpr std::string_view to_string(value_source source) {
+        switch (source) {
+            case value_source::inferred_none:
+                return "inferred_none"sv;
+            case value_source::runtime_trace_exact:
+                return "runtime_trace_exact"sv;
+            case value_source::runtime_trace_sampled:
+                return "runtime_trace_sampled"sv;
+        }
+        return "inferred_none"sv;
     }
 
     inline constexpr std::string_view trim_ascii(std::string_view value) {

@@ -96,6 +96,40 @@ namespace sontag::test {
             script << "fi\n";
             return script.str();
         }
+
+        static std::string make_nm_short_token_collision_script() {
+            std::ostringstream script{};
+            script << "#!/usr/bin/env bash\n";
+            script << "set -eu\n";
+            script << "target=\"${@: -1}\"\n";
+            script << "if [[ \"$target\" == *.o ]]; then\n";
+            script << "cat <<'EOF'\n";
+            script << "open(int) T 0 0\n";
+            script << "EOF\n";
+            script << "else\n";
+            script << "cat <<'EOF'\n";
+            script << "open T 0 0\n";
+            script << "EOF\n";
+            script << "fi\n";
+            return script.str();
+        }
+
+        static std::string make_nm_addendum_collision_script() {
+            std::ostringstream script{};
+            script << "#!/usr/bin/env bash\n";
+            script << "set -eu\n";
+            script << "target=\"${@: -1}\"\n";
+            script << "if [[ \"$target\" == *.o ]]; then\n";
+            script << "cat <<'EOF'\n";
+            script << "square(int) T 0 0\n";
+            script << "EOF\n";
+            script << "else\n";
+            script << "cat <<'EOF'\n";
+            script << "square T 0 0\n";
+            script << "EOF\n";
+            script << "fi\n";
+            return script.str();
+        }
     }  // namespace detail
 
     TEST_CASE("003: analysis pipeline emits asm ir and diagnostics", "[003][analysis]") {
@@ -136,6 +170,37 @@ namespace sontag::test {
         CHECK(diag_result.artifact_text.find("error:") != std::string::npos);
         CHECK(std::find(diag_result.command.begin(), diag_result.command.end(), "-Wno-error") !=
               diag_result.command.end());
+    }
+
+    TEST_CASE("003: mem_trace command reflects static vs dynamic link policy", "[003][analysis][link]") {
+        detail::temp_dir temp{"sontag_m1_link_policy"};
+
+        analysis_request dynamic_request{};
+        dynamic_request.clang_path = "/usr/bin/clang++";
+        dynamic_request.session_dir = temp.path / "session_dynamic";
+        dynamic_request.language_standard = cxx_standard::cxx23;
+        dynamic_request.opt_level = optimization_level::o0;
+        dynamic_request.decl_cells = {"int square(int x) { return x * x; }"};
+        dynamic_request.exec_cells = {"volatile int sink = square(2);", "return sink;"};
+        dynamic_request.symbol = "main";
+        dynamic_request.linker_args = {"-Wl,--sontag-nonexistent-link-flag"};
+
+        auto dynamic_result = run_analysis(dynamic_request, analysis_kind::mem_trace);
+        CHECK_FALSE(dynamic_result.success);
+        CHECK(detail::has_exact_arg(dynamic_result.command, "-Wl,--sontag-nonexistent-link-flag"));
+        CHECK(detail::has_exact_arg(dynamic_result.command, "-ldl"));
+        CHECK_FALSE(detail::has_exact_arg(dynamic_result.command, "-static"));
+        CHECK_FALSE(detail::has_exact_arg(dynamic_result.command, "-static-libgcc"));
+
+        auto static_request = dynamic_request;
+        static_request.session_dir = temp.path / "session_static";
+        static_request.static_link = true;
+
+        auto static_result = run_analysis(static_request, analysis_kind::mem_trace);
+        CHECK_FALSE(static_result.success);
+        CHECK(detail::has_exact_arg(static_result.command, "-static"));
+        CHECK(detail::has_exact_arg(static_result.command, "-static-libgcc"));
+        CHECK_FALSE(detail::has_exact_arg(static_result.command, "-ldl"));
     }
 
     TEST_CASE("003: symbol scoped analysis paths", "[003][analysis][symbol]") {
@@ -509,6 +574,49 @@ namespace sontag::test {
         CHECK(info->display_name == "square(int)");
         CHECK(info->status == symbol_resolution_status::resolved_object_only);
         CHECK(info->source == "symtab_token_prefix");
+    }
+
+    TEST_CASE(
+            "003: short-token resolver prefers object symbol over binary exact collision", "[003][analysis][symbols]") {
+        detail::temp_dir temp{"sontag_m1_resolve_symbol_short_token_rank"};
+
+        auto nm_wrapper_path = temp.path / "tools" / "llvm-nm";
+        detail::make_executable_file(nm_wrapper_path, detail::make_nm_short_token_collision_script());
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.nm_path = nm_wrapper_path;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int open(int x) { return x + 1; }"};
+
+        auto info = resolve_symbol_info(request, "open");
+        REQUIRE(info.has_value());
+        CHECK(info->display_name == "open(int)");
+        CHECK(info->status == symbol_resolution_status::resolved_object_only);
+        CHECK(info->source == "symtab_token_prefix");
+    }
+
+    TEST_CASE("003: addendum alias prefers object symbol over binary exact collision", "[003][analysis][symbols]") {
+        detail::temp_dir temp{"sontag_m1_resolve_symbol_addendum_rank"};
+
+        auto nm_wrapper_path = temp.path / "tools" / "llvm-nm";
+        detail::make_executable_file(nm_wrapper_path, detail::make_nm_addendum_collision_script());
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.nm_path = nm_wrapper_path;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int square(int x) { return x * x; }"};
+
+        auto info = resolve_symbol_info(request, "square@PLT");
+        REQUIRE(info.has_value());
+        CHECK(info->display_name == "square(int)");
+        CHECK(info->status == symbol_resolution_status::resolved_stub);
+        CHECK(info->source == "symtab_token_prefix_stub");
     }
 
     TEST_CASE("003: mem_trace executes for non-main symbol without synthetic entrypoint shim", "[003][analysis][mem]") {

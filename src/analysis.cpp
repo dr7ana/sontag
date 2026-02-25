@@ -1670,15 +1670,36 @@ namespace sontag {
                 return 2;
             };
 
-            auto is_better = [](const ranked_match& lhs, const ranked_match& rhs) {
+            auto is_short_query = requested_canonical.size() <= 4U;
+            auto has_addendum_query = requested_addendum.has_value();
+            auto should_prioritize_snapshot_before_kind = [&](const ranked_match& lhs,
+                                                              const ranked_match& rhs) constexpr {
+                if (has_addendum_query) {
+                    // For addendum aliases (e.g. @PLT) without exact addendum matches, avoid static-runtime
+                    // exact/canonical collisions and prefer snapshot/object-owned candidates first.
+                    return lhs.addendum_rank > 0 && rhs.addendum_rank > 0;
+                }
+                // For short tokens, exact static-runtime names can dominate; prefer snapshot ownership first.
+                return is_short_query;
+            };
+
+            auto is_better = [&](const ranked_match& lhs, const ranked_match& rhs) {
+                if (lhs.addendum_rank != rhs.addendum_rank) {
+                    return lhs.addendum_rank < rhs.addendum_rank;
+                }
+                if (should_prioritize_snapshot_before_kind(lhs, rhs)) {
+                    if (lhs.presence_rank != rhs.presence_rank) {
+                        return lhs.presence_rank < rhs.presence_rank;
+                    }
+                    if (lhs.candidate->present_in_object != rhs.candidate->present_in_object) {
+                        return lhs.candidate->present_in_object;
+                    }
+                }
                 if (lhs.kind != rhs.kind) {
                     return lhs.kind < rhs.kind;
                 }
                 if (lhs.presence_rank != rhs.presence_rank) {
                     return lhs.presence_rank < rhs.presence_rank;
-                }
-                if (lhs.addendum_rank != rhs.addendum_rank) {
-                    return lhs.addendum_rank < rhs.addendum_rank;
                 }
                 if (lhs.canonical_length_delta != rhs.canonical_length_delta) {
                     return lhs.canonical_length_delta < rhs.canonical_length_delta;

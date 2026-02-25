@@ -156,6 +156,8 @@ namespace sontag::cli { namespace detail {
         std::vector<size_t> source_refs{};
         std::optional<std::string> runtime_address{};
         std::optional<std::string> observed_value{};
+        std::string value_status{};
+        std::string value_source{};
         size_t value_variation_count{};
         std::vector<std::string> trace_samples{};
     };
@@ -461,6 +463,10 @@ namespace glz {
                        &T::runtime_address,
                        "observed_value",
                        &T::observed_value,
+                       "value_status",
+                       &T::value_status,
+                       "value_source",
+                       &T::value_source,
                        "value_variation_count",
                        &T::value_variation_count,
                        "trace_samples",
@@ -4876,6 +4882,15 @@ examples:
                     return lhs->sequence < rhs->sequence;
                 });
 
+                auto mark_trace_exact = [&row]() {
+                    row.observed_value_status = internal::mem::value_status::known;
+                    row.observed_value_source = internal::mem::value_source::runtime_trace_exact;
+                };
+                auto mark_trace_sampled = [&row]() {
+                    row.observed_value_status = internal::mem::value_status::varied;
+                    row.observed_value_source = internal::mem::value_source::runtime_trace_sampled;
+                };
+
                 // populate trace_samples (up to 8)
                 for (size_t i = 0U; i < candidate_events.size() && row.trace_samples.size() < 8U; ++i) {
                     row.trace_samples.push_back(format_runtime_hex(
@@ -4903,11 +4918,36 @@ examples:
                                 format_runtime_hex(latest_store->value, static_cast<size_t>(latest_store->width_bytes));
                         row.observed_value = "{}\u2192{}"_format(before, after);
                         auto distinct_pairs = std::set<std::string>{};
+                        std::optional<std::string> pending_before{};
                         for (const auto* event : candidate_events) {
-                            distinct_pairs.insert(
-                                    format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes)));
+                            if (event->access == internal::mem::access_kind::load) {
+                                pending_before = format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes));
+                                continue;
+                            }
+                            if (event->access == internal::mem::access_kind::store && pending_before.has_value()) {
+                                auto sampled_after =
+                                        format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes));
+                                distinct_pairs.insert("{}\u2192{}"_format(*pending_before, sampled_after));
+                                pending_before.reset();
+                            }
                         }
-                        row.value_variation_count = distinct_pairs.size();
+                        if (distinct_pairs.empty()) {
+                            auto distinct_values = std::set<std::string>{};
+                            for (const auto* event : candidate_events) {
+                                distinct_values.insert(
+                                        format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes)));
+                            }
+                            row.value_variation_count = distinct_values.size();
+                        }
+                        else {
+                            row.value_variation_count = distinct_pairs.size();
+                        }
+                        if (row.value_variation_count <= 1U) {
+                            mark_trace_exact();
+                        }
+                        else {
+                            mark_trace_sampled();
+                        }
                     }
                     else {
                         auto distinct_values = std::set<std::string>{};
@@ -4920,6 +4960,12 @@ examples:
                                         ? format_runtime_hex(latest->value, static_cast<size_t>(latest->width_bytes))
                                         : std::string{"<varied>"};
                         row.value_variation_count = distinct_values.size();
+                        if (row.value_variation_count <= 1U) {
+                            mark_trace_exact();
+                        }
+                        else {
+                            mark_trace_sampled();
+                        }
                     }
                     row.width_bytes = row.width_bytes.has_value()
                                             ? row.width_bytes
@@ -4938,6 +4984,12 @@ examples:
                                     ? format_runtime_hex(latest->value, static_cast<size_t>(latest->width_bytes))
                                     : std::string{"<varied>"};
                     row.value_variation_count = distinct_values.size();
+                    if (row.value_variation_count <= 1U) {
+                        mark_trace_exact();
+                    }
+                    else {
+                        mark_trace_sampled();
+                    }
                     row.width_bytes = row.width_bytes.has_value()
                                             ? row.width_bytes
                                             : std::optional<size_t>{static_cast<size_t>(latest->width_bytes)};
@@ -5007,6 +5059,8 @@ examples:
                 if (row.observed_value.has_value()) {
                     lines.push_back("  observed_value={}"_format(*row.observed_value));
                 }
+                lines.push_back("  value_status={}"_format(internal::mem::to_string(row.observed_value_status)));
+                lines.push_back("  value_source={}"_format(internal::mem::to_string(row.observed_value_source)));
                 if (row.value_variation_count > 1U) {
                     lines.push_back("  value_variation_count={}"_format(row.value_variation_count));
                 }
@@ -5146,6 +5200,8 @@ examples:
                                                                    *row.runtime_address, 8U)}
                                                          : std::nullopt,
                                 .observed_value = row.observed_value,
+                                .value_status = std::string{internal::mem::to_string(row.observed_value_status)},
+                                .value_source = std::string{internal::mem::to_string(row.observed_value_source)},
                                 .value_variation_count = row.value_variation_count,
                                 .trace_samples = row.trace_samples});
             }
@@ -6582,8 +6638,8 @@ examples:
                 if (show_color && level.success && level.exit_code != 0) {
                     auto marker = " (exit_code="sv;
                     if (auto marker_pos = level_summary_line.find(marker); marker_pos != std::string::npos) {
-                        level_summary_line =
-                                colorize_asm_text_span(level_summary_line, marker_pos, level_summary_line.size(), palette.modified);
+                        level_summary_line = colorize_asm_text_span(
+                                level_summary_line, marker_pos, level_summary_line.size(), palette.modified);
                     }
                 }
                 os << "{}\n"_format(level_summary_line);
