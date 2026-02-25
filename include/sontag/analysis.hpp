@@ -151,6 +151,14 @@ namespace sontag {
         }
     }
 
+    struct analysis_import_context {
+        std::string mode{};
+        std::vector<std::filesystem::path> roots{};
+        std::vector<std::filesystem::path> files{};
+        std::vector<std::filesystem::path> main_files{};
+        std::optional<std::filesystem::path> entry{};
+    };
+
     struct analysis_request {
         std::filesystem::path clang_path{"clang++"};
         std::filesystem::path session_dir{};
@@ -174,6 +182,7 @@ namespace sontag {
         std::vector<std::filesystem::path> library_dirs{};
         std::vector<std::string> libraries{};
         std::vector<std::string> linker_args{};
+        std::optional<analysis_import_context> import_context{};
     };
 
     struct analysis_opcode_entry {

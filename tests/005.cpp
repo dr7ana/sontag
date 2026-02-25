@@ -39,6 +39,7 @@ namespace sontag::test { namespace detail {
     using internal::persisted_config;
     using internal::persisted_snapshots;
     using internal::snapshot_record;
+    using internal::transaction_kind;
 
     template <typename T>
     static T read_json_file(const fs::path& path) {
@@ -53,6 +54,15 @@ namespace sontag::test { namespace detail {
         auto ec = glz::read<glz::opts{.error_on_unknown_keys = false}>(value, text);
         REQUIRE_FALSE(ec);
         return value;
+    }
+
+    static std::string read_text_file(const fs::path& path) {
+        std::ifstream in{path};
+        REQUIRE(in.good());
+
+        std::ostringstream ss{};
+        ss << in.rdbuf();
+        return ss.str();
     }
 
     static void write_text_file(const fs::path& path, std::string_view text) {
@@ -192,6 +202,27 @@ namespace sontag::test { namespace detail {
         }
         std::ranges::sort(children);
         return children;
+    }
+
+    static std::vector<fs::path> find_files_named_recursive(const fs::path& root, std::string_view filename) {
+        std::error_code ec{};
+        if (!fs::exists(root, ec) || ec) {
+            return {};
+        }
+
+        std::vector<fs::path> matches{};
+        for (fs::recursive_directory_iterator it{root, fs::directory_options::skip_permission_denied, ec}, end;
+             it != end && !ec;
+             it.increment(ec)) {
+            if (!it->is_regular_file(ec) || ec) {
+                continue;
+            }
+            if (it->path().filename() == filename) {
+                matches.push_back(it->path());
+            }
+        }
+        std::ranges::sort(matches);
+        return matches;
     }
 
     static bool has_merkle_node_artifacts(const fs::path& root) {
@@ -1894,6 +1925,506 @@ namespace sontag::test {
         REQUIRE(persisted_cells.decl_cells.size() == 1U);
         CHECK(persisted_cells.exec_cells.empty());
         CHECK(persisted_cells.decl_cells[0].find("int baseline = 1;") != std::string::npos);
+    }
+
+    TEST_CASE("005: import rejects file path and requires directory roots", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_file_reject"};
+        auto source_path = temp.path / "single.cpp";
+        detail::write_text_file(source_path, "int main() { return 0; }\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {}\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.err.find(":import is directory-only; use :file/:declfile for single files") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        CHECK(persisted_cells.decl_cells.empty());
+        CHECK(persisted_cells.exec_cells.empty());
+    }
+
+    TEST_CASE("005: import auto-detects single in-scope main as app", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_auto_app"};
+        auto project_dir = temp.path / "project";
+        detail::fs::create_directories(project_dir);
+
+        auto main_path = project_dir / "main.cpp";
+        auto util_path = project_dir / "util.cpp";
+        detail::write_text_file(
+                main_path,
+                "int seed = 4;\n"
+                "int helper() { return seed + 1; }\n"
+                "int main() {\n"
+                "    int value = helper();\n"
+                "    return value;\n"
+                "}\n");
+        detail::write_text_file(util_path, "int bias = 3;\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {}\n:show all\n:quit\n"_format(project_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("mode=app") != std::string::npos);
+        CHECK(output.out.find("entry={}"_format(main_path.string())) != std::string::npos);
+        CHECK(output.out.find("int bias = 3;") != std::string::npos);
+        CHECK(output.out.find("int value = helper();") != std::string::npos);
+        CHECK(output.err.empty());
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE_FALSE(persisted_cells.decl_cells.empty());
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.exec_cells[0].find("int value = helper();") != std::string::npos);
+        REQUIRE(persisted_cells.transactions.size() == 1U);
+        CHECK(persisted_cells.transactions[0].kind == detail::transaction_kind::import);
+        REQUIRE(persisted_cells.transactions[0].import_record.has_value());
+        CHECK(persisted_cells.transactions[0].import_record->mode == "app");
+        CHECK(persisted_cells.transactions[0].import_record->entry == main_path.string());
+    }
+
+    TEST_CASE("005: import reports ambiguity when multiple mains are in scope", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_ambiguous_main"};
+        auto project_dir = temp.path / "project";
+        detail::fs::create_directories(project_dir);
+
+        detail::write_text_file(project_dir / "app_a.cpp", "int main() { return 1; }\n");
+        detail::write_text_file(project_dir / "app_b.cpp", "int main() { return 2; }\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {}\n:quit\n"_format(project_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.err.find("multiple main() functions found under import roots") != std::string::npos);
+        CHECK(output.err.find("entry <file>") != std::string::npos);
+        CHECK(output.err.find("library") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        CHECK(persisted_cells.decl_cells.empty());
+        CHECK(persisted_cells.exec_cells.empty());
+    }
+
+    TEST_CASE("005: import entry resolves ambiguous mains to selected file", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_entry_resolution"};
+        auto project_dir = temp.path / "project";
+        detail::fs::create_directories(project_dir);
+
+        auto app_a_path = project_dir / "app_a.cpp";
+        auto app_b_path = project_dir / "app_b.cpp";
+        auto lib_path = project_dir / "lib.hpp";
+        detail::write_text_file(app_a_path, "int main() { return 1; }\n");
+        detail::write_text_file(
+                app_b_path,
+                "int seed = 8;\n"
+                "int main() {\n"
+                "    return seed;\n"
+                "}\n");
+        detail::write_text_file(lib_path, "inline int imported_bias = 6;\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {} entry {}\n:show all\n:quit\n"_format(project_dir.string(), app_b_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("mode=app") != std::string::npos);
+        CHECK(output.out.find("entry={}"_format(app_b_path.string())) != std::string::npos);
+        CHECK(output.out.find("inline int imported_bias = 6;") != std::string::npos);
+        CHECK(output.out.find("int seed = 8;") != std::string::npos);
+        CHECK(output.out.find("return seed;") != std::string::npos);
+        CHECK(output.out.find("return 1;") == std::string::npos);
+        CHECK(output.err.empty());
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE_FALSE(persisted_cells.decl_cells.empty());
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.exec_cells[0].find("return seed;") != std::string::npos);
+        CHECK(persisted_cells.exec_cells[0].find("return 1;") == std::string::npos);
+    }
+
+    TEST_CASE("005: import library ignores main files and keeps non-main sources", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_library_mode"};
+        auto project_dir = temp.path / "project";
+        detail::fs::create_directories(project_dir);
+
+        detail::write_text_file(project_dir / "app_a.cpp", "int main() { return 1; }\n");
+        detail::write_text_file(project_dir / "app_b.cpp", "int main() { return 2; }\n");
+        detail::write_text_file(project_dir / "library.hpp", "inline int library_seed = 17;\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {} library\n:show all\n:quit\n"_format(project_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("mode=library") != std::string::npos);
+        CHECK(output.out.find("inline int library_seed = 17;") != std::string::npos);
+        CHECK(output.out.find("return 1;") == std::string::npos);
+        CHECK(output.out.find("return 2;") == std::string::npos);
+        CHECK(output.err.empty());
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.exec_cells.empty());
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        CHECK(persisted_cells.decl_cells[0].find("inline int library_seed = 17;") != std::string::npos);
+        REQUIRE(persisted_cells.transactions.size() == 1U);
+        CHECK(persisted_cells.transactions[0].kind == detail::transaction_kind::import);
+        REQUIRE(persisted_cells.transactions[0].import_record.has_value());
+        CHECK(persisted_cells.transactions[0].import_record->mode == "library");
+        CHECK_FALSE(persisted_cells.transactions[0].import_record->entry.has_value());
+    }
+
+    TEST_CASE("005: import library symbols omit synthetic main and keep library TUs", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_library_symbols"};
+        auto project_dir = temp.path / "project";
+        detail::fs::create_directories(project_dir);
+
+        detail::write_text_file(project_dir / "app_main.cpp", "int main() { return 42; }\n");
+        detail::write_text_file(
+                project_dir / "library.cpp",
+                "int square(int x) {\n"
+                "    return x * x;\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {} library\n:symbols\n:quit\n"_format(project_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("mode=library") != std::string::npos);
+        CHECK(output.out.find("square(int)") != std::string::npos);
+        CHECK(output.out.find("  [T] main\n") == std::string::npos);
+        CHECK(output.out.find("  [t] main\n") == std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: import symbols consume compile_commands include flags", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_compile_db_flags"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        detail::write_text_file(
+                src_dir / "mathlib.cpp",
+                "int square_with_bias(int x) {\n"
+                "    return x * x;\n"
+                "}\n"
+                "#ifdef ENABLE_EXTRA\n"
+                "int compile_db_only_symbol() {\n"
+                "    return 7;\n"
+                "}\n"
+                "#endif\n");
+
+        auto compile_db = std::string{};
+        compile_db.append("[\n");
+        compile_db.append("  {\n");
+        compile_db.append("    \"directory\": \"");
+        compile_db.append(project_dir.string());
+        compile_db.append("\",\n");
+        compile_db.append("    \"file\": \"src/mathlib.cpp\",\n");
+        compile_db.append(
+                "    \"arguments\": [\"clang++\", \"-std=c++23\", \"-DENABLE_EXTRA\", \"-c\", \"src/mathlib.cpp\", "
+                "\"-o\", "
+                "\"build/mathlib.o\"]\n");
+        compile_db.append("  }\n");
+        compile_db.append("]\n");
+        detail::write_text_file(project_dir / "compile_commands.json", compile_db);
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {} library\n:symbols\n:quit\n"_format(src_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("mode=library") != std::string::npos);
+        CHECK(output.out.find("compile_db_only_symbol()") != std::string::npos);
+        CHECK(output.err.empty());
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto snapshots =
+                detail::find_files_named_recursive(session_dir / "artifacts", "compile_commands.snapshot.json");
+        REQUIRE_FALSE(snapshots.empty());
+
+        auto has_expected_entry = false;
+        for (const auto& snapshot_path : snapshots) {
+            auto parsed = detail::read_json_file<std::vector<glz::generic>>(snapshot_path);
+            if (parsed.empty()) {
+                continue;
+            }
+            auto text = detail::read_text_file(snapshot_path);
+            if (text.find("src/mathlib.cpp") != std::string::npos && text.find("ENABLE_EXTRA") != std::string::npos) {
+                has_expected_entry = true;
+                break;
+            }
+        }
+        CHECK(has_expected_entry);
+    }
+
+    TEST_CASE("005: import symbols consume compile_commands command string", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_compile_db_command"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        detail::write_text_file(
+                src_dir / "cmd.cpp",
+                "int baseline_symbol(int x) {\n"
+                "    return x + 2;\n"
+                "}\n"
+                "#ifdef ENABLE_CMD_ONLY\n"
+                "int command_db_only_symbol() {\n"
+                "    return 11;\n"
+                "}\n"
+                "#endif\n");
+
+        auto compile_db = std::string{};
+        compile_db.append("[\n");
+        compile_db.append("  {\n");
+        compile_db.append("    \"directory\": \"");
+        compile_db.append(project_dir.string());
+        compile_db.append("\",\n");
+        compile_db.append("    \"file\": \"src/cmd.cpp\",\n");
+        compile_db.append("    \"command\": \"clang++ -std=c++23 -DENABLE_CMD_ONLY -c src/cmd.cpp -o build/cmd.o\"\n");
+        compile_db.append("  }\n");
+        compile_db.append("]\n");
+        detail::write_text_file(project_dir / "compile_commands.json", compile_db);
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {} library\n:symbols\n:quit\n"_format(src_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("mode=library") != std::string::npos);
+        CHECK(output.out.find("command_db_only_symbol()") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: import ir consumes compile_commands flags", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_ir_compile_db_flags"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        detail::write_text_file(
+                src_dir / "ir.cpp",
+                "int baseline_ir_symbol(int x) {\n"
+                "    return x + 3;\n"
+                "}\n"
+                "#ifdef ENABLE_IR_ONLY\n"
+                "extern \"C\" int ir_db_only_symbol() {\n"
+                "    return 77;\n"
+                "}\n"
+                "#endif\n");
+
+        auto compile_db = std::string{};
+        compile_db.append("[\n");
+        compile_db.append("  {\n");
+        compile_db.append("    \"directory\": \"");
+        compile_db.append(project_dir.string());
+        compile_db.append("\",\n");
+        compile_db.append("    \"file\": \"src/ir.cpp\",\n");
+        compile_db.append(
+                "    \"arguments\": [\"clang++\", \"-std=c++23\", \"-DENABLE_IR_ONLY\", \"-c\", \"src/ir.cpp\", "
+                "\"-o\", \"build/ir.o\"]\n");
+        compile_db.append("  }\n");
+        compile_db.append("]\n");
+        detail::write_text_file(project_dir / "compile_commands.json", compile_db);
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.output = output_mode::json;
+
+        auto script = ":import {} library\n:ir ir_db_only_symbol\n:quit\n"_format(src_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("ir_db_only_symbol") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: import asm consumes compile_commands flags", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_asm_compile_db_flags"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        detail::write_text_file(
+                src_dir / "dump.cpp",
+                "int baseline_dump_symbol(int x) {\n"
+                "    return x + 4;\n"
+                "}\n"
+                "#ifdef ENABLE_DUMP_ONLY\n"
+                "int dump_db_only_symbol() {\n"
+                "    return 101;\n"
+                "}\n"
+                "#endif\n");
+
+        auto compile_db = std::string{};
+        compile_db.append("[\n");
+        compile_db.append("  {\n");
+        compile_db.append("    \"directory\": \"");
+        compile_db.append(project_dir.string());
+        compile_db.append("\",\n");
+        compile_db.append("    \"file\": \"src/dump.cpp\",\n");
+        compile_db.append(
+                "    \"arguments\": [\"clang++\", \"-std=c++23\", \"-DENABLE_DUMP_ONLY\", \"-c\", \"src/dump.cpp\", "
+                "\"-o\", \"build/dump.o\"]\n");
+        compile_db.append("  }\n");
+        compile_db.append("]\n");
+        detail::write_text_file(project_dir / "compile_commands.json", compile_db);
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {} library\n:asm dump_db_only_symbol\n:quit\n"_format(src_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("mov  eax, 101") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: import symbols fall back to cmake generated compile_commands", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_cmake_compile_db"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        detail::write_text_file(
+                src_dir / "core.cpp",
+                "int baseline_symbol() {\n"
+                "    return 1;\n"
+                "}\n"
+                "#ifdef ENABLE_CMAKE_ONLY\n"
+                "int cmake_generated_symbol() {\n"
+                "    return 13;\n"
+                "}\n"
+                "#endif\n");
+        detail::write_text_file(
+                project_dir / "CMakeLists.txt",
+                "cmake_minimum_required(VERSION 3.16)\n"
+                "project(sontag_import_cmake LANGUAGES CXX)\n"
+                "add_library(import_core src/core.cpp)\n"
+                "target_compile_definitions(import_core PRIVATE ENABLE_CMAKE_ONLY=1)\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {} library\n:symbols\n:quit\n"_format(src_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("cmake_generated_symbol()") != std::string::npos);
+        CHECK(output.err.empty());
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto generated_compile_dbs =
+                detail::find_files_named_recursive(session_dir / "artifacts", "compile_commands.json");
+        auto has_cmake_generated_db = false;
+        for (const auto& path : generated_compile_dbs) {
+            if (path.string().find("cmake_compdb") != std::string::npos) {
+                has_cmake_generated_db = true;
+                break;
+            }
+        }
+        CHECK(has_cmake_generated_db);
+    }
+
+    TEST_CASE("005: reset import removes matching directory import transaction", "[005][session][reset_import]") {
+        detail::temp_dir temp{"sontag_reset_import"};
+        auto project_dir = temp.path / "project";
+        detail::fs::create_directories(project_dir);
+
+        auto main_path = project_dir / "main.cpp";
+        detail::write_text_file(
+                main_path,
+                "int seed = 7;\n"
+                "int main() {\n"
+                "    return seed;\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {}\n:decl int tail = 42;\n:reset import {}\n:show all\n:quit\n"_format(
+                project_dir.string(), project_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("stored decl #2 -> state: valid") != std::string::npos);
+        CHECK(output.out.find("cleared import roots=1") != std::string::npos);
+        CHECK(output.out.find("int tail = 42;") != std::string::npos);
+        CHECK(output.out.find("int seed = 7;") == std::string::npos);
+        CHECK(output.out.find("return seed;") == std::string::npos);
+        CHECK(output.err.empty());
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.decl_cells.size() == 1U);
+        CHECK(persisted_cells.exec_cells.empty());
+        CHECK(persisted_cells.decl_cells[0].find("int tail = 42;") != std::string::npos);
+    }
+
+    TEST_CASE("005: import roots scope excludes mains outside selected directories", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_root_scope"};
+        auto root_dir = temp.path / "project";
+        auto src_dir = root_dir / "src";
+        auto include_dir = root_dir / "include";
+        auto app_dir = root_dir / "app";
+        auto test_dir = root_dir / "test";
+        detail::fs::create_directories(src_dir);
+        detail::fs::create_directories(include_dir);
+        detail::fs::create_directories(app_dir);
+        detail::fs::create_directories(test_dir);
+
+        detail::write_text_file(src_dir / "library.cpp", "int library_value = 21;\n");
+        detail::write_text_file(include_dir / "library.hpp", "inline int include_value = 5;\n");
+        detail::write_text_file(app_dir / "main.cpp", "int main() { return 100; }\n");
+        detail::write_text_file(test_dir / "test_main.cpp", "int main() { return 200; }\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {} {}\n:show all\n:quit\n"_format(src_dir.string(), include_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("mode=library") != std::string::npos);
+        CHECK(output.out.find("int library_value = 21;") != std::string::npos);
+        CHECK(output.out.find("inline int include_value = 5;") != std::string::npos);
+        CHECK(output.out.find("return 100;") == std::string::npos);
+        CHECK(output.out.find("return 200;") == std::string::npos);
+        CHECK(output.err.empty());
     }
 
     TEST_CASE("005: openfile launches editor then imports file", "[005][session][openfile]") {

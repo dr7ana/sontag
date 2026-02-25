@@ -60,12 +60,19 @@ namespace sontag::cli { namespace detail {
 
     using internal::cell_kind;
     using internal::cell_record;
+    using internal::import_transaction_record;
     using internal::mutation_transaction;
     using internal::persisted_cells;
     using internal::persisted_config;
     using internal::persisted_snapshots;
     using internal::snapshot_record;
     using internal::transaction_kind;
+
+    struct ast_probe_result;
+
+    static std::optional<std::string> normalize_source_key(const fs::path& path);
+    static constexpr ast_probe_result probe_driver_ast(
+            const startup_config& cfg, const fs::path& source_path, std::string_view driver_name);
 
     static void apply_build_tool_paths(startup_config& cfg) {
         cfg.clang_path = fs::path{internal::platform::tool::clangxx_path};
@@ -80,6 +87,8 @@ namespace sontag::cli { namespace detail {
         uint64_t next_cell_id{1U};
         std::vector<mutation_transaction> transactions{};
         uint64_t next_tx_id{1U};
+        std::optional<import_transaction_record> active_import{};
+        std::optional<uint64_t> active_import_tx_id{};
         persisted_snapshots snapshot_data{};
         fs::path session_dir{};
         fs::path config_path{};
@@ -239,6 +248,45 @@ namespace sontag::cli { namespace detail {
         std::vector<std::string> decl_cells{};
         std::vector<std::string> exec_cells{};
     };
+
+    enum class import_mode : uint8_t { app, library };
+
+    struct import_command_options {
+        std::vector<fs::path> roots{};
+        std::optional<fs::path> entry{};
+        bool force_library{false};
+    };
+
+    struct import_load_plan {
+        import_mode mode{import_mode::library};
+        std::vector<fs::path> roots{};
+        std::vector<fs::path> files{};
+        std::vector<fs::path> main_files{};
+        std::optional<fs::path> entry{};
+        std::vector<std::string> decl_cells{};
+        std::vector<std::string> exec_cells{};
+    };
+
+    static import_transaction_record make_import_transaction_record(const import_load_plan& plan) {
+        auto record = import_transaction_record{};
+        record.mode = plan.mode == import_mode::app ? "app" : "library";
+        record.roots.reserve(plan.roots.size());
+        record.files.reserve(plan.files.size());
+        record.main_files.reserve(plan.main_files.size());
+        for (const auto& path : plan.roots) {
+            record.roots.push_back(path.string());
+        }
+        for (const auto& path : plan.files) {
+            record.files.push_back(path.string());
+        }
+        for (const auto& path : plan.main_files) {
+            record.main_files.push_back(path.string());
+        }
+        if (plan.entry) {
+            record.entry = plan.entry->string();
+        }
+        return record;
+    }
 
     struct ast_probe_result {
         bool success{true};
@@ -774,6 +822,243 @@ namespace sontag::cli {
             return path;
         }
 
+        static std::optional<std::vector<std::string>> tokenize_command_arguments(
+                std::string_view command_name, std::string_view raw_argument, std::ostream& err) {
+            auto args = trim_view(raw_argument);
+            if (args.empty()) {
+                return std::vector<std::string>{};
+            }
+
+            auto tokens = std::vector<std::string>{};
+            auto current = std::string{};
+            auto in_single_quote = false;
+            auto in_double_quote = false;
+
+            auto flush_current = [&]() {
+                if (!current.empty()) {
+                    tokens.push_back(current);
+                    current.clear();
+                }
+            };
+
+            for (char c : args) {
+                if (in_single_quote) {
+                    if (c == '\'') {
+                        in_single_quote = false;
+                        continue;
+                    }
+                    current.push_back(c);
+                    continue;
+                }
+
+                if (in_double_quote) {
+                    if (c == '"') {
+                        in_double_quote = false;
+                        continue;
+                    }
+                    current.push_back(c);
+                    continue;
+                }
+
+                if (c == '\'') {
+                    in_single_quote = true;
+                    continue;
+                }
+                if (c == '"') {
+                    in_double_quote = true;
+                    continue;
+                }
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                    flush_current();
+                    continue;
+                }
+                current.push_back(c);
+            }
+
+            if (in_single_quote || in_double_quote) {
+                err << "invalid {}, unterminated quoted argument\n"_format(command_name);
+                return std::nullopt;
+            }
+
+            flush_current();
+            return tokens;
+        }
+
+        static bool path_is_within_root(const fs::path& path, const fs::path& root) {
+            auto relative = path.lexically_relative(root);
+            if (relative.empty()) {
+                return false;
+            }
+            for (const auto& component : relative) {
+                if (component == "..") {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static std::string lowercase_ascii(std::string text) {
+            std::ranges::transform(
+                    text, text.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            return text;
+        }
+
+        static std::string normalized_extension(const fs::path& path) {
+            return lowercase_ascii(path.extension().string());
+        }
+
+        static bool is_import_source_file(const fs::path& path) {
+            static const auto source_extensions =
+                    std::unordered_set<std::string>{".c", ".cc", ".cp", ".cpp", ".cxx", ".c++", ".cxxm"};
+            return source_extensions.contains(normalized_extension(path));
+        }
+
+        static bool is_import_candidate_file(const fs::path& path) {
+            static const auto candidate_extensions = std::unordered_set<std::string>{
+                    ".c",
+                    ".cc",
+                    ".cp",
+                    ".cpp",
+                    ".cxx",
+                    ".c++",
+                    ".cxxm",
+                    ".h",
+                    ".hh",
+                    ".hpp",
+                    ".hxx",
+                    ".h++",
+                    ".ipp",
+                    ".inl",
+                    ".inc",
+                    ".tcc"};
+            return candidate_extensions.contains(normalized_extension(path));
+        }
+
+        static std::optional<std::vector<fs::path>> normalize_import_roots(
+                std::string_view command_name, std::vector<fs::path> roots, std::ostream& err) {
+            if (roots.empty()) {
+                err << "invalid {}, expected at least one directory\n"_format(command_name);
+                return std::nullopt;
+            }
+
+            auto deduped_roots = std::vector<fs::path>{};
+            auto seen = std::unordered_set<std::string>{};
+            deduped_roots.reserve(roots.size());
+            for (const auto& root : roots) {
+                std::error_code ec{};
+                if (!fs::exists(root, ec) || ec) {
+                    err << "directory not found: {}\n"_format(root.string());
+                    return std::nullopt;
+                }
+                if (!fs::is_directory(root, ec) || ec) {
+                    if (command_name == ":import"sv) {
+                        err << ":import is directory-only; use :file/:declfile for single files\n";
+                    }
+                    else {
+                        err << "path is not a directory: {}\n"_format(root.string());
+                    }
+                    return std::nullopt;
+                }
+
+                auto normalized = normalize_source_key(root);
+                if (!normalized) {
+                    err << "failed to normalize directory: {}\n"_format(root.string());
+                    return std::nullopt;
+                }
+                if (seen.insert(*normalized).second) {
+                    deduped_roots.emplace_back(*normalized);
+                }
+            }
+            std::ranges::sort(deduped_roots);
+            return deduped_roots;
+        }
+
+        static std::string make_import_source_key(std::span<const fs::path> roots) {
+            auto components = std::vector<std::string>{};
+            components.reserve(roots.size());
+            for (const auto& root : roots) {
+                auto normalized = normalize_source_key(root);
+                if (normalized) {
+                    components.push_back(*normalized);
+                }
+            }
+            std::ranges::sort(components);
+            components.erase(std::unique(components.begin(), components.end()), components.end());
+
+            auto key = std::string{"import:"};
+            for (size_t i = 0U; i < components.size(); ++i) {
+                if (i > 0U) {
+                    key.append("|");
+                }
+                key.append(components[i]);
+            }
+            return key;
+        }
+
+        static std::optional<std::vector<fs::path>> discover_import_files(
+                std::span<const fs::path> roots, std::ostream& err) {
+            auto files_by_key = std::unordered_map<std::string, fs::path>{};
+            for (const auto& root : roots) {
+                std::error_code ec{};
+                for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+                     it != end;
+                     it.increment(ec)) {
+                    if (ec) {
+                        ec.clear();
+                        continue;
+                    }
+
+                    std::error_code is_file_ec{};
+                    if (!it->is_regular_file(is_file_ec) || is_file_ec) {
+                        continue;
+                    }
+                    if (!is_import_candidate_file(it->path())) {
+                        continue;
+                    }
+
+                    auto normalized = normalize_source_key(it->path());
+                    if (!normalized) {
+                        err << "failed to normalize file path: {}\n"_format(it->path().string());
+                        return std::nullopt;
+                    }
+                    files_by_key.insert_or_assign(*normalized, fs::path{*normalized});
+                }
+            }
+
+            auto files = std::vector<fs::path>{};
+            files.reserve(files_by_key.size());
+            for (const auto& [_, file_path] : files_by_key) {
+                files.push_back(file_path);
+            }
+            std::ranges::sort(files);
+            return files;
+        }
+
+        static bool file_contains_main_definition(const startup_config& cfg, const fs::path& source_path) {
+            auto main_probe = probe_driver_ast(cfg, source_path, "main"sv);
+            if (main_probe.success) {
+                return main_probe.found;
+            }
+
+            // Fallback for sources that fail AST probing (for example, incomplete include paths).
+            try {
+                std::ifstream in{source_path};
+                if (!in.good()) {
+                    return false;
+                }
+                std::ostringstream ss{};
+                ss << in.rdbuf();
+                if (!in.good() && !in.eof()) {
+                    return false;
+                }
+                auto source_text = ss.str();
+                return source_text.find("main(") != std::string::npos ||
+                       source_text.find(" main (") != std::string::npos;
+            } catch (...) {
+                return false;
+            }
+        }
+
         static std::string read_fd_all(int fd) {
             std::string output{};
             char buffer[4096]{};
@@ -1230,6 +1515,223 @@ namespace sontag::cli {
             return plan;
         }
 
+        static std::optional<import_command_options> parse_import_command_options(
+                std::string_view raw_argument, std::ostream& err) {
+            auto tokens = tokenize_command_arguments(":import"sv, raw_argument, err);
+            if (!tokens) {
+                return std::nullopt;
+            }
+            if (tokens->empty()) {
+                err << "invalid :import, expected one or more directory paths\n";
+                return std::nullopt;
+            }
+
+            auto options = import_command_options{};
+            auto parsing_roots = true;
+            for (size_t i = 0U; i < tokens->size();) {
+                auto token = trim_view((*tokens)[i]);
+                if (token.empty()) {
+                    ++i;
+                    continue;
+                }
+
+                if (parsing_roots && token != "entry"sv && token != "library"sv) {
+                    auto root = parse_path_argument(":import"sv, token, err);
+                    if (!root) {
+                        return std::nullopt;
+                    }
+                    options.roots.push_back(*root);
+                    ++i;
+                    continue;
+                }
+
+                parsing_roots = false;
+                if (token == "entry"sv) {
+                    if (options.force_library) {
+                        err << "invalid :import, cannot combine entry with library modifier\n";
+                        return std::nullopt;
+                    }
+                    if (options.entry) {
+                        err << "invalid :import, entry may be specified at most once\n";
+                        return std::nullopt;
+                    }
+                    if (i + 1U >= tokens->size()) {
+                        err << "invalid :import, expected file path after entry\n";
+                        return std::nullopt;
+                    }
+                    auto entry = parse_path_argument(":import entry"sv, (*tokens)[i + 1U], err);
+                    if (!entry) {
+                        return std::nullopt;
+                    }
+                    options.entry = *entry;
+                    i += 2U;
+                    continue;
+                }
+
+                if (token == "library"sv) {
+                    if (options.entry) {
+                        err << "invalid :import, cannot combine library with entry modifier\n";
+                        return std::nullopt;
+                    }
+                    options.force_library = true;
+                    ++i;
+                    if (i < tokens->size()) {
+                        err << "invalid :import, library must be the last token\n";
+                        return std::nullopt;
+                    }
+                    continue;
+                }
+
+                err << "invalid :import, expected optional modifiers: entry <file> | library\n";
+                return std::nullopt;
+            }
+
+            if (options.roots.empty()) {
+                err << "invalid :import, expected one or more directory paths\n";
+                return std::nullopt;
+            }
+            return options;
+        }
+
+        static std::optional<import_load_plan> build_import_load_plan(
+                const startup_config& cfg, import_command_options options, std::ostream& err) {
+            auto normalized_roots = normalize_import_roots(":import"sv, std::move(options.roots), err);
+            if (!normalized_roots) {
+                return std::nullopt;
+            }
+
+            auto files = discover_import_files(*normalized_roots, err);
+            if (!files) {
+                return std::nullopt;
+            }
+            if (files->empty()) {
+                err << "no importable files found under provided directories\n";
+                return std::nullopt;
+            }
+
+            auto main_files = std::vector<fs::path>{};
+            main_files.reserve(files->size());
+            for (const auto& file_path : *files) {
+                if (!is_import_source_file(file_path)) {
+                    continue;
+                }
+                if (file_contains_main_definition(cfg, file_path)) {
+                    main_files.push_back(file_path);
+                }
+            }
+            std::ranges::sort(main_files);
+
+            auto plan = import_load_plan{};
+            plan.roots = *normalized_roots;
+            plan.files = *files;
+            plan.main_files = main_files;
+
+            if (options.entry) {
+                std::error_code ec{};
+                if (!fs::exists(*options.entry, ec) || ec || !fs::is_regular_file(*options.entry, ec) || ec) {
+                    err << "entry file not found: {}\n"_format(options.entry->string());
+                    return std::nullopt;
+                }
+
+                auto normalized_entry = normalize_source_key(*options.entry);
+                if (!normalized_entry) {
+                    err << "failed to normalize entry file path: {}\n"_format(options.entry->string());
+                    return std::nullopt;
+                }
+                auto entry_path = fs::path{*normalized_entry};
+
+                auto within_roots = std::ranges::any_of(plan.roots, [&entry_path](const fs::path& root) {
+                    return path_is_within_root(entry_path, root);
+                });
+                if (!within_roots) {
+                    err << "invalid :import, entry must be under one of the imported directories\n";
+                    return std::nullopt;
+                }
+                if (!file_contains_main_definition(cfg, entry_path)) {
+                    err << "invalid :import, entry file does not define main(): {}\n"_format(entry_path.string());
+                    return std::nullopt;
+                }
+
+                plan.mode = import_mode::app;
+                plan.entry = std::move(entry_path);
+            }
+            else if (options.force_library) {
+                plan.mode = import_mode::library;
+            }
+            else if (main_files.empty()) {
+                plan.mode = import_mode::library;
+            }
+            else if (main_files.size() == 1U) {
+                plan.mode = import_mode::app;
+                plan.entry = main_files.front();
+            }
+            else {
+                err << "multiple main() functions found under import roots; resolve with one of:\n";
+                err << "  :import <dir> [<dir> ...] entry <file>\n";
+                err << "  :import <dir> [<dir> ...] library\n";
+                err << "candidates:\n";
+                for (const auto& main_file : main_files) {
+                    err << "  - {}\n"_format(main_file.string());
+                }
+                return std::nullopt;
+            }
+
+            auto main_file_keys = std::unordered_set<std::string>{};
+            for (const auto& main_file : main_files) {
+                if (auto key = normalize_source_key(main_file)) {
+                    main_file_keys.insert(*key);
+                }
+            }
+
+            auto entry_key = std::optional<std::string>{};
+            if (plan.entry) {
+                entry_key = normalize_source_key(*plan.entry);
+            }
+
+            for (const auto& file_path : plan.files) {
+                auto file_key = normalize_source_key(file_path);
+                if (!file_key) {
+                    err << "failed to normalize file path: {}\n"_format(file_path.string());
+                    return std::nullopt;
+                }
+
+                auto is_main_file = main_file_keys.contains(*file_key);
+                if (plan.mode == import_mode::library && is_main_file) {
+                    continue;
+                }
+
+                if (plan.mode == import_mode::app && entry_key && *file_key == *entry_key) {
+                    auto entry_plan = build_file_load_plan(cfg, file_path, err);
+                    if (!entry_plan) {
+                        return std::nullopt;
+                    }
+                    for (auto& cell : entry_plan->decl_cells) {
+                        plan.decl_cells.push_back(std::move(cell));
+                    }
+                    for (auto& cell : entry_plan->exec_cells) {
+                        plan.exec_cells.push_back(std::move(cell));
+                    }
+                    continue;
+                }
+
+                if (plan.mode == import_mode::app && is_main_file) {
+                    continue;
+                }
+
+                auto content = read_text_file(file_path);
+                if (!trim_view(content).empty()) {
+                    plan.decl_cells.push_back(std::move(content));
+                }
+            }
+
+            if (plan.decl_cells.empty() && plan.exec_cells.empty()) {
+                err << "import produced no loadable cells; check selected roots and modifiers\n";
+                return std::nullopt;
+            }
+
+            return plan;
+        }
+
         static constexpr void update_depth(int& depth, int delta) {
             depth += delta;
             if (depth < 0) {
@@ -1541,6 +2043,8 @@ namespace sontag::cli {
 
         static void clear_transactions(repl_state& state) {
             state.transactions.clear();
+            state.active_import = std::nullopt;
+            state.active_import_tx_id = std::nullopt;
         }
 
         static void add_cell_with_id(repl_state& state, uint64_t cell_id, cell_kind kind, std::string text) {
@@ -1582,19 +2086,35 @@ namespace sontag::cli {
                 repl_state& state,
                 transaction_kind kind,
                 std::optional<std::string> source_key,
-                std::vector<uint64_t> cell_ids) {
+                std::vector<uint64_t> cell_ids,
+                std::optional<import_transaction_record> import_record = std::nullopt) {
             auto tx_id = state.next_tx_id++;
             state.transactions.push_back(
                     mutation_transaction{
                             .tx_id = tx_id,
                             .kind = kind,
                             .source_key = std::move(source_key),
-                            .cell_ids = std::move(cell_ids)});
+                            .cell_ids = std::move(cell_ids),
+                            .import_record = std::move(import_record)});
             return tx_id;
         }
 
         static constexpr bool transaction_kind_is_import(transaction_kind kind) noexcept {
-            return kind == transaction_kind::file || kind == transaction_kind::declfile;
+            return kind == transaction_kind::file || kind == transaction_kind::declfile ||
+                   kind == transaction_kind::import;
+        }
+
+        static void refresh_active_import_from_transactions(repl_state& state) {
+            state.active_import = std::nullopt;
+            state.active_import_tx_id = std::nullopt;
+            for (auto it = state.transactions.rbegin(); it != state.transactions.rend(); ++it) {
+                if (it->kind != transaction_kind::import || !it->import_record) {
+                    continue;
+                }
+                state.active_import = it->import_record;
+                state.active_import_tx_id = it->tx_id;
+                return;
+            }
         }
 
         static std::optional<std::string> normalize_source_key(const fs::path& path) {
@@ -2039,6 +2559,7 @@ namespace sontag::cli {
                 else {
                     synthesize_transactions_from_cells(state);
                 }
+                refresh_active_import_from_transactions(state);
             }
 
             persist_current_snapshot(state);
@@ -2710,6 +3231,9 @@ namespace sontag::cli {
   :decl <code>
   :declfile <path>
   :file <path>
+  :import <dir> [<dir> ...]
+  :import <dir> [<dir> ...] entry <file>
+  :import <dir> [<dir> ...] library
   :openfile <path>
   :config
   :config <category>
@@ -2719,6 +3243,7 @@ namespace sontag::cli {
   :reset last
   :reset snapshots
   :reset file <path>
+  :reset import <dir> [<dir> ...]
   :mark <name>
   :snapshots
   :asm [symbol|@last] (default: main)
@@ -2744,12 +3269,16 @@ examples:
   :decl struct point { int x; int y; };
   :declfile examples/common.hpp
   :file examples/program.cpp
+  :import examples/src examples/include
+  :import examples/src entry examples/src/main.cpp
+  :import examples/src library
   :openfile examples/program.cpp
   :config
   :config build
   :config build.opt=O3
   :config reset
   :reset file examples/program.cpp
+  :reset import examples/src examples/include
   :reset snapshots
   :show all
   :symbols
@@ -2818,6 +3347,31 @@ examples:
             return false;
         }
 
+        static std::optional<analysis_import_context> make_analysis_import_context(const repl_state& state) {
+            if (!state.active_import) {
+                return std::nullopt;
+            }
+
+            auto context = analysis_import_context{};
+            context.mode = state.active_import->mode;
+            context.roots.reserve(state.active_import->roots.size());
+            context.files.reserve(state.active_import->files.size());
+            context.main_files.reserve(state.active_import->main_files.size());
+            for (const auto& root : state.active_import->roots) {
+                context.roots.emplace_back(root);
+            }
+            for (const auto& file : state.active_import->files) {
+                context.files.emplace_back(file);
+            }
+            for (const auto& main_file : state.active_import->main_files) {
+                context.main_files.emplace_back(main_file);
+            }
+            if (state.active_import->entry) {
+                context.entry = fs::path{*state.active_import->entry};
+            }
+            return context;
+        }
+
         static analysis_request make_analysis_request(const startup_config& cfg, const repl_state& state) {
             analysis_request request{};
             request.clang_path = cfg.clang_path;
@@ -2841,6 +3395,7 @@ examples:
             request.library_dirs = cfg.library_dirs;
             request.libraries = cfg.libraries;
             request.linker_args = cfg.linker_args;
+            request.import_context = make_analysis_import_context(state);
             if (source_needs_pthread(request.decl_cells) || source_needs_pthread(request.exec_cells)) {
                 if (std::ranges::find(request.libraries, "pthread") == request.libraries.end()) {
                     request.libraries.emplace_back("pthread");
@@ -2908,6 +3463,7 @@ examples:
                 std::vector<std::string> exec_cells,
                 transaction_kind transaction_kind_value,
                 std::optional<std::string> source_key,
+                std::optional<import_transaction_record> import_record,
                 std::string_view success_message,
                 std::ostream& out,
                 std::ostream& err) {
@@ -2938,7 +3494,16 @@ examples:
             for (auto& cell : exec_cells) {
                 cell_ids.push_back(append_cell(state, std::move(cell), cell_kind::exec));
             }
-            (void)append_transaction(state, transaction_kind_value, std::move(source_key), std::move(cell_ids));
+            auto tx_id = append_transaction(
+                    state,
+                    transaction_kind_value,
+                    std::move(source_key),
+                    std::move(cell_ids),
+                    std::move(import_record));
+            if (transaction_kind_value == transaction_kind::import) {
+                state.active_import_tx_id = tx_id;
+                state.active_import = state.transactions.back().import_record;
+            }
             persist_cells(state);
             persist_current_snapshot(state);
             out << success_message << " -> state: valid\n";
@@ -2976,6 +3541,7 @@ examples:
                     std::move(decl_cells),
                     std::move(exec_cells),
                     transaction_kind_value,
+                    std::nullopt,
                     std::nullopt,
                     success_message,
                     out,
@@ -3054,6 +3620,7 @@ examples:
             auto tx_it = state.transactions.begin();
             std::advance(tx_it, static_cast<long>(transaction_index));
             state.transactions.erase(tx_it);
+            refresh_active_import_from_transactions(state);
             persist_cells(state);
             persist_current_snapshot(state);
             out << success_message_prefix << " (cleared decl={}, exec={})"_format(counts.decl, counts.exec)
@@ -3112,6 +3679,64 @@ examples:
             return true;
         }
 
+        static bool clear_import_transaction(
+                std::string_view raw_argument,
+                startup_config& cfg,
+                repl_state& state,
+                std::ostream& out,
+                std::ostream& err) {
+            auto tokens = tokenize_command_arguments(":reset import"sv, raw_argument, err);
+            if (!tokens) {
+                return true;
+            }
+            if (tokens->empty()) {
+                err << "invalid :reset import, expected one or more directory paths\n";
+                return true;
+            }
+
+            auto roots = std::vector<fs::path>{};
+            roots.reserve(tokens->size());
+            for (const auto& token : *tokens) {
+                if (trim_view(token) == "entry"sv || trim_view(token) == "library"sv) {
+                    err << "invalid :reset import, expected only directory paths\n";
+                    return true;
+                }
+                auto root = parse_path_argument(":reset import"sv, token, err);
+                if (!root) {
+                    return true;
+                }
+                roots.push_back(*root);
+            }
+
+            auto normalized_roots = normalize_import_roots(":reset import"sv, std::move(roots), err);
+            if (!normalized_roots) {
+                return true;
+            }
+
+            auto source_key = make_import_source_key(*normalized_roots);
+            auto found = std::optional<size_t>{};
+            for (size_t i = state.transactions.size(); i > 0U; --i) {
+                auto index = i - 1U;
+                auto& tx = state.transactions[index];
+                if (tx.kind != transaction_kind::import || !tx.source_key) {
+                    continue;
+                }
+                if (*tx.source_key == source_key) {
+                    found = index;
+                    break;
+                }
+            }
+
+            if (!found) {
+                out << "no matching import found for provided directories\n";
+                return true;
+            }
+
+            auto message = "cleared import roots={}"_format(normalized_roots->size());
+            (void)remove_transaction_by_index(cfg, state, *found, message, out, err);
+            return true;
+        }
+
         static bool process_declfile_command(std::string_view cmd, startup_config& cfg, repl_state& state) {
             auto arg = command_argument(cmd, ":declfile"sv);
             if (!arg) {
@@ -3140,6 +3765,7 @@ examples:
                         {},
                         transaction_kind::declfile,
                         normalize_source_key(*path),
+                        std::nullopt,
                         success_message,
                         std::cout,
                         std::cerr);
@@ -3165,6 +3791,7 @@ examples:
                     std::move(plan->exec_cells),
                     transaction_kind::file,
                     normalize_source_key(path),
+                    std::nullopt,
                     success_message,
                     std::cout,
                     std::cerr);
@@ -3188,6 +3815,46 @@ examples:
                 std::cerr << "file load error: {}\n"_format(e.what());
             }
 
+            return true;
+        }
+
+        static bool process_import_command(std::string_view cmd, startup_config& cfg, repl_state& state) {
+            auto arg = command_argument(cmd, ":import"sv);
+            if (!arg) {
+                return false;
+            }
+
+            auto options = parse_import_command_options(*arg, std::cerr);
+            if (!options) {
+                return true;
+            }
+
+            auto plan = build_import_load_plan(cfg, std::move(*options), std::cerr);
+            if (!plan) {
+                return true;
+            }
+
+            auto success_message = std::string{};
+            if (plan->mode == import_mode::app && plan->entry) {
+                success_message = "imported directories (roots={}, files={}, mains={}, mode=app, entry={})"_format(
+                        plan->roots.size(), plan->files.size(), plan->main_files.size(), plan->entry->string());
+            }
+            else {
+                success_message = "imported directories (roots={}, files={}, mains={}, mode=library)"_format(
+                        plan->roots.size(), plan->files.size(), plan->main_files.size());
+            }
+
+            (void)append_validated_transaction(
+                    cfg,
+                    state,
+                    std::move(plan->decl_cells),
+                    std::move(plan->exec_cells),
+                    transaction_kind::import,
+                    make_import_source_key(plan->roots),
+                    make_import_transaction_record(*plan),
+                    success_message,
+                    std::cout,
+                    std::cerr);
             return true;
         }
 
@@ -8296,6 +8963,9 @@ examples:
             if (process_file_command(cmd, cfg, state)) {
                 return true;
             }
+            if (process_import_command(cmd, cfg, state)) {
+                return true;
+            }
             if (process_openfile_command(cmd, cfg, state)) {
                 return true;
             }
@@ -8328,8 +8998,16 @@ examples:
                     (void)clear_file_transaction(*file_arg, cfg, state, std::cout, std::cerr);
                     return true;
                 }
+                if (auto import_arg = command_argument(*reset_arg, "import"sv)) {
+                    if (import_arg->empty()) {
+                        std::cerr << "invalid :reset import, expected one or more directory paths\n";
+                        return true;
+                    }
+                    (void)clear_import_transaction(*import_arg, cfg, state, std::cout, std::cerr);
+                    return true;
+                }
 
-                std::cerr << "invalid :reset, expected last|snapshots|file <path>\n";
+                std::cerr << "invalid :reset, expected last|snapshots|file <path>|import <dirs...>\n";
                 return true;
             }
             if (cmd == ":snapshots"sv) {

@@ -10,7 +10,7 @@
 namespace sontag::internal {
 
     enum class cell_kind : uint8_t { decl, exec };
-    enum class transaction_kind : uint8_t { exec, decl, file, declfile };
+    enum class transaction_kind : uint8_t { exec, decl, file, declfile, import };
 
     struct cell_record {
         uint64_t cell_id{};
@@ -18,11 +18,20 @@ namespace sontag::internal {
         std::string text{};
     };
 
+    struct import_transaction_record {
+        std::string mode{};
+        std::vector<std::string> roots{};
+        std::vector<std::string> files{};
+        std::vector<std::string> main_files{};
+        std::optional<std::string> entry{};
+    };
+
     struct mutation_transaction {
         uint64_t tx_id{};
         transaction_kind kind{transaction_kind::exec};
         std::optional<std::string> source_key{};
         std::vector<uint64_t> cell_ids{};
+        std::optional<import_transaction_record> import_record{};
     };
 
     struct persisted_config {
@@ -145,10 +154,35 @@ namespace glz {
     };
 
     template <>
+    struct meta<sontag::internal::import_transaction_record> {
+        using T = sontag::internal::import_transaction_record;
+        static constexpr auto value =
+                object("mode",
+                       &T::mode,
+                       "roots",
+                       &T::roots,
+                       "files",
+                       &T::files,
+                       "main_files",
+                       &T::main_files,
+                       "entry",
+                       &T::entry);
+    };
+
+    template <>
     struct meta<sontag::internal::mutation_transaction> {
         using T = sontag::internal::mutation_transaction;
         static constexpr auto value =
-                object("tx_id", &T::tx_id, "kind", &T::kind, "source_key", &T::source_key, "cell_ids", &T::cell_ids);
+                object("tx_id",
+                       &T::tx_id,
+                       "kind",
+                       &T::kind,
+                       "source_key",
+                       &T::source_key,
+                       "cell_ids",
+                       &T::cell_ids,
+                       "import_record",
+                       &T::import_record);
     };
 
     template <>

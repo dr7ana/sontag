@@ -15,13 +15,13 @@ namespace sontag::cli { namespace detail {
 
     using namespace std::string_view_literals;
 
-    static std::array<const char*, 23> command_completions{
-            ":help",   ":clear", ":show",    ":symbols",   ":decl", ":declfile", ":file", ":openfile",
-            ":config", ":reset", ":mark",    ":snapshots", ":asm",  ":mem",      ":ir",   ":diag",
-            ":mca",    ":delta", ":inspect", ":graph",     ":quit", ":q",        nullptr};
+    static std::array<const char*, 24> command_completions{
+            ":help",     ":clear",  ":show",  ":symbols", ":decl",      ":declfile", ":file", ":import",
+            ":openfile", ":config", ":reset", ":mark",    ":snapshots", ":asm",      ":mem",  ":ir",
+            ":diag",     ":mca",    ":delta", ":inspect", ":graph",     ":quit",     ":q",    nullptr};
 
     static std::array<const char*, 2> clear_completions{"last", nullptr};
-    static std::array<const char*, 4> reset_completions{"last", "snapshots", "file", nullptr};
+    static std::array<const char*, 5> reset_completions{"last", "snapshots", "file", "import", nullptr};
     static std::array<const char*, 5> show_completions{"config", "decl", "exec", "all", nullptr};
     static std::array<const char*, 23> config_completions{
             "build",

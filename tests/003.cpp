@@ -1180,4 +1180,89 @@ namespace sontag::test {
         CHECK(trace_result.artifact_text.find("event_count=0") == std::string::npos);
     }
 
+    TEST_CASE("003: import-backed ir resolves symbol from selected translation unit", "[003][analysis][import][ir]") {
+        detail::temp_dir temp{"sontag_m1_import_ir_symbol"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        auto main_path = src_dir / "main.cpp";
+        auto math_path = src_dir / "math.cpp";
+        detail::write_text_file(
+                main_path,
+                "int square(int);\n"
+                "int main() {\n"
+                "    return square(3);\n"
+                "}\n");
+        detail::write_text_file(
+                math_path,
+                "int square(int x) {\n"
+                "    return x * x;\n"
+                "}\n");
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int __import_ir_anchor = 0;"};
+        request.symbol = "square";
+        request.import_context = analysis_import_context{
+                .mode = "app",
+                .roots = {src_dir},
+                .files = {main_path, math_path},
+                .main_files = {main_path},
+                .entry = main_path};
+
+        auto ir_result = run_analysis(request, analysis_kind::ir);
+        REQUIRE(ir_result.success);
+        CHECK(ir_result.artifact_text.find("define") != std::string::npos);
+        CHECK(ir_result.artifact_text.find("square") != std::string::npos);
+    }
+
+    TEST_CASE("003: import-backed mem_trace executes for non-entry symbol", "[003][analysis][import][mem]") {
+        detail::temp_dir temp{"sontag_m1_import_mem_trace_symbol"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        auto main_path = src_dir / "main.cpp";
+        auto math_path = src_dir / "math.cpp";
+        detail::write_text_file(
+                main_path,
+                "int square(int);\n"
+                "int main() {\n"
+                "    return square(3);\n"
+                "}\n");
+        detail::write_text_file(
+                math_path,
+                "int square(int x) {\n"
+                "    int y = x * x;\n"
+                "    return y;\n"
+                "}\n");
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.static_link = true;
+        request.decl_cells = {"int __import_mem_anchor = 0;"};
+        request.symbol = "square";
+        request.import_context = analysis_import_context{
+                .mode = "app",
+                .roots = {src_dir},
+                .files = {main_path, math_path},
+                .main_files = {main_path},
+                .entry = main_path};
+
+        auto trace_result = run_analysis(request, analysis_kind::mem_trace);
+        CHECK(trace_result.success);
+        CHECK(trace_result.exit_code == 9);
+        CHECK(trace_result.artifact_text.find("symbol=") != std::string::npos);
+        CHECK(trace_result.artifact_text.find("tracee_exit_code=9") != std::string::npos);
+        CHECK(trace_result.artifact_text.find("map_count=0") == std::string::npos);
+        CHECK(trace_result.artifact_text.find("event_count=0") == std::string::npos);
+    }
+
 }  // namespace sontag::test

@@ -18,6 +18,7 @@ extern "C" {
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <wordexp.h>
 }
 
 #include <algorithm>
@@ -109,6 +110,34 @@ namespace sontag::detail {
         std::vector<inspect_mca_heatmap_row> rows{};
         std::vector<analysis_opcode_entry> opcode_table{};
         std::vector<analysis_operation_entry> operations{};
+    };
+
+    struct compile_commands_json_entry {
+        std::string directory{};
+        std::string file{};
+        std::optional<std::string> command{};
+        std::optional<std::vector<std::string>> arguments{};
+        std::optional<std::string> output{};
+    };
+
+    struct import_compile_command {
+        fs::path directory{};
+        fs::path file{};
+        std::string file_key{};
+        std::vector<std::string> arguments{};
+    };
+
+    struct import_translation_unit_build {
+        std::vector<fs::path> translation_units{};
+        std::vector<fs::path> object_paths{};
+        std::vector<fs::path> fragment_paths{};
+    };
+
+    struct import_ir_module_artifact {
+        fs::path source_path{};
+        fs::path module_path{};
+        std::string source_key{};
+        std::vector<std::string> command{};
     };
 
 }  // namespace sontag::detail
@@ -260,6 +289,22 @@ namespace glz {
                        &T::opcode_table,
                        "operations",
                        &T::operations);
+    };
+
+    template <>
+    struct meta<sontag::detail::compile_commands_json_entry> {
+        using T = sontag::detail::compile_commands_json_entry;
+        static constexpr auto value =
+                object("directory",
+                       &T::directory,
+                       "file",
+                       &T::file,
+                       "command",
+                       &T::command,
+                       "arguments",
+                       &T::arguments,
+                       "output",
+                       &T::output);
     };
 
 }  // namespace glz
@@ -673,6 +718,25 @@ namespace sontag {
             payload << "graph_format=" << request.graph_format << '\n';
             payload << "source_digest=" << hash_fnv1a_64_hex(source_text) << '\n';
             payload << "source_bytes=" << source_text.size() << '\n';
+            if (request.import_context) {
+                payload << "import.mode=" << request.import_context->mode << '\n';
+                for (size_t i = 0U; i < request.import_context->roots.size(); ++i) {
+                    payload << "import.root[" << i << "]=" << request.import_context->roots[i].string() << '\n';
+                }
+                for (size_t i = 0U; i < request.import_context->files.size(); ++i) {
+                    payload << "import.file[" << i << "]=" << request.import_context->files[i].string() << '\n';
+                }
+                for (size_t i = 0U; i < request.import_context->main_files.size(); ++i) {
+                    payload << "import.main_file[" << i << "]=" << request.import_context->main_files[i].string()
+                            << '\n';
+                }
+                if (request.import_context->entry) {
+                    payload << "import.entry=" << request.import_context->entry->string() << '\n';
+                }
+                else {
+                    payload << "import.entry=<none>\n";
+                }
+            }
 
             for (size_t i = 0U; i < request.library_dirs.size(); ++i) {
                 payload << "library_dir[" << i << "]=" << request.library_dirs[i].string() << '\n';
@@ -998,7 +1062,10 @@ namespace sontag {
         }
 
         static int run_process(
-                const std::vector<std::string>& args, const fs::path& stdout_path, const fs::path& stderr_path) {
+                const std::vector<std::string>& args,
+                const fs::path& stdout_path,
+                const fs::path& stderr_path,
+                std::optional<fs::path> working_dir = std::nullopt) {
             auto stdout_fd = open_write_file(stdout_path);
             auto stderr_fd = open_write_file(stderr_path);
 
@@ -1019,6 +1086,12 @@ namespace sontag {
 
                 ::close(stdout_fd);
                 ::close(stderr_fd);
+
+                if (working_dir && !working_dir->empty()) {
+                    if (::chdir(working_dir->c_str()) != 0) {
+                        _exit(127);
+                    }
+                }
 
                 std::vector<char*> argv{};
                 argv.reserve(args.size() + 1U);
@@ -1677,6 +1750,668 @@ namespace sontag {
             return symbols;
         }
 
+        static bool is_import_translation_unit_file(const fs::path& path) {
+            auto extension = path.extension().string();
+            std::ranges::transform(extension, extension.begin(), [](unsigned char c) {
+                return static_cast<char>(utils::char_tolower(static_cast<char>(c)));
+            });
+
+            return extension == ".c"sv || extension == ".cc"sv || extension == ".cpp"sv || extension == ".cxx"sv ||
+                   extension == ".c++"sv;
+        }
+
+        static std::string normalize_path_key(const fs::path& path) {
+            std::error_code ec{};
+            auto weak = fs::weakly_canonical(path, ec);
+            if (!ec) {
+                return weak.lexically_normal().string();
+            }
+            return path.lexically_normal().string();
+        }
+
+        static std::vector<fs::path> select_import_translation_unit_files(const analysis_import_context& context) {
+            auto main_file_keys = std::unordered_set<std::string>{};
+            main_file_keys.reserve(context.main_files.size());
+            for (const auto& path : context.main_files) {
+                main_file_keys.insert(normalize_path_key(path));
+            }
+
+            auto entry_key = std::optional<std::string>{};
+            if (context.entry) {
+                entry_key = normalize_path_key(*context.entry);
+            }
+
+            auto translation_units = std::vector<fs::path>{};
+            translation_units.reserve(context.files.size());
+            for (const auto& path : context.files) {
+                if (!is_import_translation_unit_file(path)) {
+                    continue;
+                }
+
+                auto key = normalize_path_key(path);
+                auto is_main_file = main_file_keys.contains(key);
+                if (context.mode == "library"sv && is_main_file) {
+                    continue;
+                }
+                if (context.mode == "app"sv && is_main_file && entry_key && key != *entry_key) {
+                    continue;
+                }
+                translation_units.push_back(path);
+            }
+
+            std::ranges::sort(translation_units);
+            auto unique_end = std::ranges::unique(translation_units);
+            translation_units.erase(unique_end.begin(), unique_end.end());
+            return translation_units;
+        }
+
+        static std::vector<std::string> split_shell_command_words(std::string_view command_text) {
+            auto words = std::vector<std::string>{};
+            if (command_text.empty()) {
+                return words;
+            }
+
+            auto command = std::string{command_text};
+            wordexp_t expanded{};
+            auto rc = ::wordexp(command.c_str(), &expanded, WRDE_NOCMD);
+            if (rc != 0) {
+                return words;
+            }
+
+            words.reserve(expanded.we_wordc);
+            for (size_t i = 0U; i < expanded.we_wordc; ++i) {
+                words.emplace_back(expanded.we_wordv[i]);
+            }
+            ::wordfree(&expanded);
+            return words;
+        }
+
+        static std::vector<fs::path> find_import_compile_database_paths(const analysis_import_context& context) {
+            auto discovered = std::vector<fs::path>{};
+            auto seen = std::unordered_set<std::string>{};
+
+            for (const auto& root : context.roots) {
+                auto current = root.lexically_normal();
+                while (!current.empty()) {
+                    auto candidate = current / "compile_commands.json";
+                    std::error_code ec{};
+                    if (fs::exists(candidate, ec) && !ec && fs::is_regular_file(candidate, ec) && !ec) {
+                        auto key = normalize_path_key(candidate);
+                        if (seen.insert(key).second) {
+                            discovered.push_back(candidate);
+                        }
+                    }
+
+                    auto parent = current.parent_path();
+                    if (parent.empty() || parent == current) {
+                        break;
+                    }
+                    current = parent;
+                }
+            }
+
+            return discovered;
+        }
+
+        static constexpr std::string_view cmake_cxx_standard_value(cxx_standard standard) noexcept {
+            switch (standard) {
+                case cxx_standard::cxx20:
+                    return "20"sv;
+                case cxx_standard::cxx23:
+                    return "23"sv;
+                case cxx_standard::cxx2c:
+                    return "26"sv;
+            }
+            return "23"sv;
+        }
+
+        static std::vector<fs::path> find_import_cmake_project_roots(const analysis_import_context& context) {
+            auto discovered = std::vector<fs::path>{};
+            auto seen = std::unordered_set<std::string>{};
+
+            for (const auto& root : context.roots) {
+                auto current = root.lexically_normal();
+                while (!current.empty()) {
+                    auto candidate = current / "CMakeLists.txt";
+                    std::error_code ec{};
+                    if (fs::exists(candidate, ec) && !ec && fs::is_regular_file(candidate, ec) && !ec) {
+                        auto key = normalize_path_key(current);
+                        if (seen.insert(key).second) {
+                            discovered.emplace_back(key);
+                        }
+                        break;
+                    }
+
+                    auto parent = current.parent_path();
+                    if (parent.empty() || parent == current) {
+                        break;
+                    }
+                    current = parent;
+                }
+            }
+
+            std::ranges::sort(discovered);
+            return discovered;
+        }
+
+        static std::optional<fs::path> try_generate_import_compile_database_with_cmake(
+                const analysis_request& request,
+                const analysis_import_context& context,
+                const fs::path& import_dir,
+                const fs::path& cmake_stdout_path,
+                const fs::path& cmake_stderr_path) {
+            auto cmake_roots = find_import_cmake_project_roots(context);
+            if (cmake_roots.empty()) {
+                return std::nullopt;
+            }
+
+            for (const auto& cmake_root : cmake_roots) {
+                auto cmake_hash = hash_fnv1a_64_hex(normalize_path_key(cmake_root));
+                auto cmake_build_dir = import_dir / "cmake_compdb" / cmake_hash;
+                ensure_dir(cmake_build_dir);
+
+                auto generated_db_path = cmake_build_dir / "compile_commands.json";
+                std::error_code ec{};
+                if (fs::exists(generated_db_path, ec) && !ec && fs::is_regular_file(generated_db_path, ec) && !ec) {
+                    return generated_db_path;
+                }
+
+                auto cmake_command = std::vector<std::string>{};
+                cmake_command.reserve(8U);
+                cmake_command.emplace_back("cmake");
+                cmake_command.emplace_back("-S");
+                cmake_command.push_back(cmake_root.string());
+                cmake_command.emplace_back("-B");
+                cmake_command.push_back(cmake_build_dir.string());
+                cmake_command.emplace_back("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
+                cmake_command.push_back("-DCMAKE_CXX_COMPILER={}"_format(request.clang_path.string()));
+                cmake_command.push_back(
+                        "-DCMAKE_CXX_STANDARD={}"_format(cmake_cxx_standard_value(request.language_standard)));
+
+                auto cmake_exit = run_process(cmake_command, cmake_stdout_path, cmake_stderr_path);
+                if (cmake_exit != 0) {
+                    continue;
+                }
+
+                ec.clear();
+                if (fs::exists(generated_db_path, ec) && !ec && fs::is_regular_file(generated_db_path, ec) && !ec) {
+                    return generated_db_path;
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        static std::optional<std::vector<import_compile_command>> parse_compile_database_file(const fs::path& db_path) {
+            auto content = read_text_file(db_path);
+            if (trim_ascii(content).empty()) {
+                return std::nullopt;
+            }
+
+            auto raw_entries = std::vector<compile_commands_json_entry>{};
+            auto ec = glz::read<glz::opts{.error_on_unknown_keys = false}>(raw_entries, content);
+            if (ec) {
+                return std::nullopt;
+            }
+
+            auto parsed = std::vector<import_compile_command>{};
+            parsed.reserve(raw_entries.size());
+            for (const auto& raw : raw_entries) {
+                if (raw.file.empty()) {
+                    continue;
+                }
+
+                auto directory = fs::path{raw.directory};
+                if (directory.empty()) {
+                    directory = db_path.parent_path();
+                }
+                else if (!directory.is_absolute()) {
+                    directory = (db_path.parent_path() / directory).lexically_normal();
+                }
+
+                auto file_path = fs::path{raw.file};
+                if (!file_path.is_absolute()) {
+                    file_path = (directory / file_path).lexically_normal();
+                }
+
+                auto arguments = std::vector<std::string>{};
+                if (raw.arguments && !raw.arguments->empty()) {
+                    arguments = *raw.arguments;
+                }
+                else if (raw.command) {
+                    arguments = split_shell_command_words(*raw.command);
+                }
+
+                if (arguments.empty()) {
+                    continue;
+                }
+
+                auto entry = import_compile_command{
+                        .directory = std::move(directory),
+                        .file = std::move(file_path),
+                        .arguments = std::move(arguments)};
+                entry.file_key = normalize_path_key(entry.file);
+                parsed.push_back(std::move(entry));
+            }
+
+            return parsed;
+        }
+
+        static std::unordered_map<std::string, import_compile_command> load_import_compile_commands(
+                const analysis_request& request,
+                const analysis_import_context& context,
+                const fs::path& import_dir,
+                const fs::path& cmake_stdout_path,
+                const fs::path& cmake_stderr_path) {
+            auto file_keys = std::unordered_set<std::string>{};
+            file_keys.reserve(context.files.size());
+            for (const auto& path : context.files) {
+                file_keys.insert(normalize_path_key(path));
+            }
+
+            auto commands = std::unordered_map<std::string, import_compile_command>{};
+            auto db_paths = find_import_compile_database_paths(context);
+            for (const auto& db_path : db_paths) {
+                auto parsed = parse_compile_database_file(db_path);
+                if (!parsed) {
+                    continue;
+                }
+
+                for (auto& command : *parsed) {
+                    if (!file_keys.contains(command.file_key)) {
+                        continue;
+                    }
+                    commands.try_emplace(command.file_key, std::move(command));
+                }
+            }
+
+            if (!commands.empty()) {
+                return commands;
+            }
+
+            auto generated_db_path = try_generate_import_compile_database_with_cmake(
+                    request, context, import_dir, cmake_stdout_path, cmake_stderr_path);
+            if (!generated_db_path) {
+                return commands;
+            }
+
+            auto generated = parse_compile_database_file(*generated_db_path);
+            if (!generated) {
+                return commands;
+            }
+            for (auto& command : *generated) {
+                if (!file_keys.contains(command.file_key)) {
+                    continue;
+                }
+                commands.try_emplace(command.file_key, std::move(command));
+            }
+
+            return commands;
+        }
+
+        static std::optional<compile_commands_json_entry> parse_compile_database_fragment_file(
+                const fs::path& fragment_path) {
+            auto content = read_text_file(fragment_path);
+            auto trimmed = trim_ascii(content);
+            if (trimmed.empty()) {
+                return std::nullopt;
+            }
+
+            auto normalized = std::string{trimmed};
+            if (!normalized.empty() && normalized.back() == ',') {
+                normalized.pop_back();
+                normalized = std::string{trim_ascii(normalized)};
+            }
+
+            auto parsed = compile_commands_json_entry{};
+            auto ec = glz::read<glz::opts{.error_on_unknown_keys = false}>(parsed, normalized);
+            if (ec || parsed.file.empty()) {
+                return std::nullopt;
+            }
+            return parsed;
+        }
+
+        static bool write_compile_commands_snapshot_from_fragments(
+                std::span<const fs::path> fragment_paths, const fs::path& snapshot_path) {
+            auto entries = std::vector<compile_commands_json_entry>{};
+            entries.reserve(fragment_paths.size());
+
+            for (const auto& fragment_path : fragment_paths) {
+                auto parsed = parse_compile_database_fragment_file(fragment_path);
+                if (!parsed) {
+                    continue;
+                }
+                entries.push_back(std::move(*parsed));
+            }
+
+            if (entries.empty()) {
+                return false;
+            }
+
+            auto snapshot_text = std::string{};
+            auto write_ec = glz::write_json(entries, snapshot_text);
+            if (write_ec) {
+                return false;
+            }
+
+            write_text_file(snapshot_path, snapshot_text);
+            return true;
+        }
+
+        static bool compile_command_matches_source_argument(
+                std::string_view argument, const import_compile_command& command) {
+            if (argument.empty() || argument.starts_with('-')) {
+                return false;
+            }
+
+            auto path = fs::path{argument};
+            if (!path.is_absolute()) {
+                path = (command.directory / path).lexically_normal();
+            }
+            return normalize_path_key(path) == command.file_key;
+        }
+
+        static void append_import_compile_command_flags(
+                std::vector<std::string>& args, const import_compile_command& command) {
+            auto skip_next = false;
+            auto seen_compile_flags = false;
+            for (size_t i = 1U; i < command.arguments.size(); ++i) {
+                if (skip_next) {
+                    skip_next = false;
+                    continue;
+                }
+
+                const auto& argument = command.arguments[i];
+                auto is_source_argument = compile_command_matches_source_argument(argument, command);
+                if (!seen_compile_flags && !argument.starts_with('-') && !is_source_argument) {
+                    continue;
+                }
+                if (argument.starts_with('-') || is_source_argument) {
+                    seen_compile_flags = true;
+                }
+
+                if (argument == "-c"sv) {
+                    continue;
+                }
+                if (argument == "-o"sv || argument == "-MF"sv || argument == "-MT"sv || argument == "-MQ"sv ||
+                    argument == "-MJ"sv) {
+                    skip_next = true;
+                    continue;
+                }
+                if (argument == "-MD"sv || argument == "-MMD"sv || argument == "-MP"sv) {
+                    continue;
+                }
+                if ((argument.starts_with("-o"sv) && argument.size() > 2U) ||
+                    (argument.starts_with("-MF"sv) && argument.size() > 3U) ||
+                    (argument.starts_with("-MT"sv) && argument.size() > 3U) ||
+                    (argument.starts_with("-MQ"sv) && argument.size() > 3U) ||
+                    (argument.starts_with("-MJ"sv) && argument.size() > 3U)) {
+                    continue;
+                }
+                if (is_source_argument) {
+                    continue;
+                }
+
+                args.push_back(argument);
+            }
+        }
+
+        static std::optional<std::vector<analysis_symbol>> collect_symbols_from_target(
+                const analysis_request& request,
+                const fs::path& target_path,
+                bool from_object,
+                const fs::path& nm_stdout_path,
+                const fs::path& nm_stderr_path) {
+            std::vector<std::string> nm_args{};
+            nm_args.push_back(request.nm_path.string());
+            nm_args.emplace_back(arg_tokens::nm_defined_only);
+            nm_args.emplace_back(arg_tokens::nm_posix_format);
+            nm_args.push_back(target_path.string());
+            auto nm_exit = run_process(nm_args, nm_stdout_path, nm_stderr_path);
+            if (nm_exit != 0) {
+                return std::nullopt;
+            }
+
+            auto nm_output = read_text_file(nm_stdout_path);
+            auto symbols = parse_nm_symbols(nm_output);
+            for (auto& symbol : symbols) {
+                symbol.present_in_object = from_object;
+                symbol.present_in_binary = !from_object;
+            }
+            return symbols;
+        }
+
+        static std::vector<analysis_symbol> merge_symbol_views(std::vector<analysis_symbol> symbols) {
+            auto merged_by_mangled = std::unordered_map<std::string, analysis_symbol>{};
+            merged_by_mangled.reserve(symbols.size());
+
+            auto prefer_kind = [](char current, char incoming) {
+                auto current_upper = std::isupper(static_cast<unsigned char>(current)) != 0;
+                auto incoming_upper = std::isupper(static_cast<unsigned char>(incoming)) != 0;
+                if (incoming_upper && !current_upper) {
+                    return incoming;
+                }
+                return current;
+            };
+
+            for (const auto& symbol : symbols) {
+                auto [it, inserted] = merged_by_mangled.try_emplace(symbol.mangled, symbol);
+                if (inserted) {
+                    continue;
+                }
+
+                auto& existing = it->second;
+                existing.kind = prefer_kind(existing.kind, symbol.kind);
+                if (existing.demangled == existing.mangled && symbol.demangled != symbol.mangled) {
+                    existing.demangled = symbol.demangled;
+                }
+                existing.present_in_object = existing.present_in_object || symbol.present_in_object;
+                existing.present_in_binary = existing.present_in_binary || symbol.present_in_binary;
+            }
+
+            auto merged = std::vector<analysis_symbol>{};
+            merged.reserve(merged_by_mangled.size());
+            for (auto& [_, symbol] : merged_by_mangled) {
+                merged.push_back(std::move(symbol));
+            }
+
+            std::ranges::sort(merged, [](const analysis_symbol& lhs, const analysis_symbol& rhs) {
+                if (lhs.demangled != rhs.demangled) {
+                    return lhs.demangled < rhs.demangled;
+                }
+                if (lhs.mangled != rhs.mangled) {
+                    return lhs.mangled < rhs.mangled;
+                }
+                return lhs.kind < rhs.kind;
+            });
+            return merged;
+        }
+
+        static std::optional<import_translation_unit_build> compile_import_translation_units(
+                const analysis_request& request,
+                const analysis_import_context& import_context,
+                const fs::path& import_dir,
+                const fs::path& clang_stdout_path,
+                const fs::path& clang_stderr_path) {
+            auto translation_units = select_import_translation_unit_files(import_context);
+            if (translation_units.empty()) {
+                return std::nullopt;
+            }
+
+            auto objects_dir = import_dir / "objects";
+            auto fragments_dir = import_dir / "compdb_fragments";
+            ensure_dir(import_dir);
+            ensure_dir(objects_dir);
+            ensure_dir(fragments_dir);
+
+            auto compile_commands = load_import_compile_commands(
+                    request, import_context, import_dir, clang_stdout_path, clang_stderr_path);
+
+            auto build = import_translation_unit_build{};
+            build.translation_units = std::move(translation_units);
+            build.object_paths.reserve(build.translation_units.size());
+            build.fragment_paths.reserve(build.translation_units.size());
+
+            for (size_t i = 0U; i < build.translation_units.size(); ++i) {
+                const auto& source_file = build.translation_units[i];
+                auto source_key = normalize_path_key(source_file);
+                auto object_path = objects_dir / "{}.o"_format(hash_fnv1a_64_hex(source_key));
+                auto fragment_path = fragments_dir / "{}_{}.json"_format(i, hash_fnv1a_64_hex(source_key));
+
+                auto compile_args = base_clang_args(request);
+                auto compile_working_dir = std::optional<fs::path>{};
+                if (auto command_it = compile_commands.find(source_key); command_it != compile_commands.end()) {
+                    append_import_compile_command_flags(compile_args, command_it->second);
+                    compile_working_dir = command_it->second.directory;
+                }
+                else {
+                    for (const auto& root : import_context.roots) {
+                        compile_args.push_back("-I" + root.string());
+                    }
+                }
+                compile_args.emplace_back("-c");
+                compile_args.push_back(source_file.string());
+                compile_args.emplace_back("-o");
+                compile_args.push_back(object_path.string());
+                compile_args.emplace_back("-MJ");
+                compile_args.push_back(fragment_path.string());
+
+                auto compile_exit =
+                        run_process(compile_args, clang_stdout_path, clang_stderr_path, compile_working_dir);
+                if (compile_exit != 0) {
+                    return std::nullopt;
+                }
+                build.object_paths.push_back(object_path);
+                build.fragment_paths.push_back(fragment_path);
+            }
+
+            auto snapshot_path = import_dir / "compile_commands.snapshot.json";
+            try {
+                (void)write_compile_commands_snapshot_from_fragments(build.fragment_paths, snapshot_path);
+            } catch (...) {
+                // Snapshot emission is best-effort and should not fail analysis.
+            }
+
+            return build;
+        }
+
+        static std::optional<std::vector<import_ir_module_artifact>> compile_import_ir_modules(
+                const analysis_request& request,
+                const analysis_import_context& import_context,
+                const fs::path& import_dir,
+                const fs::path& clang_stdout_path,
+                const fs::path& clang_stderr_path) {
+            auto translation_units = select_import_translation_unit_files(import_context);
+            if (translation_units.empty()) {
+                return std::nullopt;
+            }
+
+            auto modules_dir = import_dir / "modules";
+            ensure_dir(import_dir);
+            ensure_dir(modules_dir);
+
+            auto compile_commands = load_import_compile_commands(
+                    request, import_context, import_dir, clang_stdout_path, clang_stderr_path);
+
+            auto modules = std::vector<import_ir_module_artifact>{};
+            modules.reserve(translation_units.size());
+            for (size_t i = 0U; i < translation_units.size(); ++i) {
+                const auto& source_file = translation_units[i];
+                auto source_key = normalize_path_key(source_file);
+                auto module_path = modules_dir / "{}_{}.ll"_format(i, hash_fnv1a_64_hex(source_key));
+
+                auto compile_args = base_clang_args(request);
+                auto compile_working_dir = std::optional<fs::path>{};
+                if (auto command_it = compile_commands.find(source_key); command_it != compile_commands.end()) {
+                    append_import_compile_command_flags(compile_args, command_it->second);
+                    compile_working_dir = command_it->second.directory;
+                }
+                else {
+                    for (const auto& root : import_context.roots) {
+                        compile_args.push_back("-I" + root.string());
+                    }
+                }
+
+                compile_args.emplace_back("-S");
+                compile_args.emplace_back("-emit-llvm");
+                compile_args.push_back(source_file.string());
+                compile_args.emplace_back("-o");
+                compile_args.push_back(module_path.string());
+
+                auto compile_exit = run_process(compile_args, clang_stdout_path, clang_stderr_path, compile_working_dir);
+                if (compile_exit != 0) {
+                    return std::nullopt;
+                }
+
+                modules.push_back(import_ir_module_artifact{
+                        .source_path = source_file,
+                        .module_path = module_path,
+                        .source_key = source_key,
+                        .command = std::move(compile_args)});
+            }
+
+            return modules;
+        }
+
+        static std::optional<std::vector<analysis_symbol>> try_collect_import_defined_symbols(
+                const analysis_request& request,
+                const analysis_import_context& import_context,
+                const fs::path& inputs_dir,
+                const fs::path& clang_stdout_path,
+                const fs::path& clang_stderr_path,
+                const fs::path& nm_stdout_path,
+                const fs::path& nm_stderr_path) {
+            auto import_dir = inputs_dir / "symbol_index.import";
+            auto build = compile_import_translation_units(
+                    request, import_context, import_dir, clang_stdout_path, clang_stderr_path);
+            if (!build) {
+                return std::nullopt;
+            }
+
+            auto merged_symbols = std::vector<analysis_symbol>{};
+            for (const auto& object_path : build->object_paths) {
+                auto object_symbols =
+                        collect_symbols_from_target(request, object_path, true, nm_stdout_path, nm_stderr_path);
+                if (!object_symbols) {
+                    return std::nullopt;
+                }
+                merged_symbols.insert(
+                        merged_symbols.end(),
+                        std::make_move_iterator(object_symbols->begin()),
+                        std::make_move_iterator(object_symbols->end()));
+            }
+
+            auto linked = false;
+            auto binary_path = import_dir / "symbol_index.bin";
+            if (!request.no_link && !build->object_paths.empty()) {
+                auto link_args = base_clang_args(request);
+                for (const auto& object_path : build->object_paths) {
+                    link_args.push_back(object_path.string());
+                }
+                link_args.emplace_back("-o");
+                link_args.push_back(binary_path.string());
+                append_link_flags(link_args, request);
+                auto link_exit = run_process(link_args, clang_stdout_path, clang_stderr_path);
+                linked = (link_exit == 0);
+            }
+
+            if (linked) {
+                if (auto linked_symbols =
+                            collect_symbols_from_target(request, binary_path, false, nm_stdout_path, nm_stderr_path);
+                    linked_symbols.has_value()) {
+                    merged_symbols.insert(
+                            merged_symbols.end(),
+                            std::make_move_iterator(linked_symbols->begin()),
+                            std::make_move_iterator(linked_symbols->end()));
+                }
+
+                std::error_code ec{};
+                fs::remove(binary_path, ec);
+            }
+
+            return merge_symbol_views(std::move(merged_symbols));
+        }
+
         static std::optional<std::vector<analysis_symbol>> try_collect_defined_symbols(
                 const analysis_request& request) {
             auto source_text = render_source(request.decl_cells, request.exec_cells);
@@ -1701,25 +2436,28 @@ namespace sontag {
                 }
             }
 
-            auto collect_symbols_from_target = [&](const fs::path& target_path,
-                                                   bool from_object) -> std::optional<std::vector<analysis_symbol>> {
-                std::vector<std::string> nm_args{};
-                nm_args.push_back(request.nm_path.string());
-                nm_args.emplace_back(arg_tokens::nm_defined_only);
-                nm_args.emplace_back(arg_tokens::nm_posix_format);
-                nm_args.push_back(target_path.string());
-                auto nm_exit = run_process(nm_args, nm_stdout_path, nm_stderr_path);
-                if (nm_exit != 0) {
-                    return std::nullopt;
+            auto write_symbols_cache = [&](const std::vector<analysis_symbol>& symbols) {
+                std::string symbols_json{};
+                auto write_ec = glz::write_json(symbols, symbols_json);
+                if (!write_ec) {
+                    (void)write_text_file(symbols_cache_path, symbols_json);
                 }
-                auto nm_output = read_text_file(nm_stdout_path);
-                auto symbols = parse_nm_symbols(nm_output);
-                for (auto& symbol : symbols) {
-                    symbol.present_in_object = from_object;
-                    symbol.present_in_binary = !from_object;
-                }
-                return symbols;
             };
+
+            if (request.import_context) {
+                if (auto import_symbols = try_collect_import_defined_symbols(
+                            request,
+                            *request.import_context,
+                            inputs_dir,
+                            clang_stdout_path,
+                            clang_stderr_path,
+                            nm_stdout_path,
+                            nm_stderr_path);
+                    import_symbols.has_value()) {
+                    write_symbols_cache(*import_symbols);
+                    return import_symbols;
+                }
+            }
 
             auto compile_args = base_clang_args(request);
             compile_args.emplace_back("-c");
@@ -1732,7 +2470,9 @@ namespace sontag {
             }
 
             auto merged_symbols = std::vector<analysis_symbol>{};
-            if (auto object_symbols = collect_symbols_from_target(object_path, true); object_symbols.has_value()) {
+            if (auto object_symbols =
+                        collect_symbols_from_target(request, object_path, true, nm_stdout_path, nm_stderr_path);
+                object_symbols.has_value()) {
                 merged_symbols = std::move(*object_symbols);
             }
             else {
@@ -1759,7 +2499,9 @@ namespace sontag {
             }
 
             if (linked) {
-                if (auto linked_symbols = collect_symbols_from_target(binary_path, false); linked_symbols.has_value()) {
+                if (auto linked_symbols =
+                            collect_symbols_from_target(request, binary_path, false, nm_stdout_path, nm_stderr_path);
+                    linked_symbols.has_value()) {
                     merged_symbols.insert(
                             merged_symbols.end(),
                             std::make_move_iterator(linked_symbols->begin()),
@@ -1776,50 +2518,8 @@ namespace sontag {
                 fs::remove(binary_path, ec);
             }
 
-            auto merged_by_mangled = std::unordered_map<std::string, analysis_symbol>{};
-            merged_by_mangled.reserve(merged_symbols.size());
-            auto prefer_kind = [](char current, char incoming) {
-                auto current_upper = std::isupper(static_cast<unsigned char>(current)) != 0;
-                auto incoming_upper = std::isupper(static_cast<unsigned char>(incoming)) != 0;
-                if (incoming_upper && !current_upper) {
-                    return incoming;
-                }
-                return current;
-            };
-            for (const auto& symbol : merged_symbols) {
-                auto [it, inserted] = merged_by_mangled.try_emplace(symbol.mangled, symbol);
-                if (inserted) {
-                    continue;
-                }
-                auto& existing = it->second;
-                existing.kind = prefer_kind(existing.kind, symbol.kind);
-                if (existing.demangled == existing.mangled && symbol.demangled != symbol.mangled) {
-                    existing.demangled = symbol.demangled;
-                }
-                existing.present_in_object = existing.present_in_object || symbol.present_in_object;
-                existing.present_in_binary = existing.present_in_binary || symbol.present_in_binary;
-            }
-
-            auto out_symbols = std::vector<analysis_symbol>{};
-            out_symbols.reserve(merged_by_mangled.size());
-            for (auto& [_, symbol] : merged_by_mangled) {
-                out_symbols.push_back(std::move(symbol));
-            }
-            std::ranges::sort(out_symbols, [](const analysis_symbol& lhs, const analysis_symbol& rhs) {
-                if (lhs.demangled != rhs.demangled) {
-                    return lhs.demangled < rhs.demangled;
-                }
-                if (lhs.mangled != rhs.mangled) {
-                    return lhs.mangled < rhs.mangled;
-                }
-                return lhs.kind < rhs.kind;
-            });
-
-            std::string symbols_json{};
-            auto write_ec = glz::write_json(out_symbols, symbols_json);
-            if (!write_ec) {
-                (void)write_text_file(symbols_cache_path, symbols_json);
-            }
+            auto out_symbols = merge_symbol_views(std::move(merged_symbols));
+            write_symbols_cache(out_symbols);
             return out_symbols;
         }
 
@@ -4078,25 +4778,74 @@ namespace sontag {
                 auto ir_path = kind_dir / (id + ".trace.ll");
                 auto ir_stdout_path = kind_dir / (id + ".ir.stdout.txt");
                 auto ir_stderr_path = kind_dir / (id + ".ir.stderr.txt");
+                auto ir_command = std::vector<std::string>{};
+                auto ir_stdout = std::string{};
+                auto ir_stderr = std::string{};
+                auto ir_text = std::string{};
+                auto import_object_build = std::optional<detail::import_translation_unit_build>{};
+                auto import_ir_modules = std::optional<std::vector<detail::import_ir_module_artifact>>{};
+                auto import_compile_commands = std::unordered_map<std::string, detail::import_compile_command>{};
 
-                auto ir_command = detail::build_command(request, analysis_kind::ir, source_path, ir_path);
-                auto ir_exit = detail::run_process(ir_command, ir_stdout_path, ir_stderr_path);
-                auto ir_stdout = detail::read_text_file(ir_stdout_path);
-                auto ir_stderr = detail::read_text_file(ir_stderr_path);
-                if (ir_exit != 0) {
-                    detail::write_text_file(stdout_path, ir_stdout);
-                    detail::write_text_file(stderr_path, ir_stderr);
-                    detail::write_text_file(artifact_path, ir_stdout);
+                if (request.import_context) {
+                    auto import_dir = inputs_dir / "mem_trace.import";
+                    import_object_build = detail::compile_import_translation_units(
+                            request, *request.import_context, import_dir, ir_stdout_path, ir_stderr_path);
+                    if (!import_object_build) {
+                        ir_stdout = detail::read_text_file(ir_stdout_path);
+                        ir_stderr = detail::read_text_file(ir_stderr_path);
+                        detail::write_text_file(stdout_path, ir_stdout);
+                        detail::write_text_file(stderr_path, ir_stderr);
+                        detail::write_text_file(artifact_path, ir_stdout);
 
-                    mem_result.exit_code = ir_exit;
-                    mem_result.success = false;
-                    mem_result.command = std::move(ir_command);
-                    mem_result.artifact_text = std::move(ir_stdout);
-                    mem_result.diagnostics_text = std::move(ir_stderr);
-                    return mem_result;
+                        mem_result.exit_code = 1;
+                        mem_result.success = false;
+                        mem_result.command = {};
+                        mem_result.artifact_text = std::move(ir_stdout);
+                        mem_result.diagnostics_text = std::move(ir_stderr);
+                        return mem_result;
+                    }
+
+                    import_ir_modules = detail::compile_import_ir_modules(
+                            request, *request.import_context, import_dir, ir_stdout_path, ir_stderr_path);
+                    ir_stdout = detail::read_text_file(ir_stdout_path);
+                    ir_stderr = detail::read_text_file(ir_stderr_path);
+                    if (!import_ir_modules || import_ir_modules->empty()) {
+                        detail::write_text_file(stdout_path, ir_stdout);
+                        detail::write_text_file(stderr_path, ir_stderr);
+                        detail::write_text_file(artifact_path, ir_stdout);
+
+                        mem_result.exit_code = 1;
+                        mem_result.success = false;
+                        mem_result.command = {};
+                        mem_result.artifact_text = std::move(ir_stdout);
+                        mem_result.diagnostics_text = std::move(ir_stderr);
+                        return mem_result;
+                    }
+
+                    import_compile_commands = detail::load_import_compile_commands(
+                            request, *request.import_context, import_dir, ir_stdout_path, ir_stderr_path);
+                    ir_command = import_ir_modules->back().command;
+                }
+                else {
+                    ir_command = detail::build_command(request, analysis_kind::ir, source_path, ir_path);
+                    auto ir_exit = detail::run_process(ir_command, ir_stdout_path, ir_stderr_path);
+                    ir_stdout = detail::read_text_file(ir_stdout_path);
+                    ir_stderr = detail::read_text_file(ir_stderr_path);
+                    if (ir_exit != 0) {
+                        detail::write_text_file(stdout_path, ir_stdout);
+                        detail::write_text_file(stderr_path, ir_stderr);
+                        detail::write_text_file(artifact_path, ir_stdout);
+
+                        mem_result.exit_code = ir_exit;
+                        mem_result.success = false;
+                        mem_result.command = std::move(ir_command);
+                        mem_result.artifact_text = std::move(ir_stdout);
+                        mem_result.diagnostics_text = std::move(ir_stderr);
+                        return mem_result;
+                    }
+                    ir_text = detail::read_text_file(ir_path);
                 }
 
-                auto ir_text = detail::read_text_file(ir_path);
                 auto defined_symbols = detail::try_collect_defined_symbols(request);
 
                 std::optional<std::string> resolved_symbol{};
@@ -4134,6 +4883,47 @@ namespace sontag {
                     throw std::runtime_error("unable to resolve symbol for memory trace");
                 }
 
+                auto selected_import_module = std::optional<detail::import_ir_module_artifact>{};
+                if (request.import_context && import_ir_modules) {
+                    for (const auto& module : *import_ir_modules) {
+                        auto module_text = detail::read_text_file(module.module_path);
+                        if (module_text.empty()) {
+                            continue;
+                        }
+                        if (!detail::extract_ir_for_symbol(module_text, *resolved_symbol).empty()) {
+                            selected_import_module = module;
+                            ir_text = std::move(module_text);
+                            break;
+                        }
+                    }
+
+                    if (!selected_import_module.has_value() && !request.symbol && !import_ir_modules->empty()) {
+                        for (const auto& module : *import_ir_modules) {
+                            auto module_text = detail::read_text_file(module.module_path);
+                            if (module_text.empty()) {
+                                continue;
+                            }
+                            auto lines = detail::split_lines(module_text);
+                            for (const auto& line : lines) {
+                                if (auto symbol = detail::parse_ir_function_name_from_define_line(line);
+                                    symbol.has_value()) {
+                                    resolved_symbol = std::string{*symbol};
+                                    selected_import_module = module;
+                                    ir_text = std::move(module_text);
+                                    break;
+                                }
+                            }
+                            if (selected_import_module.has_value()) {
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!selected_import_module.has_value() || ir_text.empty()) {
+                        throw std::runtime_error("unable to locate import IR module for symbol: {}"_format(*resolved_symbol));
+                    }
+                }
+
                 auto map_entries = std::vector<detail::mem_trace_map_entry>{};
                 auto instrumented_ir = detail::build_instrumented_mem_trace_ir(ir_text, *resolved_symbol, map_entries);
                 auto instrumented_ir_path = kind_dir / (id + ".trace.instrumented.ll");
@@ -4150,16 +4940,80 @@ namespace sontag {
                 auto compile_stdout_path = kind_dir / (id + ".trace.compile.stdout.txt");
                 auto compile_stderr_path = kind_dir / (id + ".trace.compile.stderr.txt");
 
-                auto compile_command = detail::base_clang_args(request);
-                compile_command.push_back(instrumented_ir_path.string());
-                compile_command.push_back(runtime_source_path.string());
-                compile_command.emplace_back(detail::arg_tokens::output_path);
-                compile_command.push_back(trace_binary_path.string());
-                detail::append_link_flags(compile_command, request);
+                auto compile_command = std::vector<std::string>{};
+                auto compile_stdout = std::string{};
+                auto compile_stderr = std::string{};
+                auto capture_compile_streams = [&]() {
+                    compile_stdout = detail::join_text(compile_stdout, detail::read_text_file(compile_stdout_path));
+                    compile_stderr = detail::join_text(compile_stderr, detail::read_text_file(compile_stderr_path));
+                };
+                auto compile_exit = 0;
+                if (request.import_context && import_object_build && selected_import_module) {
+                    auto instrumented_object_path = kind_dir / (id + ".trace.instrumented.o");
+                    auto runtime_object_path = kind_dir / (id + ".trace.runtime.o");
 
-                auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
-                auto compile_stdout = detail::read_text_file(compile_stdout_path);
-                auto compile_stderr = detail::read_text_file(compile_stderr_path);
+                    auto instrument_compile_command = detail::base_clang_args(request);
+                    if (auto command_it = import_compile_commands.find(selected_import_module->source_key);
+                        command_it != import_compile_commands.end()) {
+                        detail::append_import_compile_command_flags(instrument_compile_command, command_it->second);
+                    }
+                    instrument_compile_command.emplace_back("-c");
+                    instrument_compile_command.push_back(instrumented_ir_path.string());
+                    instrument_compile_command.emplace_back("-o");
+                    instrument_compile_command.push_back(instrumented_object_path.string());
+                    compile_exit =
+                            detail::run_process(instrument_compile_command, compile_stdout_path, compile_stderr_path);
+                    capture_compile_streams();
+                    if (compile_exit != 0) {
+                        compile_command = std::move(instrument_compile_command);
+                    }
+                    else {
+                        auto runtime_compile_command = detail::base_clang_args(request);
+                        runtime_compile_command.emplace_back("-c");
+                        runtime_compile_command.push_back(runtime_source_path.string());
+                        runtime_compile_command.emplace_back("-o");
+                        runtime_compile_command.push_back(runtime_object_path.string());
+                        compile_exit =
+                                detail::run_process(runtime_compile_command, compile_stdout_path, compile_stderr_path);
+                        capture_compile_streams();
+                        if (compile_exit != 0) {
+                            compile_command = std::move(runtime_compile_command);
+                        }
+                        else {
+                            auto link_command = detail::base_clang_args(request);
+                            for (size_t i = 0U; i < import_object_build->object_paths.size(); ++i) {
+                                auto source_key = detail::normalize_path_key(import_object_build->translation_units[i]);
+                                if (source_key == selected_import_module->source_key) {
+                                    link_command.push_back(instrumented_object_path.string());
+                                }
+                                else {
+                                    link_command.push_back(import_object_build->object_paths[i].string());
+                                }
+                            }
+                            link_command.push_back(runtime_object_path.string());
+                            link_command.emplace_back(detail::arg_tokens::output_path);
+                            link_command.push_back(trace_binary_path.string());
+                            detail::append_link_flags(link_command, request);
+
+                            compile_exit = detail::run_process(link_command, compile_stdout_path, compile_stderr_path);
+                            capture_compile_streams();
+                            compile_command = std::move(link_command);
+                        }
+                    }
+                }
+                else {
+                    compile_command = detail::base_clang_args(request);
+                    compile_command.push_back(instrumented_ir_path.string());
+                    compile_command.push_back(runtime_source_path.string());
+                    compile_command.emplace_back(detail::arg_tokens::output_path);
+                    compile_command.push_back(trace_binary_path.string());
+                    detail::append_link_flags(compile_command, request);
+
+                    compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
+                    compile_stdout = detail::read_text_file(compile_stdout_path);
+                    compile_stderr = detail::read_text_file(compile_stderr_path);
+                }
+
                 if (compile_exit != 0) {
                     auto diagnostics = detail::join_text(ir_stderr, compile_stderr);
                     auto combined_stdout = detail::join_text(ir_stdout, compile_stdout);
@@ -4683,49 +5537,69 @@ namespace sontag {
             auto compile_stdout_path = kind_dir / (id + ".compile.stdout.txt");
             auto compile_stderr_path = kind_dir / (id + ".compile.stderr.txt");
 
-            auto compile_command = detail::build_command(request, analysis_kind::asm_text, source_path, asm_path);
-            auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
-            if (compile_exit != 0) {
-                auto compile_stdout = detail::read_text_file(compile_stdout_path);
-                auto compile_stderr = detail::read_text_file(compile_stderr_path);
+            auto compile_command = std::vector<std::string>{};
+            auto asm_text = std::string{};
+            if (request.import_context) {
+                auto dump_result = run_analysis(request, analysis_kind::dump);
+                if (!dump_result.success) {
+                    detail::write_text_file(stdout_path, dump_result.artifact_text);
+                    detail::write_text_file(stderr_path, dump_result.diagnostics_text);
+                    detail::write_text_file(artifact_path, dump_result.artifact_text);
 
-                detail::write_text_file(stdout_path, compile_stdout);
-                detail::write_text_file(stderr_path, compile_stderr);
-
-                detail::write_text_file(artifact_path, compile_stdout);
-
-                result.exit_code = compile_exit;
-                result.success = false;
-                result.command = std::move(compile_command);
-                result.artifact_text = std::move(compile_stdout);
-                result.diagnostics_text = std::move(compile_stderr);
-                return result;
+                    result.exit_code = dump_result.exit_code;
+                    result.success = false;
+                    result.command = std::move(dump_result.command);
+                    result.artifact_text = std::move(dump_result.artifact_text);
+                    result.diagnostics_text = std::move(dump_result.diagnostics_text);
+                    return result;
+                }
+                asm_text = detail::prepare_mca_from_objdump(request, dump_result.artifact_text);
+                compile_command = std::move(dump_result.command);
             }
+            else {
+                compile_command = detail::build_command(request, analysis_kind::asm_text, source_path, asm_path);
+                auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
+                if (compile_exit != 0) {
+                    auto compile_stdout = detail::read_text_file(compile_stdout_path);
+                    auto compile_stderr = detail::read_text_file(compile_stderr_path);
 
-            auto asm_text = detail::read_text_file(asm_path);
+                    detail::write_text_file(stdout_path, compile_stdout);
+                    detail::write_text_file(stderr_path, compile_stderr);
 
-            if (request.symbol) {
-                auto resolved = detail::resolve_symbol_name(request, *request.symbol);
-                if (!resolved) {
-                    throw std::runtime_error("unable to resolve symbol: {}"_format(*request.symbol));
+                    detail::write_text_file(artifact_path, compile_stdout);
+
+                    result.exit_code = compile_exit;
+                    result.success = false;
+                    result.command = std::move(compile_command);
+                    result.artifact_text = std::move(compile_stdout);
+                    result.diagnostics_text = std::move(compile_stderr);
+                    return result;
                 }
 
-                auto extracted = detail::extract_asm_for_symbol(asm_text, *resolved);
-                if (extracted.empty()) {
-                    auto dump_result = run_analysis(request, analysis_kind::dump);
-                    if (dump_result.success && !dump_result.artifact_text.empty()) {
-                        asm_text = detail::prepare_mca_from_objdump(request, dump_result.artifact_text);
+                asm_text = detail::read_text_file(asm_path);
+                if (request.symbol) {
+                    auto resolved = detail::resolve_symbol_name(request, *request.symbol);
+                    if (!resolved) {
+                        throw std::runtime_error("unable to resolve symbol: {}"_format(*request.symbol));
+                    }
+
+                    auto extracted = detail::extract_asm_for_symbol(asm_text, *resolved);
+                    if (extracted.empty()) {
+                        auto dump_result = run_analysis(request, analysis_kind::dump);
+                        if (dump_result.success && !dump_result.artifact_text.empty()) {
+                            asm_text = detail::prepare_mca_from_objdump(request, dump_result.artifact_text);
+                        }
+                        else {
+                            throw std::runtime_error("symbol not found in artifact: {}"_format(*resolved));
+                        }
                     }
                     else {
-                        throw std::runtime_error("symbol not found in artifact: {}"_format(*resolved));
+                        asm_text = detail::prepare_mca_symbol_input(request, extracted);
                     }
                 }
                 else {
-                    asm_text = detail::prepare_mca_symbol_input(request, extracted);
+                    asm_text = detail::sanitize_mca_input(asm_text, false, !detail::is_x86_target(request));
                 }
-            }
-            else {
-                asm_text = detail::sanitize_mca_input(asm_text, false, !detail::is_x86_target(request));
             }
 
             detail::write_text_file(asm_path, asm_text);
@@ -4791,104 +5665,235 @@ namespace sontag {
             std::error_code shared_dump_ec{};
             auto has_shared_dump = fs::exists(shared_artifact_path, shared_dump_ec) && !shared_dump_ec;
             if (!has_shared_dump) {
-                bool linked = false;
-                std::vector<std::string> compile_command{};
+                auto import_built_shared = false;
+                if (request.import_context) {
+                    auto import_dir = inputs_dir / "dump.import";
+                    auto import_build = detail::compile_import_translation_units(
+                            request,
+                            *request.import_context,
+                            import_dir,
+                            shared_compile_stdout_path,
+                            shared_compile_stderr_path);
+                    if (import_build && !import_build->object_paths.empty()) {
+                        auto linked = false;
+                        auto link_command = std::vector<std::string>{};
+                        if (!request.no_link) {
+                            link_command = detail::base_clang_args(request);
+                            for (const auto& object_path : import_build->object_paths) {
+                                link_command.push_back(object_path.string());
+                            }
+                            link_command.emplace_back("-o");
+                            link_command.push_back(shared_binary_path.string());
+                            detail::append_link_flags(link_command, request);
+                            auto link_exit = detail::run_process(
+                                    link_command, shared_compile_stdout_path, shared_compile_stderr_path);
+                            linked = (link_exit == 0);
+                            if (!linked && request.verbose) {
+                                auto link_stderr = detail::read_text_file(shared_compile_stderr_path);
+                                if (!link_stderr.empty()) {
+                                    debug_log("dump import link failed (exit {}): {}", link_exit, link_stderr);
+                                }
+                            }
+                        }
 
-                if (!request.no_link) {
-                    compile_command = detail::base_clang_args(request);
-                    compile_command.push_back(source_path.string());
-                    compile_command.emplace_back("-o");
-                    compile_command.push_back(shared_binary_path.string());
-                    detail::append_link_flags(compile_command, request);
-                    auto link_exit = detail::run_process(
-                            compile_command, shared_compile_stdout_path, shared_compile_stderr_path);
-                    linked = (link_exit == 0);
-                    if (!linked && request.verbose) {
-                        auto link_stderr = detail::read_text_file(shared_compile_stderr_path);
-                        if (!link_stderr.empty()) {
-                            debug_log("dump link failed (exit {}): {}", link_exit, link_stderr);
+                        auto objdump_exit = 0;
+                        auto shared_stdout_text = std::string{};
+                        auto shared_stderr_text = std::string{};
+                        auto last_objdump_command = std::vector<std::string>{};
+
+                        auto objdump_inputs = std::vector<fs::path>{};
+                        if (linked) {
+                            objdump_inputs.push_back(shared_binary_path);
+                        }
+                        else {
+                            objdump_inputs = import_build->object_paths;
+                        }
+
+                        for (size_t input_index = 0U; input_index < objdump_inputs.size(); ++input_index) {
+                            auto input_path = objdump_inputs[input_index];
+                            auto input_stdout_path =
+                                    kind_dir / (shared_stem + ".objdump.{}.stdout.txt"_format(input_index));
+                            auto input_stderr_path =
+                                    kind_dir / (shared_stem + ".objdump.{}.stderr.txt"_format(input_index));
+
+                            auto input_stdout_text = std::string{};
+                            auto input_stderr_text = std::string{};
+                            auto input_command = std::vector<std::string>{};
+                            auto attempted = std::vector<std::string>{};
+                            auto objdump_candidates =
+                                    detail::build_objdump_executable_candidates(request, kind_dir, id);
+                            auto input_exit = 127;
+                            for (const auto& candidate : objdump_candidates) {
+                                input_command =
+                                        detail::build_objdump_command(request, input_path, candidate, std::nullopt);
+                                input_exit = detail::run_process(input_command, input_stdout_path, input_stderr_path);
+                                input_stdout_text = detail::read_text_file(input_stdout_path);
+                                input_stderr_text = detail::read_text_file(input_stderr_path);
+                                attempted.push_back(candidate);
+                                auto tool_missing =
+                                        input_exit == 127 && input_stdout_text.empty() && input_stderr_text.empty();
+                                if (!tool_missing) {
+                                    break;
+                                }
+                            }
+
+                            if (input_exit == 127 && input_stdout_text.empty() && input_stderr_text.empty()) {
+                                if (attempted.empty()) {
+                                    input_stderr_text = "failed to execute llvm-objdump tool: {}\n"_format(
+                                            request.objdump_path.string());
+                                }
+                                else {
+                                    input_stderr_text = "failed to execute llvm-objdump tool: {}\ntried: {}\n"_format(
+                                            request.objdump_path.string(),
+                                            detail::join_with_separator(attempted, ", "sv));
+                                }
+                            }
+
+                            if (input_exit != 0) {
+                                objdump_exit = input_exit;
+                                shared_stdout_text = std::move(input_stdout_text);
+                                shared_stderr_text = std::move(input_stderr_text);
+                                last_objdump_command = std::move(input_command);
+                                break;
+                            }
+
+                            if (!shared_stdout_text.empty()) {
+                                shared_stdout_text.push_back('\n');
+                            }
+                            shared_stdout_text.append(input_stdout_text);
+                            shared_stderr_text = detail::join_text(shared_stderr_text, input_stderr_text);
+                            last_objdump_command = std::move(input_command);
+                        }
+
+                        if (linked) {
+                            std::error_code ec{};
+                            fs::remove(shared_binary_path, ec);
+                        }
+
+                        if (objdump_exit != 0) {
+                            detail::write_text_file(stdout_path, shared_stdout_text);
+                            detail::write_text_file(stderr_path, shared_stderr_text);
+                            detail::write_text_file(artifact_path, shared_stdout_text);
+
+                            result.exit_code = objdump_exit;
+                            result.success = false;
+                            result.command = std::move(last_objdump_command);
+                            result.artifact_text = std::move(shared_stdout_text);
+                            result.diagnostics_text = std::move(shared_stderr_text);
+                            return result;
+                        }
+
+                        detail::write_text_file(shared_artifact_path, shared_stdout_text);
+                        detail::write_text_file(shared_stdout_path, shared_stdout_text);
+                        detail::write_text_file(shared_stderr_path, shared_stderr_text);
+                        shared_command = std::move(last_objdump_command);
+                        built_shared = true;
+                        import_built_shared = true;
+                    }
+                }
+
+                if (!import_built_shared) {
+                    bool linked = false;
+                    std::vector<std::string> compile_command{};
+
+                    if (!request.no_link) {
+                        compile_command = detail::base_clang_args(request);
+                        compile_command.push_back(source_path.string());
+                        compile_command.emplace_back("-o");
+                        compile_command.push_back(shared_binary_path.string());
+                        detail::append_link_flags(compile_command, request);
+                        auto link_exit = detail::run_process(
+                                compile_command, shared_compile_stdout_path, shared_compile_stderr_path);
+                        linked = (link_exit == 0);
+                        if (!linked && request.verbose) {
+                            auto link_stderr = detail::read_text_file(shared_compile_stderr_path);
+                            if (!link_stderr.empty()) {
+                                debug_log("dump link failed (exit {}): {}", link_exit, link_stderr);
+                            }
                         }
                     }
-                }
 
-                if (!linked) {
-                    compile_command =
-                            detail::build_command(request, analysis_kind::dump, source_path, shared_object_path);
-                    auto compile_exit = detail::run_process(
-                            compile_command, shared_compile_stdout_path, shared_compile_stderr_path);
-                    if (compile_exit != 0) {
-                        auto compile_stdout = detail::read_text_file(shared_compile_stdout_path);
-                        auto compile_stderr = detail::read_text_file(shared_compile_stderr_path);
+                    if (!linked) {
+                        compile_command =
+                                detail::build_command(request, analysis_kind::dump, source_path, shared_object_path);
+                        auto compile_exit = detail::run_process(
+                                compile_command, shared_compile_stdout_path, shared_compile_stderr_path);
+                        if (compile_exit != 0) {
+                            auto compile_stdout = detail::read_text_file(shared_compile_stdout_path);
+                            auto compile_stderr = detail::read_text_file(shared_compile_stderr_path);
 
-                        detail::write_text_file(stdout_path, compile_stdout);
-                        detail::write_text_file(stderr_path, compile_stderr);
-                        detail::write_text_file(artifact_path, compile_stdout);
+                            detail::write_text_file(stdout_path, compile_stdout);
+                            detail::write_text_file(stderr_path, compile_stderr);
+                            detail::write_text_file(artifact_path, compile_stdout);
 
-                        result.exit_code = compile_exit;
+                            result.exit_code = compile_exit;
+                            result.success = false;
+                            result.command = std::move(compile_command);
+                            result.artifact_text = std::move(compile_stdout);
+                            result.diagnostics_text = std::move(compile_stderr);
+                            return result;
+                        }
+                    }
+
+                    auto objdump_input = linked ? shared_binary_path : shared_object_path;
+                    auto objdump_exit = 127;
+                    std::string shared_stdout_text{};
+                    std::string shared_stderr_text{};
+                    std::vector<std::string> objdump_command{};
+                    std::vector<std::string> attempted{};
+                    auto objdump_candidates = detail::build_objdump_executable_candidates(request, kind_dir, id);
+
+                    for (const auto& candidate : objdump_candidates) {
+                        objdump_command =
+                                detail::build_objdump_command(request, objdump_input, candidate, std::nullopt);
+                        objdump_exit = detail::run_process(objdump_command, shared_stdout_path, shared_stderr_path);
+                        shared_stdout_text = detail::read_text_file(shared_stdout_path);
+                        shared_stderr_text = detail::read_text_file(shared_stderr_path);
+                        attempted.push_back(candidate);
+                        auto tool_missing =
+                                objdump_exit == 127 && shared_stdout_text.empty() && shared_stderr_text.empty();
+                        if (!tool_missing) {
+                            break;
+                        }
+                    }
+
+                    if (objdump_exit == 127 && shared_stdout_text.empty() && shared_stderr_text.empty()) {
+                        if (attempted.empty()) {
+                            shared_stderr_text =
+                                    "failed to execute llvm-objdump tool: {}\n"_format(request.objdump_path.string());
+                        }
+                        else {
+                            shared_stderr_text = "failed to execute llvm-objdump tool: {}\ntried: {}\n"_format(
+                                    request.objdump_path.string(), detail::join_with_separator(attempted, ", "sv));
+                        }
+                        detail::write_text_file(shared_stderr_path, shared_stderr_text);
+                    }
+
+                    if (linked) {
+                        std::error_code ec{};
+                        fs::remove(shared_binary_path, ec);
+                    }
+
+                    if (objdump_exit != 0) {
+                        detail::write_text_file(stdout_path, shared_stdout_text);
+                        detail::write_text_file(stderr_path, shared_stderr_text);
+                        detail::write_text_file(artifact_path, shared_stdout_text);
+
+                        result.exit_code = objdump_exit;
                         result.success = false;
-                        result.command = std::move(compile_command);
-                        result.artifact_text = std::move(compile_stdout);
-                        result.diagnostics_text = std::move(compile_stderr);
+                        result.command = std::move(objdump_command);
+                        result.artifact_text = std::move(shared_stdout_text);
+                        result.diagnostics_text = std::move(shared_stderr_text);
                         return result;
                     }
-                }
 
-                auto objdump_input = linked ? shared_binary_path : shared_object_path;
-                auto objdump_exit = 127;
-                std::string shared_stdout_text{};
-                std::string shared_stderr_text{};
-                std::vector<std::string> objdump_command{};
-                std::vector<std::string> attempted{};
-                auto objdump_candidates = detail::build_objdump_executable_candidates(request, kind_dir, id);
-
-                for (const auto& candidate : objdump_candidates) {
-                    objdump_command = detail::build_objdump_command(request, objdump_input, candidate, std::nullopt);
-                    objdump_exit = detail::run_process(objdump_command, shared_stdout_path, shared_stderr_path);
-                    shared_stdout_text = detail::read_text_file(shared_stdout_path);
-                    shared_stderr_text = detail::read_text_file(shared_stderr_path);
-                    attempted.push_back(candidate);
-                    auto tool_missing = objdump_exit == 127 && shared_stdout_text.empty() && shared_stderr_text.empty();
-                    if (!tool_missing) {
-                        break;
-                    }
-                }
-
-                if (objdump_exit == 127 && shared_stdout_text.empty() && shared_stderr_text.empty()) {
-                    if (attempted.empty()) {
-                        shared_stderr_text =
-                                "failed to execute llvm-objdump tool: {}\n"_format(request.objdump_path.string());
-                    }
-                    else {
-                        shared_stderr_text = "failed to execute llvm-objdump tool: {}\ntried: {}\n"_format(
-                                request.objdump_path.string(), detail::join_with_separator(attempted, ", "sv));
-                    }
+                    detail::write_text_file(shared_artifact_path, shared_stdout_text);
+                    detail::write_text_file(shared_stdout_path, shared_stdout_text);
                     detail::write_text_file(shared_stderr_path, shared_stderr_text);
+
+                    shared_command = std::move(objdump_command);
+                    built_shared = true;
                 }
-
-                if (linked) {
-                    std::error_code ec{};
-                    fs::remove(shared_binary_path, ec);
-                }
-
-                if (objdump_exit != 0) {
-                    detail::write_text_file(stdout_path, shared_stdout_text);
-                    detail::write_text_file(stderr_path, shared_stderr_text);
-                    detail::write_text_file(artifact_path, shared_stdout_text);
-
-                    result.exit_code = objdump_exit;
-                    result.success = false;
-                    result.command = std::move(objdump_command);
-                    result.artifact_text = std::move(shared_stdout_text);
-                    result.diagnostics_text = std::move(shared_stderr_text);
-                    return result;
-                }
-
-                detail::write_text_file(shared_artifact_path, shared_stdout_text);
-                detail::write_text_file(shared_stdout_path, shared_stdout_text);
-                detail::write_text_file(shared_stderr_path, shared_stderr_text);
-
-                shared_command = std::move(objdump_command);
-                built_shared = true;
             }
 
             auto full_dump_text = detail::read_text_file(shared_artifact_path);
@@ -4938,6 +5943,146 @@ namespace sontag {
         }
 
         if (kind == analysis_kind::asm_text || kind == analysis_kind::ir) {
+            if (kind == analysis_kind::asm_text && request.import_context) {
+                auto dump_result = run_analysis(request, analysis_kind::dump);
+                if (!dump_result.success) {
+                    detail::write_text_file(stdout_path, dump_result.artifact_text);
+                    detail::write_text_file(stderr_path, dump_result.diagnostics_text);
+                    detail::write_text_file(artifact_path, dump_result.artifact_text);
+
+                    result.exit_code = dump_result.exit_code;
+                    result.success = false;
+                    result.command = std::move(dump_result.command);
+                    result.artifact_text = std::move(dump_result.artifact_text);
+                    result.diagnostics_text = std::move(dump_result.diagnostics_text);
+                    return result;
+                }
+
+                detail::write_text_file(artifact_path, dump_result.artifact_text);
+                detail::write_text_file(stdout_path, dump_result.artifact_text);
+                detail::write_text_file(stderr_path, dump_result.diagnostics_text);
+
+                result.exit_code = 0;
+                result.success = true;
+                result.command = std::move(dump_result.command);
+                result.artifact_text = std::move(dump_result.artifact_text);
+                result.diagnostics_text = std::move(dump_result.diagnostics_text);
+                result.opcode_table = std::move(dump_result.opcode_table);
+                result.operations = std::move(dump_result.operations);
+                return result;
+            }
+
+            if (kind == analysis_kind::ir && request.import_context) {
+                auto shared_stem = build_unit_hash + ".full";
+                auto shared_artifact_path = kind_dir / (shared_stem + extension);
+                auto shared_stdout_path = kind_dir / (shared_stem + ".stdout.txt");
+                auto shared_stderr_path = kind_dir / (shared_stem + ".stderr.txt");
+                auto shared_compile_stdout_path = kind_dir / (shared_stem + ".compile.stdout.txt");
+                auto shared_compile_stderr_path = kind_dir / (shared_stem + ".compile.stderr.txt");
+
+                auto built_shared = false;
+                auto shared_command = std::vector<std::string>{};
+
+                std::error_code shared_text_ec{};
+                auto has_shared_text = fs::exists(shared_artifact_path, shared_text_ec) && !shared_text_ec;
+                if (!has_shared_text) {
+                    auto import_dir = inputs_dir / "ir.import";
+                    auto modules = detail::compile_import_ir_modules(
+                            request,
+                            *request.import_context,
+                            import_dir,
+                            shared_compile_stdout_path,
+                            shared_compile_stderr_path);
+                    auto compile_stdout = detail::read_text_file(shared_compile_stdout_path);
+                    auto compile_stderr = detail::read_text_file(shared_compile_stderr_path);
+                    if (!modules) {
+                        detail::write_text_file(stdout_path, compile_stdout);
+                        detail::write_text_file(stderr_path, compile_stderr);
+                        detail::write_text_file(artifact_path, compile_stdout);
+
+                        result.exit_code = 1;
+                        result.success = false;
+                        result.command = {};
+                        result.artifact_text = std::move(compile_stdout);
+                        result.diagnostics_text = std::move(compile_stderr);
+                        return result;
+                    }
+
+                    auto merged_ir = std::ostringstream{};
+                    auto wrote_any_module = false;
+                    for (const auto& module : *modules) {
+                        auto module_text = detail::read_text_file(module.module_path);
+                        if (detail::trim_ascii(module_text).empty()) {
+                            continue;
+                        }
+                        if (wrote_any_module) {
+                            merged_ir << '\n';
+                        }
+                        merged_ir << "; -- import module: " << module.source_path.string() << '\n';
+                        merged_ir << module_text;
+                        if (!module_text.ends_with('\n')) {
+                            merged_ir << '\n';
+                        }
+                        wrote_any_module = true;
+                        shared_command = module.command;
+                    }
+
+                    auto merged_ir_text = merged_ir.str();
+                    if (detail::trim_ascii(merged_ir_text).empty()) {
+                        detail::write_text_file(stdout_path, compile_stdout);
+                        detail::write_text_file(stderr_path, compile_stderr);
+                        detail::write_text_file(artifact_path, compile_stdout);
+
+                        result.exit_code = 1;
+                        result.success = false;
+                        result.command = std::move(shared_command);
+                        result.artifact_text = std::move(compile_stdout);
+                        result.diagnostics_text = std::move(compile_stderr);
+                        return result;
+                    }
+
+                    detail::write_text_file(shared_artifact_path, merged_ir_text);
+                    detail::write_text_file(
+                            shared_stdout_path, compile_stdout.empty() ? merged_ir_text : compile_stdout);
+                    detail::write_text_file(shared_stderr_path, compile_stderr);
+                    built_shared = true;
+                }
+
+                auto full_artifact_text = detail::read_text_file(shared_artifact_path);
+                auto stdout_text = detail::read_text_file(shared_stdout_path);
+                auto diagnostics_text = detail::read_text_file(shared_stderr_path);
+
+                if (stdout_text.empty()) {
+                    stdout_text = full_artifact_text;
+                }
+
+                auto output_text = full_artifact_text;
+                if (request.symbol) {
+                    auto resolved = detail::resolve_symbol_name(request, *request.symbol);
+                    if (!resolved) {
+                        throw std::runtime_error("unable to resolve symbol: {}"_format(*request.symbol));
+                    }
+
+                    auto extracted = detail::extract_ir_for_symbol(output_text, *resolved);
+                    if (extracted.empty()) {
+                        throw std::runtime_error("symbol not found in artifact: {}"_format(*resolved));
+                    }
+
+                    output_text = std::move(extracted);
+                }
+
+                detail::write_text_file(artifact_path, output_text);
+                detail::write_text_file(stdout_path, stdout_text);
+                detail::write_text_file(stderr_path, diagnostics_text);
+
+                result.exit_code = 0;
+                result.success = true;
+                result.command = built_shared ? std::move(shared_command) : std::vector<std::string>{};
+                result.artifact_text = std::move(output_text);
+                result.diagnostics_text = std::move(diagnostics_text);
+                return result;
+            }
+
             auto shared_stem = build_unit_hash + ".full";
             auto shared_artifact_path = kind_dir / (shared_stem + extension);
             auto shared_stdout_path = kind_dir / (shared_stem + ".stdout.txt");
