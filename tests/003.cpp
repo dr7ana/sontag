@@ -540,10 +540,47 @@ namespace sontag::test {
 
         auto addendum_info = resolve_symbol_info(linked_request, "add@PLT");
         REQUIRE(addendum_info.has_value());
-        CHECK(addendum_info->status != symbol_resolution_status::missing);
+        CHECK(addendum_info->status == symbol_resolution_status::resolved_stub);
+        CHECK(addendum_info->confidence == symbol_resolution_confidence::exact_relocation);
         CHECK(addendum_info->canonical_name == linked_info->canonical_name);
+        CHECK(addendum_info->source.find("relocation_alias") != std::string::npos);
         REQUIRE(addendum_info->addendum.has_value());
         CHECK(*addendum_info->addendum == "PLT");
+
+        auto indirect_info = resolve_symbol_info(linked_request, "add@GOT");
+        REQUIRE(indirect_info.has_value());
+        CHECK(indirect_info->status == symbol_resolution_status::unresolved_indirect);
+        CHECK(indirect_info->confidence == symbol_resolution_confidence::exact_relocation);
+        CHECK(indirect_info->canonical_name == linked_info->canonical_name);
+        CHECK(indirect_info->source.find("relocation_alias") != std::string::npos);
+        CHECK(indirect_info->source.find("indirect") != std::string::npos);
+        REQUIRE(indirect_info->addendum.has_value());
+        CHECK(*indirect_info->addendum == "GOT");
+
+        auto missing_info = resolve_symbol_info(linked_request, "not_a_symbol");
+        REQUIRE(missing_info.has_value());
+        CHECK(missing_info->status == symbol_resolution_status::missing);
+        CHECK(missing_info->confidence == symbol_resolution_confidence::heuristic_match);
+        CHECK(missing_info->source == "unresolved");
+        CHECK(missing_info->canonical_name == "not_a_symbol");
+
+        auto missing_indirect_info = resolve_symbol_info(linked_request, "not_a_symbol@GOT");
+        REQUIRE(missing_indirect_info.has_value());
+        CHECK(missing_indirect_info->status == symbol_resolution_status::unresolved_indirect);
+        CHECK(missing_indirect_info->confidence == symbol_resolution_confidence::heuristic_match);
+        CHECK(missing_indirect_info->source == "unresolved_indirect");
+        CHECK(missing_indirect_info->canonical_name == "not_a_symbol");
+        REQUIRE(missing_indirect_info->addendum.has_value());
+        CHECK(*missing_indirect_info->addendum == "GOT");
+
+        auto static_request = linked_request;
+        static_request.session_dir = temp.path / "session_static_linked";
+        static_request.static_link = true;
+        auto static_indirect_info = resolve_symbol_info(static_request, "add@GOT");
+        REQUIRE(static_indirect_info.has_value());
+        CHECK(static_indirect_info->status == symbol_resolution_status::unresolved_indirect);
+        CHECK(static_indirect_info->confidence == symbol_resolution_confidence::exact_relocation);
+        CHECK(static_indirect_info->source.find("relocation_alias") != std::string::npos);
 
         auto object_only_request = linked_request;
         object_only_request.session_dir = temp.path / "session_object_only";
@@ -552,6 +589,11 @@ namespace sontag::test {
         auto object_only_info = resolve_symbol_info(object_only_request, "add");
         REQUIRE(object_only_info.has_value());
         CHECK(object_only_info->status == symbol_resolution_status::resolved_object_only);
+        auto object_only_indirect_info = resolve_symbol_info(object_only_request, "add@GOT");
+        REQUIRE(object_only_indirect_info.has_value());
+        CHECK(object_only_indirect_info->status == symbol_resolution_status::unresolved_indirect);
+        CHECK(object_only_indirect_info->confidence == symbol_resolution_confidence::exact_relocation);
+        CHECK(object_only_indirect_info->source.find("relocation_alias") != std::string::npos);
     }
 
     TEST_CASE(
@@ -616,7 +658,8 @@ namespace sontag::test {
         REQUIRE(info.has_value());
         CHECK(info->display_name == "square(int)");
         CHECK(info->status == symbol_resolution_status::resolved_stub);
-        CHECK(info->source == "symtab_token_prefix_stub");
+        CHECK(info->confidence == symbol_resolution_confidence::exact_relocation);
+        CHECK(info->source == "symtab_token_prefix_relocation_alias_stub");
     }
 
     TEST_CASE("003: mem_trace executes for non-main symbol without synthetic entrypoint shim", "[003][analysis][mem]") {

@@ -1670,6 +1670,24 @@ namespace sontag {
                 return 2;
             };
 
+            auto apply_relocation_alias_metadata = [&](ranked_match& match) {
+                if (!requested_addendum.has_value() || match.addendum_rank == 0) {
+                    return;
+                }
+                match.confidence = symbol_resolution_confidence::exact_relocation;
+                switch (match.kind) {
+                    case match_kind::exact:
+                        match.source = "symtab_relocation_alias";
+                        break;
+                    case match_kind::canonical_exact:
+                        match.source = "symtab_canonical_relocation_alias";
+                        break;
+                    case match_kind::token_prefix:
+                        match.source = "symtab_token_prefix_relocation_alias";
+                        break;
+                }
+            };
+
             auto is_short_query = requested_canonical.size() <= 4U;
             auto has_addendum_query = requested_addendum.has_value();
             auto should_prioritize_snapshot_before_kind = [&](const ranked_match& lhs,
@@ -1728,6 +1746,7 @@ namespace sontag {
                             .presence_rank = compute_presence_rank(candidate, match_kind::exact),
                             .addendum_rank = compute_addendum_rank(candidate),
                             .canonical_length_delta = 0U};
+                    apply_relocation_alias_metadata(match);
                     if (!best.has_value() || is_better(match, *best)) {
                         best = match;
                     }
@@ -1746,6 +1765,7 @@ namespace sontag {
                             .presence_rank = compute_presence_rank(candidate, match_kind::canonical_exact),
                             .addendum_rank = compute_addendum_rank(candidate),
                             .canonical_length_delta = 0U};
+                    apply_relocation_alias_metadata(match);
                     if (!best.has_value() || is_better(match, *best)) {
                         best = match;
                     }
@@ -1777,6 +1797,7 @@ namespace sontag {
                             .presence_rank = compute_presence_rank(candidate, match_kind::token_prefix),
                             .addendum_rank = compute_addendum_rank(candidate),
                             .canonical_length_delta = canonical_delta};
+                    apply_relocation_alias_metadata(match);
                     if (!best.has_value() || is_better(match, *best)) {
                         best = match;
                     }
@@ -4546,10 +4567,10 @@ namespace sontag {
     std::optional<symbol_resolution_info> resolve_symbol_info(
             const analysis_request& request, std::string_view symbol) {
         auto match = detail::resolve_symbol_match(request, symbol);
-        if (!match) {
-            return std::nullopt;
+        if (match) {
+            return match->info;
         }
-        return match->info;
+        return detail::make_missing_symbol_resolution_info(symbol);
     }
 
     delta_report collect_delta_report(

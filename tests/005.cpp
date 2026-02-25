@@ -774,6 +774,55 @@ namespace sontag::test {
         CHECK(output.err.empty());
     }
 
+    TEST_CASE("005: inspect mem json reports varied sampled values", "[005][session][mem][json]") {
+        detail::temp_dir temp{"sontag_mem_inspect_value_status_varied_json"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.output = output_mode::json;
+        cfg.static_link = true;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int square(int x) { int y = x * x; return y; }\n"
+                "volatile int a = square(3);\n"
+                "volatile int b = square(4);\n"
+                "return a + b;\n"
+                ":inspect mem square\n"
+                ":quit\n");
+
+        CHECK(output.out.find("\"command\":\"inspect mem\"") != std::string::npos);
+        CHECK(output.out.find("\"observed_value\":\"<varied>\"") != std::string::npos);
+        CHECK(output.out.find("\"value_status\":\"varied\"") != std::string::npos);
+        CHECK(output.out.find("\"value_source\":\"runtime_trace_sampled\"") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: inspect mem json reports unknown values when trace is disabled", "[005][session][mem][json]") {
+        detail::temp_dir temp{"sontag_mem_inspect_value_status_unknown_json"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.output = output_mode::json;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int square(int x) { int y = x * x; return y; }\n"
+                "volatile int sink = square(3);\n"
+                "return sink;\n"
+                ":inspect mem square\n"
+                ":quit\n");
+
+        CHECK(output.out.find("\"command\":\"inspect mem\"") != std::string::npos);
+        CHECK(output.out.find("\"value_status\":\"unknown\"") != std::string::npos);
+        CHECK(output.out.find("\"value_source\":\"inferred_none\"") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
     TEST_CASE("005: delta command renders pairwise summary and opcode table info", "[005][session][delta]") {
         detail::temp_dir temp{"sontag_delta_command_table"};
 

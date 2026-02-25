@@ -580,29 +580,6 @@ namespace sontag::cli {
             return value.substr(first, (last - first) + 1U);
         }
 
-        static symbol_resolution_info make_symbol_resolution_fallback(
-                std::string_view requested_symbol, std::string_view display_symbol) {
-            auto info = symbol_resolution_info{};
-            auto requested = trim_view(requested_symbol);
-            info.raw_name = std::string{requested};
-            info.canonical_name = std::string{internal::symbols::canonical_symbol_for_match(requested)};
-            info.display_name = display_symbol.empty() ? std::string{requested} : std::string{display_symbol};
-            if (auto addendum = internal::symbols::extract_symbol_addendum(requested); addendum.has_value()) {
-                info.addendum = std::string{*addendum};
-                if (internal::symbols::addendum_implies_stub(*addendum) ||
-                    internal::symbols::addendum_implies_indirect(*addendum)) {
-                    info.status = symbol_resolution_status::unresolved_indirect;
-                    info.confidence = symbol_resolution_confidence::heuristic_match;
-                    info.source = "unresolved_indirect";
-                    return info;
-                }
-            }
-            info.status = symbol_resolution_status::missing;
-            info.confidence = symbol_resolution_confidence::heuristic_match;
-            info.source = "unresolved";
-            return info;
-        }
-
         static constexpr std::string_view trim_newline_edges(std::string_view value) {
             while (!value.empty() && (value.front() == '\n' || value.front() == '\r')) {
                 value.remove_prefix(1U);
@@ -4921,7 +4898,8 @@ examples:
                         std::optional<std::string> pending_before{};
                         for (const auto* event : candidate_events) {
                             if (event->access == internal::mem::access_kind::load) {
-                                pending_before = format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes));
+                                pending_before =
+                                        format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes));
                                 continue;
                             }
                             if (event->access == internal::mem::access_kind::store && pending_before.has_value()) {
@@ -7273,9 +7251,14 @@ examples:
 
                 if (cfg.output == output_mode::json) {
                     auto requested_symbol = symbol.value_or("main");
-                    auto symbol_info = resolve_symbol_info(request, requested_symbol)
-                                               .value_or(make_symbol_resolution_fallback(
-                                                       requested_symbol, mem_data.symbol_display));
+                    auto symbol_info =
+                            resolve_symbol_info(request, requested_symbol).value_or(symbol_resolution_info{});
+                    if (symbol_info.raw_name.empty()) {
+                        symbol_info.raw_name = requested_symbol;
+                    }
+                    if (symbol_info.source.empty()) {
+                        symbol_info.source = "unresolved";
+                    }
                     if (symbol_info.display_name.empty()) {
                         symbol_info.display_name = mem_data.symbol_display;
                     }
