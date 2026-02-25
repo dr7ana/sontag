@@ -213,7 +213,7 @@ namespace sontag::test {
         auto dot_text = ss.str();
         CHECK(dot_text.find("foo(int)") != std::string::npos);
         CHECK(dot_text.find("bar(int)") != std::string::npos);
-        CHECK(dot_text.find("__sontag_main()") != std::string::npos);
+        CHECK(dot_text.find("main()") != std::string::npos);
     }
 
 }  // namespace sontag::test

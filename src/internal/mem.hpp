@@ -1,6 +1,7 @@
 #pragma once
 
 #include "platform.hpp"
+#include "symbols.hpp"
 
 #include "sontag/format.hpp"
 #include "sontag/utils.hpp"
@@ -303,12 +304,17 @@ namespace sontag::internal::mem {
                 has_alpha = true;
                 continue;
             }
-            if (std::isdigit(static_cast<unsigned char>(c)) != 0 || c == '_' || c == ':' || c == '$' || c == '.') {
+            if (std::isdigit(static_cast<unsigned char>(c)) != 0 || c == '_' || c == ':' || c == '$' || c == '.' ||
+                c == '@') {
                 continue;
             }
             return std::nullopt;
         }
         if (!has_alpha) {
+            return std::nullopt;
+        }
+        token = symbols::strip_symbol_addendum(token);
+        if (token.empty()) {
             return std::nullopt;
         }
         return std::string{token};

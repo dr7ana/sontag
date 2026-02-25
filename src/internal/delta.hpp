@@ -55,6 +55,9 @@ namespace sontag {
         bool success{false};
         int exit_code{-1};
         std::filesystem::path artifact_path{};
+        symbol_resolution_status symbol_status{symbol_resolution_status::missing};
+        symbol_resolution_confidence symbol_confidence{symbol_resolution_confidence::heuristic_match};
+        std::string symbol_source{};
         std::vector<delta_operation> operations{};
         std::vector<delta_metric_entry> metrics{};
         std::string diagnostics_text{};
@@ -74,6 +77,7 @@ namespace sontag {
         bool success{false};
         std::string symbol{};
         std::string symbol_display{};
+        symbol_resolution_info symbol_resolution{};
         optimization_level baseline{optimization_level::o0};
         optimization_level target{optimization_level::o2};
         std::string baseline_label{};

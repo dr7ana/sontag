@@ -164,7 +164,7 @@ namespace sontag::test {
                 "uint64_t values[6];\n"
                 "values[0] = val;\n"
                 "values[3] = val / 2;\n");
-        request.symbol = "__sontag_main";
+        request.symbol = "main";
 
         auto result = run_analysis(request, analysis_kind::mca);
         if (result.exit_code == 127) {

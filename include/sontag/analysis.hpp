@@ -70,8 +70,85 @@ namespace sontag {
                 return "na"sv;
             case metric_status::error:
                 return "error"sv;
+            default:
+                [[unlikely]] return "na"sv;
         }
-        return "na"sv;
+    }
+
+    enum class symbol_resolution_status : uint8_t {
+        resolved_final,
+        resolved_object_only,
+        optimized_out,
+        resolved_stub,
+        unresolved_indirect,
+        missing,
+    };
+
+    inline constexpr std::string_view to_string(symbol_resolution_status status) {
+        switch (status) {
+            case symbol_resolution_status::resolved_final:
+                return "resolved_final"sv;
+            case symbol_resolution_status::resolved_object_only:
+                return "resolved_object_only"sv;
+            case symbol_resolution_status::optimized_out:
+                return "optimized_out"sv;
+            case symbol_resolution_status::resolved_stub:
+                return "resolved_stub"sv;
+            case symbol_resolution_status::unresolved_indirect:
+                return "unresolved_indirect"sv;
+            case symbol_resolution_status::missing:
+                return "missing"sv;
+            default:
+                [[unlikely]] return "missing"sv;
+        }
+    }
+
+    enum class symbol_resolution_confidence : uint8_t {
+        exact_symtab,
+        exact_relocation,
+        exact_label_match,
+        heuristic_match,
+    };
+
+    inline constexpr std::string_view to_string(symbol_resolution_confidence confidence) {
+        switch (confidence) {
+            case symbol_resolution_confidence::exact_symtab:
+                return "exact_symtab"sv;
+            case symbol_resolution_confidence::exact_relocation:
+                return "exact_relocation"sv;
+            case symbol_resolution_confidence::exact_label_match:
+                return "exact_label_match"sv;
+            case symbol_resolution_confidence::heuristic_match:
+                return "heuristic_match"sv;
+            default:
+                [[unlikely]] return "heuristic_match"sv;
+        }
+    }
+
+    struct symbol_resolution_info {
+        std::string raw_name{};
+        std::string canonical_name{};
+        std::string display_name{};
+        std::optional<std::string> addendum{};
+        symbol_resolution_status status{symbol_resolution_status::missing};
+        symbol_resolution_confidence confidence{symbol_resolution_confidence::heuristic_match};
+        std::string source{};
+    };
+
+    // TODO: replace `static_link` and `no_link` args with unified link_mode
+    enum class link_mode : uint8_t { nolink, dynamiclink, staticlink };
+
+    inline constexpr std::string_view to_string(link_mode mode) {
+        switch (mode) {
+            case link_mode::nolink:
+                return "nolink"sv;
+            case link_mode::dynamiclink:
+                return "dynamic"sv;
+            case link_mode::staticlink:
+                return "static"sv;
+            default:
+                [[unlikely]] return "na"sv;
+        }
     }
 
     struct analysis_request {
@@ -92,6 +169,11 @@ namespace sontag {
         std::string graph_format{"png"};
         std::optional<std::filesystem::path> dot_path{};
         bool verbose{false};
+        bool static_link{false};
+        bool no_link{false};
+        std::vector<std::filesystem::path> library_dirs{};
+        std::vector<std::string> libraries{};
+        std::vector<std::string> linker_args{};
     };
 
     struct analysis_opcode_entry {
@@ -123,6 +205,7 @@ namespace sontag {
         std::filesystem::path stderr_path{};
         std::string artifact_text{};
         std::string diagnostics_text{};
+        std::optional<std::filesystem::path> binary_path{};
         std::vector<std::string> command{};
         std::vector<analysis_opcode_entry> opcode_table{};
         std::vector<analysis_operation_entry> operations{};
@@ -133,11 +216,14 @@ namespace sontag {
         char kind{'?'};
         std::string mangled{};
         std::string demangled{};
+        bool present_in_object{false};
+        bool present_in_binary{false};
     };
 
     std::string synthesize_source(const analysis_request& request);
     analysis_result run_analysis(const analysis_request& request, analysis_kind kind);
     std::vector<analysis_symbol> list_symbols(const analysis_request& request);
+    std::optional<symbol_resolution_info> resolve_symbol_info(const analysis_request& request, std::string_view symbol);
 
 }  // namespace sontag
 
@@ -154,6 +240,30 @@ namespace std {
     struct formatter<sontag::metric_status, char> : formatter<std::string_view> {
         template <typename FormatContext>
         auto format(const sontag::metric_status& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+
+    template <>
+    struct formatter<sontag::symbol_resolution_status, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::symbol_resolution_status& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+
+    template <>
+    struct formatter<sontag::symbol_resolution_confidence, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::symbol_resolution_confidence& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(sontag::to_string(val), ctx);
+        }
+    };
+
+    template <>
+    struct formatter<sontag::link_mode, char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const sontag::link_mode& val, FormatContext& ctx) const {
             return formatter<std::string_view>::format(sontag::to_string(val), ctx);
         }
     };

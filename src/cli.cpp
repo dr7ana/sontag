@@ -11,6 +11,7 @@
 #include "internal/mem.hpp"
 #include "internal/opcode.hpp"
 #include "internal/platform.hpp"
+#include "internal/symbols.hpp"
 #include "internal/tables.hpp"
 #include "internal/types.hpp"
 
@@ -129,6 +130,7 @@ namespace sontag::cli { namespace detail {
         size_t globals{};
         size_t unknown{};
         bool trace_enabled{false};
+        std::optional<int> trace_exit_code{};
         bool trace_truncated{false};
         size_t trace_event_count{};
     };
@@ -162,6 +164,11 @@ namespace sontag::cli { namespace detail {
         std::string command{"inspect mem"};
         std::string symbol{};
         std::string symbol_display{};
+        std::string symbol_canonical{};
+        std::optional<std::string> symbol_addendum{};
+        std::string symbol_status{};
+        std::string symbol_confidence{};
+        std::string symbol_source{};
         mem_summary_output_record summary{};
         std::vector<mem_row_output_record> rows{};
     };
@@ -178,6 +185,9 @@ namespace sontag::cli { namespace detail {
         bool success{false};
         int exit_code{-1};
         std::string artifact_path{};
+        std::string symbol_status{};
+        std::string symbol_confidence{};
+        std::string symbol_source{};
         std::vector<delta_operation_output_record> operations{};
         std::vector<metric_output_record> metrics{};
         std::string diagnostics_text{};
@@ -189,6 +199,11 @@ namespace sontag::cli { namespace detail {
         bool success{false};
         std::string symbol{};
         std::string symbol_display{};
+        std::string symbol_canonical{};
+        std::optional<std::string> symbol_addendum{};
+        std::string symbol_status{};
+        std::string symbol_confidence{};
+        std::string symbol_source{};
         std::string baseline{};
         std::string target{};
         std::vector<delta_opcode_entry> opcode_table{};
@@ -294,6 +309,12 @@ namespace glz {
                        &T::exit_code,
                        "artifact_path",
                        &T::artifact_path,
+                       "symbol_status",
+                       &T::symbol_status,
+                       "symbol_confidence",
+                       &T::symbol_confidence,
+                       "symbol_source",
+                       &T::symbol_source,
                        "operations",
                        &T::operations,
                        "metrics",
@@ -316,6 +337,16 @@ namespace glz {
                        &T::symbol,
                        "symbol_display",
                        &T::symbol_display,
+                       "symbol_canonical",
+                       &T::symbol_canonical,
+                       "symbol_addendum",
+                       &T::symbol_addendum,
+                       "symbol_status",
+                       &T::symbol_status,
+                       "symbol_confidence",
+                       &T::symbol_confidence,
+                       "symbol_source",
+                       &T::symbol_source,
                        "baseline",
                        &T::baseline,
                        "target",
@@ -378,6 +409,8 @@ namespace glz {
                        &T::unknown,
                        "trace_enabled",
                        &T::trace_enabled,
+                       "trace_exit_code",
+                       &T::trace_exit_code,
                        "trace_truncated",
                        &T::trace_truncated,
                        "trace_event_count",
@@ -444,6 +477,16 @@ namespace glz {
                        &T::symbol,
                        "symbol_display",
                        &T::symbol_display,
+                       "symbol_canonical",
+                       &T::symbol_canonical,
+                       "symbol_addendum",
+                       &T::symbol_addendum,
+                       "symbol_status",
+                       &T::symbol_status,
+                       "symbol_confidence",
+                       &T::symbol_confidence,
+                       "symbol_source",
+                       &T::symbol_source,
                        "summary",
                        &T::summary,
                        "rows",
@@ -529,6 +572,29 @@ namespace sontag::cli {
             }
             auto last = value.find_last_not_of(" \t\r\n");
             return value.substr(first, (last - first) + 1U);
+        }
+
+        static symbol_resolution_info make_symbol_resolution_fallback(
+                std::string_view requested_symbol, std::string_view display_symbol) {
+            auto info = symbol_resolution_info{};
+            auto requested = trim_view(requested_symbol);
+            info.raw_name = std::string{requested};
+            info.canonical_name = std::string{internal::symbols::canonical_symbol_for_match(requested)};
+            info.display_name = display_symbol.empty() ? std::string{requested} : std::string{display_symbol};
+            if (auto addendum = internal::symbols::extract_symbol_addendum(requested); addendum.has_value()) {
+                info.addendum = std::string{*addendum};
+                if (internal::symbols::addendum_implies_stub(*addendum) ||
+                    internal::symbols::addendum_implies_indirect(*addendum)) {
+                    info.status = symbol_resolution_status::unresolved_indirect;
+                    info.confidence = symbol_resolution_confidence::heuristic_match;
+                    info.source = "unresolved_indirect";
+                    return info;
+                }
+            }
+            info.status = symbol_resolution_status::missing;
+            info.confidence = symbol_resolution_confidence::heuristic_match;
+            info.source = "unresolved";
+            return info;
         }
 
         static constexpr std::string_view trim_newline_edges(std::string_view value) {
@@ -1127,17 +1193,6 @@ namespace sontag::cli {
             }
 
             auto source_text = read_text_file(source_path);
-            auto sontag_probe = probe_driver_ast(cfg, source_path, "__sontag_main"sv);
-            if (!sontag_probe.success) {
-                if (!sontag_probe.message.empty()) {
-                    err << sontag_probe.message;
-                    if (!sontag_probe.message.ends_with('\n')) {
-                        err << '\n';
-                    }
-                }
-                return std::nullopt;
-            }
-
             auto main_probe = probe_driver_ast(cfg, source_path, "main"sv);
             if (!main_probe.success) {
                 if (!main_probe.message.empty()) {
@@ -1149,23 +1204,12 @@ namespace sontag::cli {
                 return std::nullopt;
             }
 
-            if (sontag_probe.found && main_probe.found) {
-                err << "file contains both __sontag_main and main; keep only one driver function\n";
+            if (!main_probe.found) {
+                err << "no main() function found; use :declfile <path> for declarative-only imports\n";
                 return std::nullopt;
             }
 
-            const auto* selected = static_cast<const ast_probe_result*>(nullptr);
-            if (sontag_probe.found) {
-                selected = &sontag_probe;
-            }
-            else if (main_probe.found) {
-                selected = &main_probe;
-            }
-            else {
-                err << "no driver function found (expected main or __sontag_main); "
-                       "use :declfile <path> for declarative-only imports\n";
-                return std::nullopt;
-            }
+            const auto* selected = &main_probe;
 
             auto line_offsets = build_line_offsets(source_text);
             auto function_start_offset =
@@ -1810,6 +1854,7 @@ namespace sontag::cli {
                    "  cpu={}\n"
                    "  toolchain_dir={}\n"
                    "  mca_cpu={}\n"
+                   "  static={}\n"
                    "  cache_dir={}\n"
                    "  output={}\n"
                    "  banner={}\n"
@@ -1823,6 +1868,7 @@ namespace sontag::cli {
                            effective_cpu_value(cfg),
                            internal::platform::toolchain_bin_prefix,
                            effective_mca_cpu_value(cfg),
+                           cfg.static_link,
                            display_absolute_path(cfg.cache_dir),
                            cfg.output,
                            cfg.banner_enabled,
@@ -1898,24 +1944,10 @@ namespace sontag::cli {
 
         static std::array<const char*, 6> config_category_menu_completions{
                 "ui", "build", "editor", "session", "q", nullptr};
-        static std::array<const char*, 17> config_build_menu_completions{
-                "std",
-                "std=c++20",
-                "std=c++23",
-                "std=c++2c",
-                "opt",
-                "opt=O0",
-                "opt=O1",
-                "opt=O2",
-                "opt=O3",
-                "opt=Ofast",
-                "opt=Oz",
-                "target",
-                "cpu",
-                "toolchain_dir",
-                "mca_cpu",
-                "q",
-                nullptr};
+        static std::array<const char*, 21> config_build_menu_completions{
+                "std",     "std=c++20", "std=c++23",   "std=c++2c",    "opt",       "opt=O0", "opt=O1",
+                "opt=O2",  "opt=O3",    "opt=Ofast",   "opt=Oz",       "target",    "cpu",    "toolchain_dir",
+                "mca_cpu", "static",    "static=true", "static=false", "libraries", "q",      nullptr};
         static std::array<const char*, 12> config_ui_menu_completions{
                 "output",
                 "output=table",
@@ -2057,7 +2089,8 @@ namespace sontag::cli {
 
         static bool is_valid_config_key_for_category(std::string_view category, std::string_view key) {
             if (category == "build"sv) {
-                return key == "std"sv || key == "opt"sv || key == "target"sv || key == "cpu"sv || key == "mca_cpu"sv;
+                return key == "std"sv || key == "opt"sv || key == "target"sv || key == "cpu"sv || key == "mca_cpu"sv ||
+                       key == "static"sv || key == "libraries"sv;
             }
             if (category == "ui"sv) {
                 return key == "output"sv || key == "color"sv || key == "color_scheme"sv;
@@ -2179,6 +2212,8 @@ namespace sontag::cli {
                 os << "  cpu={}\n"_format(effective_cpu_value(cfg));
                 os << "  toolchain_dir={}\n"_format(internal::platform::toolchain_bin_prefix);
                 os << "  mca_cpu={}\n"_format(effective_mca_cpu_value(cfg));
+                os << "  static={}\n"_format(cfg.static_link ? "true" : "false");
+                os << "  libraries={}\n"_format(utils::join_with_separator(cfg.libraries, ","sv));
                 return true;
             }
             if (key == "ui"sv) {
@@ -2231,6 +2266,14 @@ namespace sontag::cli {
                 }
                 if (selected_key == "mca_cpu"sv) {
                     os << "build:\n  mca_cpu={}\n"_format(effective_mca_cpu_value(cfg));
+                    return true;
+                }
+                if (selected_key == "static"sv) {
+                    os << "build:\n  static={}\n"_format(cfg.static_link ? "true" : "false");
+                    return true;
+                }
+                if (selected_key == "libraries"sv) {
+                    os << "build:\n  libraries={}\n"_format(utils::join_with_separator(cfg.libraries, ","sv));
                     return true;
                 }
                 return false;
@@ -2306,6 +2349,21 @@ namespace sontag::cli {
             return std::string{trimmed};
         }
 
+        static constexpr bool try_parse_bool(std::string_view value, bool& out) {
+            auto trimmed = trim_view(value);
+            if (utils::str_case_eq(trimmed, "true"sv) || utils::str_case_eq(trimmed, "1"sv) ||
+                utils::str_case_eq(trimmed, "yes"sv) || utils::str_case_eq(trimmed, "on"sv)) {
+                out = true;
+                return true;
+            }
+            if (utils::str_case_eq(trimmed, "false"sv) || utils::str_case_eq(trimmed, "0"sv) ||
+                utils::str_case_eq(trimmed, "no"sv) || utils::str_case_eq(trimmed, "off"sv)) {
+                out = false;
+                return true;
+            }
+            return false;
+        }
+
         static bool apply_config_assignment(startup_config& cfg, std::string_view assignment, std::ostream& err) {
             auto eq = assignment.find('=');
             if (eq == std::string_view::npos) {
@@ -2344,6 +2402,29 @@ namespace sontag::cli {
             }
             if (key == "build.mca_cpu"sv) {
                 cfg.mca_cpu = parse_optional_config_value(value);
+                return true;
+            }
+            if (key == "build.static"sv) {
+                if (!try_parse_bool(value, cfg.static_link)) {
+                    err << "invalid build.static: {} (expected true|false)\n"_format(value);
+                    return false;
+                }
+                return true;
+            }
+            if (key == "build.libraries"sv) {
+                cfg.libraries.clear();
+                auto remaining = std::string_view{value};
+                while (!remaining.empty()) {
+                    auto comma = remaining.find(',');
+                    auto token = comma == std::string_view::npos ? remaining : remaining.substr(0U, comma);
+                    auto trimmed = trim_view(token);
+                    if (!trimmed.empty()) {
+                        cfg.libraries.emplace_back(trimmed);
+                    }
+                    if (comma == std::string_view::npos)
+                        break;
+                    remaining = remaining.substr(comma + 1U);
+                }
                 return true;
             }
             if (key == "ui.output"sv) {
@@ -2408,11 +2489,11 @@ namespace sontag::cli {
   :reset file <path>
   :mark <name>
   :snapshots
-  :asm [symbol|@last] (default: __sontag_main)
+  :asm [symbol|@last] (default: main)
   :asm explore [symbol|@last]
-  :mem [symbol|@last] (default: __sontag_main)
+  :mem [symbol|@last] (default: main)
   :mem explore [symbol|@last]
-  :ir [symbol|@last] (default: __sontag_main)
+  :ir [symbol|@last] (default: main)
   :ir explore [symbol|@last]
   :diag [symbol|@last]
   :mca [symbol|@last]
@@ -2493,6 +2574,18 @@ examples:
             return std::optional<std::string_view>{tail};
         }
 
+        static bool source_needs_pthread(const std::vector<std::string>& cells) {
+            for (const auto& cell : cells) {
+                if (cell.find("#include <mutex>") != std::string::npos ||
+                    cell.find("#include <thread>") != std::string::npos ||
+                    cell.find("#include <condition_variable>") != std::string::npos ||
+                    cell.find("#include <atomic>") != std::string::npos) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         static analysis_request make_analysis_request(const startup_config& cfg, const repl_state& state) {
             analysis_request request{};
             request.clang_path = cfg.clang_path;
@@ -2511,6 +2604,16 @@ examples:
             request.graph_format = cfg.graph_format;
             request.dot_path = cfg.dot_path;
             request.verbose = cfg.verbose;
+            request.static_link = cfg.static_link;
+            request.no_link = cfg.no_link;
+            request.library_dirs = cfg.library_dirs;
+            request.libraries = cfg.libraries;
+            request.linker_args = cfg.linker_args;
+            if (source_needs_pthread(request.decl_cells) || source_needs_pthread(request.exec_cells)) {
+                if (std::ranges::find(request.libraries, "pthread") == request.libraries.end()) {
+                    request.libraries.emplace_back("pthread");
+                }
+            }
             return request;
         }
 
@@ -2932,6 +3035,11 @@ examples:
             payload.success = report.success;
             payload.symbol = report.symbol;
             payload.symbol_display = report.symbol_display;
+            payload.symbol_canonical = report.symbol_resolution.canonical_name;
+            payload.symbol_addendum = report.symbol_resolution.addendum;
+            payload.symbol_status = "{}"_format(report.symbol_resolution.status);
+            payload.symbol_confidence = "{}"_format(report.symbol_resolution.confidence);
+            payload.symbol_source = report.symbol_resolution.source;
             payload.baseline = report.baseline_label;
             payload.target = report.target_label;
             payload.opcode_table = report.opcode_table;
@@ -2944,6 +3052,9 @@ examples:
                         .success = level.success,
                         .exit_code = level.exit_code,
                         .artifact_path = level.artifact_path.string(),
+                        .symbol_status = "{}"_format(level.symbol_status),
+                        .symbol_confidence = "{}"_format(level.symbol_confidence),
+                        .symbol_source = level.symbol_source,
                         .diagnostics_text = level.diagnostics_text};
                 level_payload.operations.reserve(level.operations.size());
                 for (const auto& operation : level.operations) {
@@ -3047,13 +3158,14 @@ examples:
             std::vector<std::pair<std::string, size_t>> opcode_counts{};
             size_t alias_groups{};
             bool trace_enabled{false};
+            std::optional<int> trace_exit_code{};
             bool trace_truncated{false};
             size_t trace_event_count{};
         };
 
         struct mem_analysis_data {
             analysis_result asm_result{};
-            std::string symbol_display{"__sontag_main()"};
+            std::string symbol_display{"main()"};
             mem_summary summary{};
             std::vector<internal::explorer::instruction_info> row_info{};
             internal::explorer::resource_pressure_table resource_pressure{};
@@ -4314,9 +4426,19 @@ examples:
                     }
                 }
 
-                std::sort(scored.begin(), scored.end(), [](const auto& lhs, const auto& rhs) {
+                auto distance_from_row = [row_line = row.line + 1U](size_t ir_line) constexpr {
+                    return ir_line > row_line ? ir_line - row_line : row_line - ir_line;
+                };
+
+                // for equal values, take the closest/matching IR line
+                std::ranges::sort(scored.begin(), scored.end(), [&](auto& lhs, auto& rhs) {
                     if (lhs.first != rhs.first) {
                         return lhs.first > rhs.first;
+                    }
+                    auto lhs_distance = distance_from_row(lhs.second);
+                    auto rhs_distance = distance_from_row(rhs.second);
+                    if (lhs_distance != rhs_distance) {
+                        return lhs_distance < rhs_distance;
                     }
                     return lhs.second < rhs.second;
                 });
@@ -4378,6 +4500,7 @@ examples:
 
         struct mem_trace_artifact {
             std::string symbol{};
+            std::optional<int> tracee_exit_code{};
             bool truncated{false};
             size_t dropped_events{};
             std::vector<mem_trace_map_record> map{};
@@ -4522,6 +4645,12 @@ examples:
                             if (key == "symbol"sv) {
                                 artifact.symbol = std::string{value};
                             }
+                            else if (key == "tracee_exit_code"sv) {
+                                auto raw_exit = uint64_t{0};
+                                if (parse_uint64_decimal(value, raw_exit)) {
+                                    artifact.tracee_exit_code = static_cast<int>(raw_exit);
+                                }
+                            }
                             else if (key == "truncated"sv) {
                                 artifact.truncated = (value == "true"sv);
                             }
@@ -4646,6 +4775,7 @@ examples:
             }
 
             summary.trace_enabled = true;
+            summary.trace_exit_code = parsed->tracee_exit_code;
             summary.trace_truncated = parsed->truncated;
             summary.trace_event_count = parsed->events.size();
 
@@ -4965,10 +5095,18 @@ examples:
         }
 
         static mem_inspect_output_record to_mem_inspect_output_record(
-                std::string_view symbol, std::string_view symbol_display, const mem_summary& summary) {
+                std::string_view symbol,
+                std::string_view symbol_display,
+                const symbol_resolution_info& symbol_info,
+                const mem_summary& summary) {
             auto payload = mem_inspect_output_record{};
             payload.symbol = std::string{symbol};
             payload.symbol_display = std::string{symbol_display};
+            payload.symbol_canonical = symbol_info.canonical_name;
+            payload.symbol_addendum = symbol_info.addendum;
+            payload.symbol_status = "{}"_format(symbol_info.status);
+            payload.symbol_confidence = "{}"_format(symbol_info.confidence);
+            payload.symbol_source = symbol_info.source;
             payload.summary.memory_ops = summary.totals.memory_ops;
             payload.summary.loads = summary.totals.loads;
             payload.summary.stores = summary.totals.stores;
@@ -4978,6 +5116,7 @@ examples:
             payload.summary.globals = summary.totals.globals;
             payload.summary.unknown = summary.totals.unknown;
             payload.summary.trace_enabled = summary.trace_enabled;
+            payload.summary.trace_exit_code = summary.trace_exit_code;
             payload.summary.trace_truncated = summary.trace_truncated;
             payload.summary.trace_event_count = summary.trace_event_count;
             payload.rows.reserve(summary.rows.size());
@@ -5024,6 +5163,14 @@ examples:
             auto dump_text = dump_result.success ? std::string_view{dump_result.artifact_text} : std::string_view{};
 
             auto asm_summary = summarize_asm_artifact(data.asm_result.artifact_text, dump_text);
+            if (asm_summary.rows.empty() && !dump_text.empty()) {
+                asm_summary.rows = parse_dump_rows(dump_text);
+                asm_summary.operations = asm_summary.rows.size();
+                for (const auto& row : asm_summary.rows) {
+                    auto [mnemonic, _] = split_asm_instruction_parts(row.instruction);
+                    append_opcode_count(asm_summary.opcode_counts, mnemonic);
+                }
+            }
             auto mca_result = run_analysis(request, analysis_kind::mca);
             if (mca_result.success) {
                 data.row_info = parse_mca_instruction_info_rows(mca_result.artifact_text);
@@ -5037,9 +5184,11 @@ examples:
             if (ir_result.success) {
                 attach_mem_ir_hints(data.summary, ir_result.artifact_text);
             }
-            auto trace_result = run_analysis(request, analysis_kind::mem_trace);
-            if (trace_result.success) {
-                apply_mem_runtime_trace(data.summary, trace_result.artifact_text);
+            if (request.static_link) {
+                auto trace_result = run_analysis(request, analysis_kind::mem_trace);
+                if (trace_result.success) {
+                    apply_mem_runtime_trace(data.summary, trace_result.artifact_text);
+                }
             }
             if (auto symbol = extract_asm_display_symbol(data.asm_result.artifact_text); symbol.has_value()) {
                 data.symbol_display = *symbol;
@@ -5257,6 +5406,7 @@ examples:
                 std::string_view symbol_display,
                 const mem_summary& summary,
                 std::string_view modified_color,
+                bool static_link_enabled,
                 std::ostream& os) {
             os << "mem:\n";
             os << "symbol: {}\n"_format(symbol_display);
@@ -5269,8 +5419,23 @@ examples:
                     summary.alias_groups);
             os << "  stack={} | globals={} | unknown={}\n"_format(
                     summary.totals.stack, summary.totals.globals, summary.totals.unknown);
-            if (!summary.trace_enabled) {
-                os << "  trace: unavailable (compilation or execution failed)\n";
+            if (summary.trace_enabled && summary.trace_exit_code.has_value() && *summary.trace_exit_code != 0) {
+                auto trace_line = "  trace: enabled (exit_code={})"_format(*summary.trace_exit_code);
+                if (!modified_color.empty()) {
+                    auto marker = " (exit_code="sv;
+                    if (auto marker_pos = trace_line.find(marker); marker_pos != std::string::npos) {
+                        trace_line = colorize_asm_text_span(trace_line, marker_pos, trace_line.size(), modified_color);
+                    }
+                }
+                os << trace_line << '\n';
+            }
+            else if (!summary.trace_enabled) {
+                if (!static_link_enabled) {
+                    os << "  trace: disabled in dynamic mode (set build.static=true)\n";
+                }
+                else {
+                    os << "  trace: unavailable (compilation or execution failed)\n";
+                }
             }
             render_mem_rows_table(summary, os, modified_color);
         }
@@ -5567,7 +5732,11 @@ examples:
             if (!level.success) {
                 line.append(" | exit_code={}"_format(level.exit_code));
             }
+            else if (level.exit_code != 0) {
+                line.append(" (exit_code={})"_format(level.exit_code));
+            }
             line.append(" | operations={}"_format(level.operations.size()));
+            line.append(" | symbol_status={}"_format(level.symbol_status));
             auto opcode_counts = summarize_level_opcodes(level.operations);
             line.append(" | ");
             line.append(summarize_opcode_counts_inline(opcode_counts));
@@ -6380,9 +6549,23 @@ examples:
                 color_mode color_mode_value,
                 color_scheme delta_color_scheme_value,
                 std::ostream& os) {
+            auto show_color = should_use_color(color_mode_value);
+            auto palette = resolve_delta_color_palette(delta_color_scheme_value);
+
             os << "delta: {}\n"_format(report.success ? "valid"sv : "invalid"sv);
             os << "mode: {}\n"_format(report.mode);
             os << "symbol: {}\n"_format(report.symbol_display);
+            os << "symbol_resolution: status={} confidence={} source={}\n"_format(
+                    report.symbol_resolution.status,
+                    report.symbol_resolution.confidence,
+                    report.symbol_resolution.source.empty() ? "n/a"sv
+                                                            : std::string_view{report.symbol_resolution.source});
+            if (!report.symbol_resolution.canonical_name.empty()) {
+                os << "symbol_canonical: {}\n"_format(report.symbol_resolution.canonical_name);
+            }
+            if (report.symbol_resolution.addendum.has_value()) {
+                os << "symbol_addendum: {}\n"_format(*report.symbol_resolution.addendum);
+            }
             os << "baseline: {}\n"_format(report.baseline_label);
             os << "target: {}\n"_format(report.target_label);
             os << ("changes: unchanged={} modified={} inserted={} removed={} moved={}\n"_format(
@@ -6395,7 +6578,39 @@ examples:
 
             os << "levels:\n";
             for (const auto& level : report.levels) {
-                os << "{}\n"_format(format_delta_level_summary_line(level));
+                auto level_summary_line = format_delta_level_summary_line(level);
+                if (show_color && level.success && level.exit_code != 0) {
+                    auto marker = " (exit_code="sv;
+                    if (auto marker_pos = level_summary_line.find(marker); marker_pos != std::string::npos) {
+                        level_summary_line =
+                                colorize_asm_text_span(level_summary_line, marker_pos, level_summary_line.size(), palette.modified);
+                    }
+                }
+                os << "{}\n"_format(level_summary_line);
+            }
+
+            std::vector<std::string> optimized_out_levels{};
+            optimized_out_levels.reserve(report.levels.size());
+            for (const auto& level : report.levels) {
+                if (level.symbol_status != symbol_resolution_status::optimized_out) {
+                    continue;
+                }
+                optimized_out_levels.push_back(level.label.empty() ? "{}"_format(level.level) : level.label);
+            }
+            if (!optimized_out_levels.empty()) {
+                auto summary = std::string{"optimized out at: "};
+                for (size_t i = 0U; i < optimized_out_levels.size(); ++i) {
+                    if (i > 0U) {
+                        summary.append(", ");
+                    }
+                    summary.append(optimized_out_levels[i]);
+                }
+                if (show_color) {
+                    os << palette.modified << summary << "\x1b[0m\n";
+                }
+                else {
+                    os << summary << '\n';
+                }
             }
 
             if (!report.success) {
@@ -6417,7 +6632,6 @@ examples:
 
             auto levels = select_delta_side_by_side_levels(report);
             auto render_columns = build_delta_render_columns(levels);
-            auto show_color = should_use_color(color_mode_value);
             render_delta_side_by_side(report, render_columns, show_color, delta_color_scheme_value, os);
             render_delta_metrics_table(render_columns, os);
 
@@ -6571,6 +6785,9 @@ examples:
             report.symbol = current_report.symbol.empty() ? snapshot_report.symbol : current_report.symbol;
             report.symbol_display = current_report.symbol_display.empty() ? snapshot_report.symbol_display
                                                                           : current_report.symbol_display;
+            report.symbol_resolution = current_report.symbol_resolution.raw_name.empty()
+                                             ? snapshot_report.symbol_resolution
+                                             : current_report.symbol_resolution;
 
             auto current_level_record = *current_level;
             current_level_record.level = report.baseline;
@@ -6847,7 +7064,7 @@ examples:
                         (kind == analysis_kind::asm_text || kind == analysis_kind::dump || kind == analysis_kind::ir ||
                          kind == analysis_kind::mca) &&
                         arg->empty()) {
-                    request.symbol = std::string{"__sontag_main"};
+                    request.symbol = std::string{"main"};
                 }
 
                 if (kind == analysis_kind::asm_text && cfg.output != output_mode::json) {
@@ -6920,7 +7137,7 @@ examples:
                 return true;
             }
 
-            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            std::optional<std::string> symbol{std::string{"main"}};
             if (!tail.empty()) {
                 auto split = tail.find_first_of(" \t\r\n");
                 auto token = split == std::string_view::npos ? tail : trim_view(tail.substr(0U, split));
@@ -6951,7 +7168,8 @@ examples:
                     auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
                     modified_color = palette.modified;
                 }
-                render_mem_artifact_summary_and_body(mem_data.symbol_display, mem_data.summary, modified_color, out);
+                render_mem_artifact_summary_and_body(
+                        mem_data.symbol_display, mem_data.summary, modified_color, request.static_link, out);
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());
             }
@@ -6971,7 +7189,7 @@ examples:
                 return true;
             }
 
-            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            std::optional<std::string> symbol{std::string{"main"}};
             if (!arg->empty()) {
                 auto split = arg->find_first_of(" \t\r\n");
                 auto token = split == std::string_view::npos ? *arg : trim_view(arg->substr(0U, split));
@@ -6998,9 +7216,19 @@ examples:
                 }
 
                 if (cfg.output == output_mode::json) {
-                    auto requested_symbol = symbol.value_or("__sontag_main");
-                    auto payload =
-                            to_mem_inspect_output_record(requested_symbol, mem_data.symbol_display, mem_data.summary);
+                    auto requested_symbol = symbol.value_or("main");
+                    auto symbol_info = resolve_symbol_info(request, requested_symbol)
+                                               .value_or(make_symbol_resolution_fallback(
+                                                       requested_symbol, mem_data.symbol_display));
+                    if (symbol_info.display_name.empty()) {
+                        symbol_info.display_name = mem_data.symbol_display;
+                    }
+                    if (symbol_info.canonical_name.empty()) {
+                        symbol_info.canonical_name =
+                                std::string{internal::symbols::canonical_symbol_for_match(requested_symbol)};
+                    }
+                    auto payload = to_mem_inspect_output_record(
+                            requested_symbol, mem_data.symbol_display, symbol_info, mem_data.summary);
                     std::string json{};
                     auto ec = glz::write_json(payload, json);
                     if (ec) {
@@ -7015,7 +7243,8 @@ examples:
                     auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
                     modified_color = palette.modified;
                 }
-                render_mem_artifact_summary_and_body(mem_data.symbol_display, mem_data.summary, modified_color, out);
+                render_mem_artifact_summary_and_body(
+                        mem_data.symbol_display, mem_data.summary, modified_color, request.static_link, out);
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());
             }
@@ -7069,8 +7298,8 @@ examples:
                     size_t cursor{};
                 };
 
-                auto active = explore_frame_state{
-                        .symbol = symbol.has_value() ? *symbol : std::string{"__sontag_main"}, .cursor = 0U};
+                auto active =
+                        explore_frame_state{.symbol = symbol.has_value() ? *symbol : std::string{"main"}, .cursor = 0U};
                 std::vector<explore_frame_state> frame_stack{};
                 while (true) {
                     auto request = make_analysis_request(cfg, state);
@@ -7086,6 +7315,14 @@ examples:
                     auto dump_text =
                             dump_result.success ? std::string_view{dump_result.artifact_text} : std::string_view{};
                     auto summary = summarize_asm_artifact(asm_result.artifact_text, dump_text);
+                    if (summary.rows.empty() && !dump_text.empty()) {
+                        summary.rows = parse_dump_rows(dump_text);
+                        summary.operations = summary.rows.size();
+                        for (const auto& row : summary.rows) {
+                            auto [mnemonic, _] = split_asm_instruction_parts(row.instruction);
+                            append_opcode_count(summary.opcode_counts, mnemonic);
+                        }
+                    }
                     std::vector<internal::explorer::instruction_info> row_info{};
                     auto resource_pressure = internal::explorer::resource_pressure_table{};
 
@@ -7106,9 +7343,10 @@ examples:
                         selected_definition_color = palette.modified;
                         call_target_color = palette.removed;
                     }
+                    auto display_symbol = extract_asm_display_symbol(asm_result.artifact_text)
+                                                  .value_or(active.symbol.empty() ? "main()" : active.symbol);
                     auto model = internal::explorer::model{
-                            .symbol_display =
-                                    extract_asm_display_symbol(asm_result.artifact_text).value_or("__sontag_main()"),
+                            .symbol_display = std::move(display_symbol),
                             .operations_total = summary.operations,
                             .opcode_counts = summary.opcode_counts,
                             .rows = summary.rows,
@@ -7164,7 +7402,7 @@ examples:
             }
 
             auto symbol_arg = trim_view(tail.substr("explore"sv.size()));
-            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            std::optional<std::string> symbol{std::string{"main"}};
             if (!symbol_arg.empty()) {
                 auto split = symbol_arg.find_first_of(" \t\r\n");
                 auto token = split == std::string_view::npos ? symbol_arg : trim_view(symbol_arg.substr(0U, split));
@@ -7194,8 +7432,8 @@ examples:
                     size_t cursor{};
                 };
 
-                auto active = explore_frame_state{
-                        .symbol = symbol.has_value() ? *symbol : std::string{"__sontag_main"}, .cursor = 0U};
+                auto active =
+                        explore_frame_state{.symbol = symbol.has_value() ? *symbol : std::string{"main"}, .cursor = 0U};
                 std::vector<explore_frame_state> frame_stack{};
                 while (true) {
                     auto request = make_analysis_request(cfg, state);
@@ -7230,7 +7468,11 @@ examples:
                     if (launch.status == internal::explorer::launch_status::fallback) {
                         out << "{}\n"_format(launch.message);
                         render_mem_artifact_summary_and_body(
-                                mem_data.symbol_display, mem_data.summary, static_mem_modified_color, out);
+                                mem_data.symbol_display,
+                                mem_data.summary,
+                                static_mem_modified_color,
+                                request.static_link,
+                                out);
                         return true;
                     }
                     if (launch.next_symbol.has_value() && !launch.next_symbol->empty()) {
@@ -7271,7 +7513,7 @@ examples:
             }
 
             auto symbol_arg = trim_view(tail.substr("explore"sv.size()));
-            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            std::optional<std::string> symbol{std::string{"main"}};
             if (!symbol_arg.empty()) {
                 auto split = symbol_arg.find_first_of(" \t\r\n");
                 auto token = split == std::string_view::npos ? symbol_arg : trim_view(symbol_arg.substr(0U, split));
@@ -7717,21 +7959,6 @@ examples:
             return std::string(trimmed);
         }
 
-        static constexpr bool try_parse_bool(std::string_view value, bool& out) {
-            auto trimmed = trim_view(value);
-            if (utils::str_case_eq(trimmed, "true"sv) || utils::str_case_eq(trimmed, "1"sv) ||
-                utils::str_case_eq(trimmed, "yes"sv) || utils::str_case_eq(trimmed, "on"sv)) {
-                out = true;
-                return true;
-            }
-            if (utils::str_case_eq(trimmed, "false"sv) || utils::str_case_eq(trimmed, "0"sv) ||
-                utils::str_case_eq(trimmed, "no"sv) || utils::str_case_eq(trimmed, "off"sv)) {
-                out = false;
-                return true;
-            }
-            return false;
-        }
-
         static void delimit_frame([[maybe_unused]] const startup_config& cfg) {
 #ifdef SONTAG_MCP
             if (cfg.frame_delimiter) {
@@ -7898,6 +8125,7 @@ examples:
         app.add_option("--eval", eval_arg, "Execute command and exit");
         std::string snapshot_arg{};
         app.add_option("--snapshot", snapshot_arg, "Create named snapshot after loading files");
+        app.add_flag("--nolink", cfg.no_link, "Disable linking for dump analysis (fall back to .o)");
 #ifdef SONTAG_MCP
         app.add_flag("--frame-delimiter", cfg.frame_delimiter, "Emit \\x1e after each command output");
         app.add_flag("--mcp", cfg.mcp_mode, "Start MCP server");

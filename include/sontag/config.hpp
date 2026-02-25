@@ -289,6 +289,8 @@ namespace sontag {
         std::vector<std::filesystem::path> library_dirs{};
         std::vector<std::string> libraries{};
         std::vector<std::string> linker_args{};
+        bool static_link{false};
+        bool no_link{false};
 
         int compile_timeout_ms{30'000};
         int run_timeout_ms{30'000};

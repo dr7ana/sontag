@@ -111,7 +111,7 @@ constexpr int fold(int a, int b, int c) {
     return add(a, b);
 }
 
-int __sontag_main() {
+int main() {
     auto double_value = value * 2;
     values[0] = value;
     values[1] = double_value;
@@ -165,6 +165,7 @@ interactive memory access view with instrumented runtime tracing (WIP). rows sho
 controls:
 
 - `up`/`down` or `j`/`k`: move selection
+- `enter`: follow callable symbol on selected row (when available)
 - `q`: exit
 
 ![ir explore demo](docs/mem_explore.gif)
@@ -180,7 +181,7 @@ currently tested on:
 
 - `:decl <code>`: append declarative cell
 - `:declfile <path>`: import full file as one declarative cell
-- `:file <path>`: import file as decl + exec split from `main`/`__sontag_main`
+- `:file <path>`: import file as decl + exec split from `main`
 - `:openfile <path>`: open editor, run repo `.clang-format`, import with `:file` semantics
 - bare input (non-command): append executable cell
 - `:show <config|decl|exec|all>`: inspect current state
@@ -212,12 +213,12 @@ currently tested on:
 
 ### `:asm [symbol|@last]`
 
-- default symbol: `__sontag_main` (equivalent to `main`)
+- default symbol: `main` (equivalent to `main`)
 - prints operation summary, opcode counts, and normalized assembly rows
 
 ### `:ir [symbol|@last]`
 
-- default symbol: `__sontag_main`
+- default symbol: `main`
 - prints IR node table plus Sugiyama layout keyed by `n*` ids
 
 ### `:diag [symbol|@last]`
@@ -240,8 +241,7 @@ modes:
 
 snapshot mode defaults to implicit symbol scope:
 
-- `:delta <snapshot>` == `:delta <snapshot> __sontag_main`
-- `main` and `__sontag_main` are treated as equivalent
+- `:delta <snapshot>` == `:delta <snapshot> main`
 
 n-way snapshot compare:
 
@@ -406,4 +406,4 @@ if the persistent child crashes, the next `session_eval` returns an error and au
 
 - `color_scheme` currently supports `classic` and `vaporwave` (default).
 - default `build.opt` is `O0`.
-- generated source ensures synthesis of a single trailing `return` in `__sontag_main`.
+- generated source ensures synthesis of a single trailing `return` in `main`.

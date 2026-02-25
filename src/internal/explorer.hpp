@@ -1,5 +1,7 @@
 #pragma once
 
+#include "symbols.hpp"
+
 #include "sontag/format.hpp"
 #include "sontag/utils.hpp"
 
@@ -355,7 +357,7 @@ namespace sontag::internal::explorer {
             bool active{false};
         };
 
-        static constexpr size_t detail_lines_reserve = 16U;
+        static constexpr size_t detail_lines_reserve{12};
 
         static size_t calculate_rows_visible(size_t total_rows, size_t opcode_rows, bool has_resource_pressure) {
             // Fixed rows:
@@ -427,6 +429,15 @@ namespace sontag::internal::explorer {
             return ascii_iequals(mnemonic, "call"sv) || ascii_iequals(mnemonic, "bl"sv);
         }
 
+        static std::optional<std::string_view> normalize_call_target_candidate(std::string_view candidate) {
+            candidate = symbols::normalize_symbol_candidate(candidate);
+            if (candidate.empty()) {
+                return std::nullopt;
+            }
+
+            return candidate;
+        }
+
         static std::optional<std::string_view> extract_call_target_symbol(std::string_view instruction) {
             auto [mnemonic, operands] = split_instruction_parts(instruction);
             if (!is_call_like_mnemonic(mnemonic) || operands.empty()) {
@@ -445,6 +456,17 @@ namespace sontag::internal::explorer {
                 return std::nullopt;
             }
 
+            if (auto open = candidate.find('<'); open != std::string_view::npos) {
+                auto close = candidate.find('>', open + 1U);
+                if (close != std::string_view::npos && close > open + 1U) {
+                    if (auto normalized =
+                                normalize_call_target_candidate(candidate.substr(open + 1U, close - open - 1U));
+                        normalized.has_value()) {
+                        return normalized;
+                    }
+                }
+            }
+
             if (candidate.front() == '<' || candidate.front() == '*' || candidate.front() == '[' ||
                 candidate[0] == '-') {
                 return std::nullopt;
@@ -459,7 +481,7 @@ namespace sontag::internal::explorer {
                 return std::nullopt;
             }
 
-            return candidate;
+            return normalize_call_target_candidate(candidate);
         }
 
         static std::string format_aligned_instruction(std::string_view instruction, size_t mnemonic_width) {

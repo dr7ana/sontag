@@ -585,7 +585,7 @@ namespace sontag::test {
                 ":quit\n");
 
         auto decl_pos = output.out.find("#include <cstdint>");
-        auto main_pos = output.out.find("int __sontag_main() {");
+        auto main_pos = output.out.find("int main() {");
         auto first_pos = output.out.find("uint64_t first = 1;");
         auto second_pos = output.out.find("uint64_t second = first + 1;");
         REQUIRE(decl_pos != std::string::npos);
@@ -611,11 +611,11 @@ namespace sontag::test {
                 ":quit\n");
 
         CHECK(output.out.find("symbols:") != std::string::npos);
-        CHECK(output.out.find("__sontag_main") != std::string::npos);
+        CHECK(output.out.find("main") != std::string::npos);
         CHECK(output.out.find("foo(") != std::string::npos);
     }
 
-    TEST_CASE("005: asm command defaults to __sontag_main when no symbol is provided", "[005][session][asm]") {
+    TEST_CASE("005: asm command defaults to main when no symbol is provided", "[005][session][asm]") {
         detail::temp_dir temp{"sontag_asm_default_symbol"};
 
         startup_config cfg{};
@@ -630,7 +630,7 @@ namespace sontag::test {
                 ":quit\n");
 
         CHECK(output.out.find("symbol: ") != std::string::npos);
-        CHECK(output.out.find("__sontag_main") != std::string::npos);
+        CHECK(output.out.find("main") != std::string::npos);
         CHECK(output.out.find("zeta_default_asm_visibility_probe") == std::string::npos);
         CHECK(output.out.find("asm:") != std::string::npos);
         CHECK(output.out.find("operations: ") != std::string::npos);
@@ -643,7 +643,7 @@ namespace sontag::test {
         CHECK(output.err.empty());
     }
 
-    TEST_CASE("005: ir command defaults to __sontag_main when no symbol is provided", "[005][session][ir]") {
+    TEST_CASE("005: ir command defaults to main when no symbol is provided", "[005][session][ir]") {
         detail::temp_dir temp{"sontag_ir_default_symbol"};
 
         startup_config cfg{};
@@ -657,7 +657,7 @@ namespace sontag::test {
                 ":ir\n"
                 ":quit\n");
 
-        CHECK(output.out.find("__sontag_main") != std::string::npos);
+        CHECK(output.out.find("main") != std::string::npos);
         CHECK(output.out.find("zeta_default_ir_visibility_probe") == std::string::npos);
         CHECK(output.err.empty());
     }
@@ -678,8 +678,74 @@ namespace sontag::test {
 
         CHECK(output.out.find("asm explore: requires an interactive tty") != std::string::npos);
         CHECK(output.out.find("asm:") != std::string::npos);
-        CHECK(output.out.find("symbol: __sontag_main") != std::string::npos);
+        CHECK(output.out.find("symbol: main") != std::string::npos);
         CHECK(output.out.find("assembly:") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: mem reports trace disabled message in dynamic mode", "[005][session][mem]") {
+        detail::temp_dir temp{"sontag_mem_dynamic_trace_message"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int square(int x) { return x * x; }\n"
+                "auto value = square(3);\n"
+                ":mem\n"
+                ":quit\n");
+
+        CHECK(output.out.find("mem:") != std::string::npos);
+        CHECK(output.out.find("trace: disabled in dynamic mode (set build.static=true)") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: mem main reports square result in static mode", "[005][session][mem]") {
+        detail::temp_dir temp{"sontag_mem_static_main_value"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.static_link = true;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int square(int x) { return x * x; }\n"
+                "auto value = square(3);\n"
+                ":mem\n"
+                ":quit\n");
+
+        CHECK(output.out.find("mem:") != std::string::npos);
+        CHECK(output.out.find("trace: disabled in dynamic mode (set build.static=true)") == std::string::npos);
+        CHECK(output.out.find("0x00000009") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: mem reports nonzero trace exit inline while keeping trace data", "[005][session][mem]") {
+        detail::temp_dir temp{"sontag_mem_trace_nonzero_exit"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.static_link = true;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int square(int x) { int y = x * x; return y; }\n"
+                "volatile int sink = square(3);\n"
+                "return sink;\n"
+                ":mem square\n"
+                ":quit\n");
+
+        CHECK(output.out.find("mem:") != std::string::npos);
+        CHECK(output.out.find("trace: enabled (exit_code=9)") != std::string::npos);
+        CHECK(output.out.find("trace: unavailable (compilation or execution failed)") == std::string::npos);
+        CHECK(output.out.find("0x00000003") != std::string::npos);
         CHECK(output.err.empty());
     }
 
@@ -719,14 +785,14 @@ namespace sontag::test {
         detail::write_text_file(
                 baseline_path,
                 "int seed = 9;\n"
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    int value = seed + 1;\n"
                 "    return value;\n"
                 "}\n");
         detail::write_text_file(
                 current_path,
                 "int seed = 3;\n"
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    return seed * 2;\n"
                 "}\n");
 
@@ -897,7 +963,7 @@ namespace sontag::test {
         detail::write_text_file(
                 source_path,
                 "int seed = 9;\n"
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    int x = seed + 1;\n"
                 "    return x;\n"
                 "}\n");
@@ -984,7 +1050,7 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells.empty());
     }
 
-    TEST_CASE("005: file loads declarative prefix and driver body", "[005][session][file]") {
+    TEST_CASE("005: file loads declarative prefix and preserves driver return value", "[005][session][file]") {
         detail::temp_dir temp{"sontag_file_load"};
         auto source_path = temp.path / "program.cpp";
         detail::write_text_file(
@@ -992,7 +1058,7 @@ namespace sontag::test {
                 "#include <cstdint>\n"
                 "uint64_t value = 64;\n"
                 "\n"
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    uint64_t doubled = value * 2;\n"
                 "    return static_cast<int>(doubled);\n"
                 "}\n");
@@ -1008,9 +1074,8 @@ namespace sontag::test {
         CHECK(output.out.find("#include <cstdint>") != std::string::npos);
         CHECK(output.out.find("uint64_t value = 64;") != std::string::npos);
         CHECK(output.out.find("uint64_t doubled = value * 2;") != std::string::npos);
-        CHECK(output.out.find("return static_cast<int>(doubled);") == std::string::npos);
-        CHECK(output.out.find("return 0;") != std::string::npos);
-        CHECK(output.out.find("return 0;\n}") != std::string::npos);
+        CHECK(output.out.find("return static_cast<int>(doubled);") != std::string::npos);
+        CHECK(output.out.find("return 0;") == std::string::npos);
 
         auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
@@ -1020,12 +1085,41 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells[0].find("uint64_t doubled = value * 2;") != std::string::npos);
     }
 
-    TEST_CASE("005: file keeps early returns but replaces terminal return", "[005][session][file][return]") {
+    TEST_CASE("005: file keeps return-only driver body visible in show output", "[005][session][file][return]") {
+        detail::temp_dir temp{"sontag_file_return_only"};
+        auto source_path = temp.path / "return_only.cpp";
+        detail::write_text_file(
+                source_path,
+                "int square(int x) {\n"
+                "    return x * x;\n"
+                "}\n"
+                "\n"
+                "int main() {\n"
+                "    return square(3);\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":file {}\n:show all\n:quit\n"_format(source_path.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("    return square(3);") != std::string::npos);
+        CHECK(output.out.find("    return 0;") == std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.exec_cells.size() == 1U);
+        CHECK(persisted_cells.exec_cells[0].find("return square(3);") != std::string::npos);
+    }
+
+    TEST_CASE("005: file keeps early returns and preserves terminal return", "[005][session][file][return]") {
         detail::temp_dir temp{"sontag_file_trailing_return"};
         auto source_path = temp.path / "returns.cpp";
         detail::write_text_file(
                 source_path,
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    int value = 4;\n"
                 "    if (value < 0) {\n"
                 "        return -1;\n"
@@ -1041,8 +1135,8 @@ namespace sontag::test {
         auto output = detail::run_repl_script_capture_output(cfg, script);
 
         CHECK(output.out.find("return -1;") != std::string::npos);
-        CHECK(output.out.find("return value + 2;") == std::string::npos);
-        CHECK(output.out.find("return 0;") != std::string::npos);
+        CHECK(output.out.find("return value + 2;") != std::string::npos);
+        CHECK(output.out.find("return 0;") == std::string::npos);
 
         auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
@@ -1050,7 +1144,7 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells[0].find("return value + 2;") != std::string::npos);
     }
 
-    TEST_CASE("005: executable cells replace terminal return with canonical return", "[005][session][return]") {
+    TEST_CASE("005: executable cells preserve terminal return values", "[005][session][return]") {
         detail::temp_dir temp{"sontag_exec_trailing_return"};
 
         startup_config cfg{};
@@ -1065,13 +1159,37 @@ namespace sontag::test {
                 ":quit\n");
 
         CHECK(output.out.find("int value = 12;") != std::string::npos);
-        CHECK(output.out.find("return value;") == std::string::npos);
-        CHECK(output.out.find("return 0;") != std::string::npos);
+        CHECK(output.out.find("return value;") != std::string::npos);
+        CHECK(output.out.find("return 0;") == std::string::npos);
 
         auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
         REQUIRE(persisted_cells.exec_cells.size() == 2U);
         CHECK(persisted_cells.exec_cells[1] == "return value;");
+    }
+
+    TEST_CASE("005: executable bare trailing return normalizes to canonical return", "[005][session][return]") {
+        detail::temp_dir temp{"sontag_exec_bare_return"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                "int value = 12;\n"
+                "return;\n"
+                ":show all\n"
+                ":quit\n");
+
+        CHECK(output.out.find("int value = 12;") != std::string::npos);
+        CHECK(output.out.find("    return;\n") == std::string::npos);
+        CHECK(output.out.find("return 0;") != std::string::npos);
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
+        REQUIRE(persisted_cells.exec_cells.size() == 2U);
+        CHECK(persisted_cells.exec_cells[1] == "return;");
     }
 
     TEST_CASE("005: file appends onto existing state", "[005][session][file][append]") {
@@ -1080,7 +1198,7 @@ namespace sontag::test {
         detail::write_text_file(
                 source_path,
                 "int seed = 11;\n"
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    int value = seed + 2;\n"
                 "    return value;\n"
                 "}\n");
@@ -1107,21 +1225,21 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells[0].find("int value = seed + 2;") != std::string::npos);
     }
 
-    TEST_CASE("005: multiple file imports synthesize a single canonical return", "[005][session][file][return]") {
+    TEST_CASE("005: multiple file imports keep explicit returns from imported mains", "[005][session][file][return]") {
         detail::temp_dir temp{"sontag_file_multi_return"};
         auto first_path = temp.path / "first.cpp";
         auto second_path = temp.path / "second.cpp";
         detail::write_text_file(
                 first_path,
                 "int seed = 4;\n"
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    int lhs = seed + 1;\n"
                 "    return lhs;\n"
                 "}\n");
         detail::write_text_file(
                 second_path,
                 "int value = 7;\n"
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    int rhs = value * 2;\n"
                 "    return rhs;\n"
                 "}\n");
@@ -1135,9 +1253,9 @@ namespace sontag::test {
 
         CHECK(output.out.find("int lhs = seed + 1;") != std::string::npos);
         CHECK(output.out.find("int rhs = value * 2;") != std::string::npos);
-        CHECK(output.out.find("return lhs;") == std::string::npos);
-        CHECK(output.out.find("return rhs;") == std::string::npos);
-        CHECK(detail::count_occurrences(output.out, "return 0;") == 1U);
+        CHECK(output.out.find("return lhs;") != std::string::npos);
+        CHECK(output.out.find("return rhs;") != std::string::npos);
+        CHECK(detail::count_occurrences(output.out, "return 0;") == 0U);
         CHECK(output.out.find("\n\n\n    // exec cell 2") == std::string::npos);
         CHECK(output.out.find("\n\n\n    return 0;") == std::string::npos);
     }
@@ -1148,7 +1266,7 @@ namespace sontag::test {
         detail::write_text_file(
                 source_path,
                 "int seed = 9;\n"
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    int value = seed + 1;\n"
                 "    return value;\n"
                 "}\n");
@@ -1178,7 +1296,7 @@ namespace sontag::test {
         detail::write_text_file(
                 source_path,
                 "int seed = 7;\n"
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    int value = seed + 3;\n"
                 "    return value;\n"
                 "}\n");
@@ -1271,7 +1389,7 @@ namespace sontag::test {
         hx_script.append("\"\n");
         hx_script.append("cat > \"$1\" <<'EOF'\n");
         hx_script.append("int seed = 5;\n");
-        hx_script.append("int __sontag_main() {\n");
+        hx_script.append("int main() {\n");
         hx_script.append("    int value = seed + 2;\n");
         hx_script.append("    return value;\n");
         hx_script.append("}\n");
@@ -1309,8 +1427,8 @@ namespace sontag::test {
         CHECK(output.out.find("loaded file") != std::string::npos);
         CHECK(output.out.find("int seed = 5;") != std::string::npos);
         CHECK(output.out.find("int value = seed + 2;") != std::string::npos);
-        CHECK(output.out.find("return value;") == std::string::npos);
-        CHECK(output.out.find("return 0;") != std::string::npos);
+        CHECK(output.out.find("return value;") != std::string::npos);
+        CHECK(output.out.find("return 0;") == std::string::npos);
 
         auto editor_args = detail::read_lines(editor_args_path);
         REQUIRE(editor_args.size() == 1U);
@@ -1368,7 +1486,7 @@ namespace sontag::test {
                 "set -eu\n"
                 "cat > \"$1\" <<'EOF'\n"
                 "int seed = 5;\n"
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    int value = seed + 2;\n"
                 "    return value;\n"
                 "}\n"
@@ -1429,30 +1547,6 @@ namespace sontag::test {
         CHECK(persisted_cells.decl_cells[0].find("int baseline = 1;") != std::string::npos);
     }
 
-    TEST_CASE("005: file rejects source with both main and __sontag_main", "[005][session][file]") {
-        detail::temp_dir temp{"sontag_file_conflict"};
-        auto source_path = temp.path / "conflict.cpp";
-        detail::write_text_file(
-                source_path,
-                "int main() { return 0; }\n"
-                "int __sontag_main() { return 0; }\n");
-
-        startup_config cfg{};
-        cfg.cache_dir = temp.path / "cache";
-        cfg.history_enabled = false;
-
-        auto script = ":file {}\n:quit\n"_format(source_path.string());
-        auto output = detail::run_repl_script_capture_output(cfg, script);
-
-        CHECK(output.err.find("file contains both __sontag_main and main; keep only one driver function") !=
-              std::string::npos);
-
-        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
-        auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
-        CHECK(persisted_cells.decl_cells.empty());
-        CHECK(persisted_cells.exec_cells.empty());
-    }
-
     TEST_CASE("005: file rejects source with no driver and suggests declfile", "[005][session][file]") {
         detail::temp_dir temp{"sontag_file_no_driver"};
         auto source_path = temp.path / "no_driver.cpp";
@@ -1468,7 +1562,7 @@ namespace sontag::test {
         auto script = ":file {}\n:quit\n"_format(source_path.string());
         auto output = detail::run_repl_script_capture_output(cfg, script);
 
-        CHECK(output.err.find("no driver function found (expected main or __sontag_main)") != std::string::npos);
+        CHECK(output.err.find("no main() function found") != std::string::npos);
         CHECK(output.err.find("use :declfile <path>") != std::string::npos);
 
         auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
@@ -1485,7 +1579,7 @@ namespace sontag::test {
         detail::write_text_file(
                 source_path,
                 "int seed = 5;\n"
-                "int __sontag_main() {\n"
+                "int main() {\n"
                 "    int value = seed + 1;\n"
                 "    return value;\n"
                 "}\n");
@@ -1550,7 +1644,7 @@ static int normalize(sample_point point, int scale) {
 
 int seed = 7;
 
-int __sontag_main() {
+int main() {
     // braces in comment: { nested } still comment
     layout state{};
     sample_point point{2, 3};
@@ -1616,7 +1710,7 @@ int __sontag_main() {
 
 int seed = 7;
 
-int __sontag_main() {
+int main() {
     int value = APPLY2(seed, 4);
     ASSIGN_AND_BUMP(value, SCALE3(value));
     return value;
@@ -1649,7 +1743,7 @@ int __sontag_main() {
         auto source_path = temp.path / "string_braces.cpp";
         detail::write_text_file(
                 source_path,
-                R"(int __sontag_main() {
+                R"(int main() {
     const char* text = "{not a block}";
     const char* raw = R"json({
   "payload": "value with } and { braces"
@@ -1676,12 +1770,12 @@ int __sontag_main() {
         CHECK(persisted_cells.exec_cells[0].find("return raw[0] == '{' ? 2 : 0;") != std::string::npos);
     }
 
-    TEST_CASE("005: file uses main as driver when __sontag_main is absent", "[005][session][file]") {
+    TEST_CASE("005: file uses main as driver when main is absent", "[005][session][file]") {
         detail::temp_dir temp{"sontag_file_main_driver"};
         auto source_path = temp.path / "main_driver.cpp";
         detail::write_text_file(
                 source_path,
-                R"(const char* note = "__sontag_main is not defined in this file";
+                R"(const char* note = "main is not defined in this file";
 int main() {
     int v = 11;
     return v;
@@ -1695,13 +1789,13 @@ int main() {
         auto script = ":file {}\n:quit\n"_format(source_path.string());
         auto output = detail::run_repl_script_capture_output(cfg, script);
         CHECK(output.out.find("loaded file") != std::string::npos);
-        CHECK(output.err.find("both __sontag_main and main") == std::string::npos);
+        CHECK(output.err.find("both main and main") == std::string::npos);
 
         auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
         REQUIRE(persisted_cells.decl_cells.size() == 1U);
         REQUIRE(persisted_cells.exec_cells.size() == 1U);
-        CHECK(persisted_cells.decl_cells[0].find("__sontag_main is not defined") != std::string::npos);
+        CHECK(persisted_cells.decl_cells[0].find("main is not defined") != std::string::npos);
         CHECK(persisted_cells.exec_cells[0].find("int v = 11;") != std::string::npos);
         CHECK(persisted_cells.exec_cells[0].find("return v;") != std::string::npos);
     }

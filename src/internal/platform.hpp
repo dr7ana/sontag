@@ -24,6 +24,7 @@ namespace sontag::internal::platform {
         inline constexpr auto llvm_nm_path = std::string_view{SONTAG_LLVM_NM_EXECUTABLE_PATH};
         inline constexpr auto llvm_objdump_path = std::string_view{SONTAG_LLVM_OBJDUMP_EXECUTABLE_PATH};
         inline constexpr auto llvm_mca_path = std::string_view{SONTAG_LLVM_MCA_EXECUTABLE_PATH};
+        inline constexpr auto lld_path = std::string_view{SONTAG_LLD_EXECUTABLE_PATH};
     }  // namespace tool
 
 }  // namespace sontag::internal::platform

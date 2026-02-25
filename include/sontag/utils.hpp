@@ -80,6 +80,13 @@ namespace sontag {
             return {value};
         }
 
+        inline std::string join_with_separator(const std::vector<std::string>& values, std::string_view separator) {
+            if (values.empty()) {
+                return {};
+            }
+            return values | std::views::join_with(separator) | std::ranges::to<std::string>();
+        }
+
     }  // namespace utils
 
 }  // namespace sontag

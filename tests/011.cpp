@@ -30,7 +30,7 @@ Max number of mappings used:         0
 
     TEST_CASE(
             "011: objdump symbol span parser computes byte span from instruction encodings", "[011][metrics][parser]") {
-        auto disassembly = R"(0000000000000000 <__sontag_main()>:
+        auto disassembly = R"(0000000000000000 <main()>:
    0: 55                            push    rbp
    1: 48 89 e5                      mov     rbp, rsp
    4: c3                            ret
@@ -57,7 +57,7 @@ Max number of mappings used:         0
                 delta_operation{.ordinal = 5U, .opcode_uid = 4U, .opcode = "call", .triplet = "call <l0>"},
                 delta_operation{.ordinal = 6U, .opcode_uid = 5U, .opcode = "ret", .triplet = "ret"}};
 
-        auto disassembly = R"(0000000000000000 <__sontag_main()>:
+        auto disassembly = R"(0000000000000000 <main()>:
    0: 55                            push    rbp
 loop_head:
    1: 48 89 e5                      mov     rbp, rsp

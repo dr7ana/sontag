@@ -79,6 +79,23 @@ namespace sontag::test {
             script << "echo objdump-ok\n";
             return script.str();
         }
+
+        static std::string make_nm_object_binary_split_script() {
+            std::ostringstream script{};
+            script << "#!/usr/bin/env bash\n";
+            script << "set -eu\n";
+            script << "target=\"${@: -1}\"\n";
+            script << "if [[ \"$target\" == *.o ]]; then\n";
+            script << "cat <<'EOF'\n";
+            script << "square(int) T 0 0\n";
+            script << "EOF\n";
+            script << "else\n";
+            script << "cat <<'EOF'\n";
+            script << "square() T 0 0\n";
+            script << "EOF\n";
+            script << "fi\n";
+            return script.str();
+        }
     }  // namespace detail
 
     TEST_CASE("003: analysis pipeline emits asm ir and diagnostics", "[003][analysis]") {
@@ -237,11 +254,11 @@ namespace sontag::test {
         CHECK_FALSE(detail::has_prefixed_arg(args, "--disassemble-symbols="));
 
         REQUIRE_FALSE(args.empty());
-        CHECK(args.back().ends_with(".o"));
+        CHECK(args.back().ends_with(".bin"));
     }
 
     TEST_CASE(
-            "003: dump analysis keeps full disassembly args when symbol is provided (post-extract path)",
+            "003: dump analysis fails when symbol extraction misses and avoids full-artifact fallback",
             "[003][analysis][dump]") {
         detail::temp_dir temp{"sontag_m1_dump_symbol"};
 
@@ -260,10 +277,11 @@ namespace sontag::test {
         request.symbol = "add";
 
         auto dump_result = run_analysis(request, analysis_kind::dump);
-        CHECK(dump_result.success);
-        CHECK(dump_result.exit_code == 0);
+        CHECK_FALSE(dump_result.success);
+        CHECK(dump_result.exit_code == 1);
         CHECK(dump_result.command.size() > 1U);
         CHECK(dump_result.command[0] == wrapper_path.string());
+        CHECK(dump_result.diagnostics_text.find("symbol not found in artifact") != std::string::npos);
 
         auto args = detail::read_lines(args_path);
         CHECK(detail::has_exact_arg(args, "--disassemble"));
@@ -326,7 +344,7 @@ namespace sontag::test {
         CHECK(result.exit_code == 0);
         CHECK(result.artifact_path.string().find("/artifacts/graphs/cfg/") != std::string::npos);
         CHECK(result.artifact_path.extension() == ".dot");
-        CHECK(result.artifact_text.find("__sontag_main") != std::string::npos);
+        CHECK(result.artifact_text.find("main") != std::string::npos);
         CHECK(result.artifact_text.find("dot: ") != std::string::npos);
         CHECK(result.artifact_text.find("rendered: ") != std::string::npos);
         CHECK(detail::fs::exists(result.artifact_path));
@@ -427,7 +445,7 @@ namespace sontag::test {
         REQUIRE_FALSE(symbols.empty());
 
         auto has_repl_entry = std::ranges::any_of(symbols, [](const analysis_symbol& symbol) {
-            return symbol.demangled == "__sontag_main()" || symbol.mangled == "__sontag_main";
+            return symbol.demangled == "main()" || symbol.mangled == "main";
         });
         auto has_foo = std::ranges::any_of(symbols, [](const analysis_symbol& symbol) {
             return symbol.demangled.find("foo(") != std::string::npos ||
@@ -436,6 +454,83 @@ namespace sontag::test {
 
         CHECK(has_repl_entry);
         CHECK(has_foo);
+    }
+
+    TEST_CASE("003: resolve_symbol_info supports addendum aliases and object fallback", "[003][analysis][symbols]") {
+        detail::temp_dir temp{"sontag_m1_resolve_symbol_info"};
+
+        analysis_request linked_request{};
+        linked_request.clang_path = "/usr/bin/clang++";
+        linked_request.session_dir = temp.path / "session_linked";
+        linked_request.language_standard = cxx_standard::cxx23;
+        linked_request.opt_level = optimization_level::o0;
+        linked_request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        linked_request.exec_cells = {"volatile int sink = add(1, 2);", "return sink;"};
+
+        auto linked_info = resolve_symbol_info(linked_request, "add");
+        REQUIRE(linked_info.has_value());
+        CHECK(linked_info->status == symbol_resolution_status::resolved_final);
+        CHECK(linked_info->display_name.find("add(") != std::string::npos);
+        CHECK(linked_info->source.find("symtab") != std::string::npos);
+
+        auto addendum_info = resolve_symbol_info(linked_request, "add@PLT");
+        REQUIRE(addendum_info.has_value());
+        CHECK(addendum_info->status != symbol_resolution_status::missing);
+        CHECK(addendum_info->canonical_name == linked_info->canonical_name);
+        REQUIRE(addendum_info->addendum.has_value());
+        CHECK(*addendum_info->addendum == "PLT");
+
+        auto object_only_request = linked_request;
+        object_only_request.session_dir = temp.path / "session_object_only";
+        object_only_request.no_link = true;
+
+        auto object_only_info = resolve_symbol_info(object_only_request, "add");
+        REQUIRE(object_only_info.has_value());
+        CHECK(object_only_info->status == symbol_resolution_status::resolved_object_only);
+    }
+
+    TEST_CASE(
+            "003: token-prefix resolver prefers object symbol over binary-only candidate", "[003][analysis][symbols]") {
+        detail::temp_dir temp{"sontag_m1_resolve_symbol_prefix_rank"};
+
+        auto nm_wrapper_path = temp.path / "tools" / "llvm-nm";
+        detail::make_executable_file(nm_wrapper_path, detail::make_nm_object_binary_split_script());
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.nm_path = nm_wrapper_path;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int square(int x) { return x * x; }"};
+
+        auto info = resolve_symbol_info(request, "square");
+        REQUIRE(info.has_value());
+        CHECK(info->display_name == "square(int)");
+        CHECK(info->status == symbol_resolution_status::resolved_object_only);
+        CHECK(info->source == "symtab_token_prefix");
+    }
+
+    TEST_CASE("003: mem_trace executes for non-main symbol without synthetic entrypoint shim", "[003][analysis][mem]") {
+        detail::temp_dir temp{"sontag_m1_mem_trace_non_main"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.static_link = true;
+        request.decl_cells = {"int square(int x) { int y = x * x; return y; }"};
+        request.exec_cells = {"volatile int sink = square(3);", "return sink;"};
+        request.symbol = "square";
+
+        auto trace_result = run_analysis(request, analysis_kind::mem_trace);
+        CHECK(trace_result.success);
+        CHECK(trace_result.exit_code == 9);
+        CHECK(trace_result.artifact_text.find("symbol=") != std::string::npos);
+        CHECK(trace_result.artifact_text.find("tracee_exit_code=9") != std::string::npos);
+        CHECK(trace_result.artifact_text.find("map_count=0") == std::string::npos);
+        CHECK(trace_result.artifact_text.find("event_count=0") == std::string::npos);
     }
 
 }  // namespace sontag::test
