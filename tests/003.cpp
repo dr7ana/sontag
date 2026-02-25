@@ -79,6 +79,80 @@ namespace sontag::test {
             script << "echo objdump-ok\n";
             return script.str();
         }
+
+        static std::string make_nm_object_binary_split_script() {
+            std::ostringstream script{};
+            script << "#!/usr/bin/env bash\n";
+            script << "set -eu\n";
+            script << "target=\"${@: -1}\"\n";
+            script << "if [[ \"$target\" == *.o ]]; then\n";
+            script << "cat <<'EOF'\n";
+            script << "square(int) T 0 0\n";
+            script << "EOF\n";
+            script << "else\n";
+            script << "cat <<'EOF'\n";
+            script << "square() T 0 0\n";
+            script << "EOF\n";
+            script << "fi\n";
+            return script.str();
+        }
+
+        static std::string make_nm_short_token_collision_script() {
+            std::ostringstream script{};
+            script << "#!/usr/bin/env bash\n";
+            script << "set -eu\n";
+            script << "target=\"${@: -1}\"\n";
+            script << "if [[ \"$target\" == *.o ]]; then\n";
+            script << "cat <<'EOF'\n";
+            script << "open(int) T 0 0\n";
+            script << "EOF\n";
+            script << "else\n";
+            script << "cat <<'EOF'\n";
+            script << "open T 0 0\n";
+            script << "EOF\n";
+            script << "fi\n";
+            return script.str();
+        }
+
+        static std::string make_nm_addendum_collision_script() {
+            std::ostringstream script{};
+            script << "#!/usr/bin/env bash\n";
+            script << "set -eu\n";
+            script << "target=\"${@: -1}\"\n";
+            script << "if [[ \"$target\" == *.o ]]; then\n";
+            script << "cat <<'EOF'\n";
+            script << "square(int) T 0 0\n";
+            script << "EOF\n";
+            script << "else\n";
+            script << "cat <<'EOF'\n";
+            script << "square T 0 0\n";
+            script << "EOF\n";
+            script << "fi\n";
+            return script.str();
+        }
+
+        static std::string make_mca_wrapper_script() {
+            std::ostringstream script{};
+            script << "#!/usr/bin/env bash\n";
+            script << "cat <<'EOF'\n";
+            script << "Iterations:        100\n";
+            script << "Instructions:      200\n";
+            script << "Total Cycles:      57\n";
+            script << "Total uOps:        200\n";
+            script << "Dispatch Width:    6\n";
+            script << "uOps Per Cycle:    3.51\n";
+            script << "IPC:               3.51\n";
+            script << "Block RThroughput: 0.5\n";
+            script << "Resources:\n";
+            script << "[0]   - ALU\n";
+            script << "[1]   - LSU\n";
+            script << "\n";
+            script << "Resource pressure per iteration:\n";
+            script << "[0]    [1]\n";
+            script << "0.50   0.25\n";
+            script << "EOF\n";
+            return script.str();
+        }
     }  // namespace detail
 
     TEST_CASE("003: analysis pipeline emits asm ir and diagnostics", "[003][analysis]") {
@@ -121,6 +195,299 @@ namespace sontag::test {
               diag_result.command.end());
     }
 
+    TEST_CASE("003: analysis namespaces source and artifacts by build hash", "[003][analysis][cache]") {
+        detail::temp_dir temp{"sontag_m1_analysis_build_hash_namespace"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+
+        auto asm_result = run_analysis(request, analysis_kind::asm_text);
+        auto ir_result = run_analysis(request, analysis_kind::ir);
+
+        REQUIRE(asm_result.success);
+        REQUIRE(ir_result.success);
+        REQUIRE_FALSE(asm_result.command.empty());
+        REQUIRE_FALSE(ir_result.command.empty());
+        CHECK(asm_result.source_path == ir_result.source_path);
+        CHECK(asm_result.source_path.filename() == "source.cpp");
+        CHECK(asm_result.source_path.parent_path() == ir_result.source_path.parent_path());
+        CHECK(asm_result.source_path.parent_path().filename() == asm_result.artifact_path.parent_path().filename());
+        CHECK(ir_result.source_path.parent_path().filename() == ir_result.artifact_path.parent_path().filename());
+        CHECK(asm_result.source_path.string().find("/artifacts/inputs/") != std::string::npos);
+
+        auto asm_cached_result = run_analysis(request, analysis_kind::asm_text);
+        auto ir_cached_result = run_analysis(request, analysis_kind::ir);
+
+        REQUIRE(asm_cached_result.success);
+        REQUIRE(ir_cached_result.success);
+        CHECK(asm_cached_result.command.empty());
+        CHECK(ir_cached_result.command.empty());
+        CHECK(asm_cached_result.artifact_text == asm_result.artifact_text);
+        CHECK(ir_cached_result.artifact_text == ir_result.artifact_text);
+    }
+
+    TEST_CASE("003: build hash changes when linker-arg order changes", "[003][analysis][cache]") {
+        detail::temp_dir temp{"sontag_m1_analysis_build_hash_order"};
+
+        analysis_request first_request{};
+        first_request.clang_path = "/usr/bin/clang++";
+        first_request.session_dir = temp.path / "session";
+        first_request.language_standard = cxx_standard::cxx23;
+        first_request.opt_level = optimization_level::o2;
+        first_request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        first_request.linker_args = {"-Wl,--as-needed", "-Wl,--gc-sections"};
+
+        auto second_request = first_request;
+        second_request.linker_args = {"-Wl,--gc-sections", "-Wl,--as-needed"};
+
+        auto first_result = run_analysis(first_request, analysis_kind::asm_text);
+        auto second_result = run_analysis(second_request, analysis_kind::asm_text);
+
+        REQUIRE(first_result.success);
+        REQUIRE(second_result.success);
+        CHECK(first_result.source_path.parent_path() != second_result.source_path.parent_path());
+    }
+
+    TEST_CASE("003: mem_trace cache hit preserves trace payload exit code", "[003][analysis][cache][mem]") {
+        detail::temp_dir temp{"sontag_m1_mem_trace_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.static_link = true;
+        request.decl_cells = {"int square(int x) { int y = x * x; return y; }"};
+        request.exec_cells = {"volatile int sink = square(3);", "return sink;"};
+        request.symbol = "square";
+
+        auto cold_result = run_analysis(request, analysis_kind::mem_trace);
+        REQUIRE(cold_result.success);
+        REQUIRE(cold_result.exit_code == 9);
+        CHECK_FALSE(cold_result.command.empty());
+
+        auto cached_result = run_analysis(request, analysis_kind::mem_trace);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.exit_code == cold_result.exit_code);
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+        CHECK(cached_result.command.empty());
+    }
+
+    TEST_CASE("003: dump cache hit preserves disassembly and opcode mapping", "[003][analysis][cache][dump]") {
+        detail::temp_dir temp{"sontag_m1_dump_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        request.exec_cells = {"volatile int sink = add(1, 2);", "return sink;"};
+
+        auto cold_result = run_analysis(request, analysis_kind::dump);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        REQUIRE_FALSE(cold_result.opcode_table.empty());
+
+        auto cached_result = run_analysis(request, analysis_kind::dump);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+        CHECK_FALSE(cached_result.opcode_table.empty());
+        CHECK(cached_result.opcode_table.size() == cold_result.opcode_table.size());
+        CHECK(cached_result.operations.size() == cold_result.operations.size());
+    }
+
+    TEST_CASE("003: graph cfg cache hit preserves summary", "[003][analysis][cache][graph]") {
+        detail::temp_dir temp{"sontag_m3_graph_cfg_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+
+        auto cold_result = run_analysis(request, analysis_kind::graph_cfg);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("function: ") != std::string::npos);
+        CHECK(cold_result.artifact_text.find("dot: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::graph_cfg);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: graph call cache hit preserves summary", "[003][analysis][cache][graph]") {
+        detail::temp_dir temp{"sontag_m3_graph_call_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {
+                "int leaf(int x) { return x + 1; }\n"
+                "int helper(int y) { return leaf(y) * 2; }\n"
+                "int top(int z) { return helper(z) + leaf(z); }\n"};
+        request.symbol = "top";
+
+        auto cold_result = run_analysis(request, analysis_kind::graph_call);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("root: ") != std::string::npos);
+        CHECK(cold_result.artifact_text.find("dot: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::graph_call);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: graph defuse cache hit preserves summary", "[003][analysis][cache][graph]") {
+        detail::temp_dir temp{"sontag_m3_graph_defuse_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {
+                "int foo(int x) {\n"
+                "  auto a = x + 1;\n"
+                "  auto b = a * 2;\n"
+                "  return b;\n"
+                "}\n"};
+        request.symbol = "foo";
+
+        auto cold_result = run_analysis(request, analysis_kind::graph_defuse);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("function: ") != std::string::npos);
+        CHECK(cold_result.artifact_text.find("dot: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::graph_defuse);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: inspect asm cache hit preserves summary", "[003][analysis][cache][inspect]") {
+        detail::temp_dir temp{"sontag_m3_inspect_asm_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+
+        auto cold_result = run_analysis(request, analysis_kind::inspect_asm_map);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("json: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::inspect_asm_map);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: inspect mca summary cache hit preserves summary", "[003][analysis][cache][inspect]") {
+        detail::temp_dir temp{"sontag_m3_inspect_mca_summary_cache_hit"};
+        auto tool_dir = temp.path / "tools";
+        detail::fs::create_directories(tool_dir);
+
+        auto mca_wrapper = tool_dir / "llvm-mca";
+        detail::make_executable_file(mca_wrapper, detail::make_mca_wrapper_script());
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.mca_path = mca_wrapper;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        request.symbol = "add";
+
+        auto cold_result = run_analysis(request, analysis_kind::inspect_mca_summary);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("iterations: 100") != std::string::npos);
+        CHECK(cold_result.artifact_text.find("json: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::inspect_mca_summary);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: inspect mca heatmap cache hit preserves summary", "[003][analysis][cache][inspect]") {
+        detail::temp_dir temp{"sontag_m3_inspect_mca_heatmap_cache_hit"};
+        auto tool_dir = temp.path / "tools";
+        detail::fs::create_directories(tool_dir);
+
+        auto mca_wrapper = tool_dir / "llvm-mca";
+        detail::make_executable_file(mca_wrapper, detail::make_mca_wrapper_script());
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.mca_path = mca_wrapper;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        request.symbol = "add";
+
+        auto cold_result = run_analysis(request, analysis_kind::inspect_mca_heatmap);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("heatmap rows: ") != std::string::npos);
+        CHECK(cold_result.artifact_text.find("json: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::inspect_mca_heatmap);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: mem_trace command reflects static vs dynamic link policy", "[003][analysis][link]") {
+        detail::temp_dir temp{"sontag_m1_link_policy"};
+
+        analysis_request dynamic_request{};
+        dynamic_request.clang_path = "/usr/bin/clang++";
+        dynamic_request.session_dir = temp.path / "session_dynamic";
+        dynamic_request.language_standard = cxx_standard::cxx23;
+        dynamic_request.opt_level = optimization_level::o0;
+        dynamic_request.decl_cells = {"int square(int x) { return x * x; }"};
+        dynamic_request.exec_cells = {"volatile int sink = square(2);", "return sink;"};
+        dynamic_request.symbol = "main";
+        dynamic_request.linker_args = {"-Wl,--sontag-nonexistent-link-flag"};
+
+        auto dynamic_result = run_analysis(dynamic_request, analysis_kind::mem_trace);
+        CHECK_FALSE(dynamic_result.success);
+        CHECK(detail::has_exact_arg(dynamic_result.command, "-Wl,--sontag-nonexistent-link-flag"));
+        CHECK(detail::has_exact_arg(dynamic_result.command, "-ldl"));
+        CHECK_FALSE(detail::has_exact_arg(dynamic_result.command, "-static"));
+        CHECK_FALSE(detail::has_exact_arg(dynamic_result.command, "-static-libgcc"));
+
+        auto static_request = dynamic_request;
+        static_request.session_dir = temp.path / "session_static";
+        static_request.static_link = true;
+
+        auto static_result = run_analysis(static_request, analysis_kind::mem_trace);
+        CHECK_FALSE(static_result.success);
+        CHECK(detail::has_exact_arg(static_result.command, "-static"));
+        CHECK(detail::has_exact_arg(static_result.command, "-static-libgcc"));
+        CHECK_FALSE(detail::has_exact_arg(static_result.command, "-ldl"));
+    }
+
     TEST_CASE("003: symbol scoped analysis paths", "[003][analysis][symbol]") {
         detail::temp_dir temp{"sontag_m1_symbol"};
 
@@ -153,6 +520,39 @@ namespace sontag::test {
         CHECK_FALSE(diag_result.success);
         CHECK(diag_result.artifact_text.find("foo") != std::string::npos);
         CHECK(diag_result.artifact_text.find("bar") == std::string::npos);
+    }
+
+    TEST_CASE(
+            "003: asm symbol resolution falls back to linked dump for runtime library symbols",
+            "[003][analysis][symbol][asm]") {
+        detail::temp_dir temp{"sontag_m3_asm_runtime_symbol_fallback"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {
+                "#include <condition_variable>\n"
+                "#include <mutex>\n"
+                "std::condition_variable cv;\n"
+                "std::mutex m;\n"};
+        request.exec_cells = {
+                "std::lock_guard<std::mutex> guard(m);\n"
+                "cv.notify_one();\n"};
+        request.libraries = {"pthread"};
+        request.symbol = "_ZNSt3__118condition_variable10notify_oneEv";
+
+        auto cold_result = run_analysis(request, analysis_kind::asm_text);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK_FALSE(cold_result.artifact_text.empty());
+        CHECK(cold_result.artifact_text.find("pthread_cond_signal") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::asm_text);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
     }
 
     TEST_CASE("003: in-process command sequence runs all analysis kinds", "[003][analysis][sequence]") {
@@ -237,11 +637,11 @@ namespace sontag::test {
         CHECK_FALSE(detail::has_prefixed_arg(args, "--disassemble-symbols="));
 
         REQUIRE_FALSE(args.empty());
-        CHECK(args.back().ends_with(".o"));
+        CHECK(args.back().ends_with(".bin"));
     }
 
     TEST_CASE(
-            "003: dump analysis keeps full disassembly args when symbol is provided (post-extract path)",
+            "003: dump analysis fails when symbol extraction misses and avoids full-artifact fallback",
             "[003][analysis][dump]") {
         detail::temp_dir temp{"sontag_m1_dump_symbol"};
 
@@ -260,10 +660,11 @@ namespace sontag::test {
         request.symbol = "add";
 
         auto dump_result = run_analysis(request, analysis_kind::dump);
-        CHECK(dump_result.success);
-        CHECK(dump_result.exit_code == 0);
+        CHECK_FALSE(dump_result.success);
+        CHECK(dump_result.exit_code == 1);
         CHECK(dump_result.command.size() > 1U);
         CHECK(dump_result.command[0] == wrapper_path.string());
+        CHECK(dump_result.diagnostics_text.find("symbol not found in artifact") != std::string::npos);
 
         auto args = detail::read_lines(args_path);
         CHECK(detail::has_exact_arg(args, "--disassemble"));
@@ -326,7 +727,7 @@ namespace sontag::test {
         CHECK(result.exit_code == 0);
         CHECK(result.artifact_path.string().find("/artifacts/graphs/cfg/") != std::string::npos);
         CHECK(result.artifact_path.extension() == ".dot");
-        CHECK(result.artifact_text.find("__sontag_main") != std::string::npos);
+        CHECK(result.artifact_text.find("main") != std::string::npos);
         CHECK(result.artifact_text.find("dot: ") != std::string::npos);
         CHECK(result.artifact_text.find("rendered: ") != std::string::npos);
         CHECK(detail::fs::exists(result.artifact_path));
@@ -427,7 +828,7 @@ namespace sontag::test {
         REQUIRE_FALSE(symbols.empty());
 
         auto has_repl_entry = std::ranges::any_of(symbols, [](const analysis_symbol& symbol) {
-            return symbol.demangled == "__sontag_main()" || symbol.mangled == "__sontag_main";
+            return symbol.demangled == "main()" || symbol.mangled == "main";
         });
         auto has_foo = std::ranges::any_of(symbols, [](const analysis_symbol& symbol) {
             return symbol.demangled.find("foo(") != std::string::npos ||
@@ -436,6 +837,169 @@ namespace sontag::test {
 
         CHECK(has_repl_entry);
         CHECK(has_foo);
+    }
+
+    TEST_CASE("003: resolve_symbol_info supports addendum aliases and object fallback", "[003][analysis][symbols]") {
+        detail::temp_dir temp{"sontag_m1_resolve_symbol_info"};
+
+        analysis_request linked_request{};
+        linked_request.clang_path = "/usr/bin/clang++";
+        linked_request.session_dir = temp.path / "session_linked";
+        linked_request.language_standard = cxx_standard::cxx23;
+        linked_request.opt_level = optimization_level::o0;
+        linked_request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        linked_request.exec_cells = {"volatile int sink = add(1, 2);", "return sink;"};
+
+        auto linked_info = resolve_symbol_info(linked_request, "add");
+        REQUIRE(linked_info.has_value());
+        CHECK(linked_info->status == symbol_resolution_status::resolved_final);
+        CHECK(linked_info->display_name.find("add(") != std::string::npos);
+        CHECK(linked_info->source.find("symtab") != std::string::npos);
+
+        auto addendum_info = resolve_symbol_info(linked_request, "add@PLT");
+        REQUIRE(addendum_info.has_value());
+        CHECK(addendum_info->status == symbol_resolution_status::resolved_stub);
+        CHECK(addendum_info->confidence == symbol_resolution_confidence::exact_relocation);
+        CHECK(addendum_info->canonical_name == linked_info->canonical_name);
+        CHECK(addendum_info->source.find("relocation_alias") != std::string::npos);
+        REQUIRE(addendum_info->addendum.has_value());
+        CHECK(*addendum_info->addendum == "PLT");
+
+        auto indirect_info = resolve_symbol_info(linked_request, "add@GOT");
+        REQUIRE(indirect_info.has_value());
+        CHECK(indirect_info->status == symbol_resolution_status::unresolved_indirect);
+        CHECK(indirect_info->confidence == symbol_resolution_confidence::exact_relocation);
+        CHECK(indirect_info->canonical_name == linked_info->canonical_name);
+        CHECK(indirect_info->source.find("relocation_alias") != std::string::npos);
+        CHECK(indirect_info->source.find("indirect") != std::string::npos);
+        REQUIRE(indirect_info->addendum.has_value());
+        CHECK(*indirect_info->addendum == "GOT");
+
+        auto missing_info = resolve_symbol_info(linked_request, "not_a_symbol");
+        REQUIRE(missing_info.has_value());
+        CHECK(missing_info->status == symbol_resolution_status::missing);
+        CHECK(missing_info->confidence == symbol_resolution_confidence::heuristic_match);
+        CHECK(missing_info->source == "unresolved");
+        CHECK(missing_info->canonical_name == "not_a_symbol");
+
+        auto missing_indirect_info = resolve_symbol_info(linked_request, "not_a_symbol@GOT");
+        REQUIRE(missing_indirect_info.has_value());
+        CHECK(missing_indirect_info->status == symbol_resolution_status::unresolved_indirect);
+        CHECK(missing_indirect_info->confidence == symbol_resolution_confidence::heuristic_match);
+        CHECK(missing_indirect_info->source == "unresolved_indirect");
+        CHECK(missing_indirect_info->canonical_name == "not_a_symbol");
+        REQUIRE(missing_indirect_info->addendum.has_value());
+        CHECK(*missing_indirect_info->addendum == "GOT");
+
+        auto static_request = linked_request;
+        static_request.session_dir = temp.path / "session_static_linked";
+        static_request.static_link = true;
+        auto static_indirect_info = resolve_symbol_info(static_request, "add@GOT");
+        REQUIRE(static_indirect_info.has_value());
+        CHECK(static_indirect_info->status == symbol_resolution_status::unresolved_indirect);
+        CHECK(static_indirect_info->confidence == symbol_resolution_confidence::exact_relocation);
+        CHECK(static_indirect_info->source.find("relocation_alias") != std::string::npos);
+
+        auto object_only_request = linked_request;
+        object_only_request.session_dir = temp.path / "session_object_only";
+        object_only_request.no_link = true;
+
+        auto object_only_info = resolve_symbol_info(object_only_request, "add");
+        REQUIRE(object_only_info.has_value());
+        CHECK(object_only_info->status == symbol_resolution_status::resolved_object_only);
+        auto object_only_indirect_info = resolve_symbol_info(object_only_request, "add@GOT");
+        REQUIRE(object_only_indirect_info.has_value());
+        CHECK(object_only_indirect_info->status == symbol_resolution_status::unresolved_indirect);
+        CHECK(object_only_indirect_info->confidence == symbol_resolution_confidence::exact_relocation);
+        CHECK(object_only_indirect_info->source.find("relocation_alias") != std::string::npos);
+    }
+
+    TEST_CASE(
+            "003: token-prefix resolver prefers object symbol over binary-only candidate", "[003][analysis][symbols]") {
+        detail::temp_dir temp{"sontag_m1_resolve_symbol_prefix_rank"};
+
+        auto nm_wrapper_path = temp.path / "tools" / "llvm-nm";
+        detail::make_executable_file(nm_wrapper_path, detail::make_nm_object_binary_split_script());
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.nm_path = nm_wrapper_path;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int square(int x) { return x * x; }"};
+
+        auto info = resolve_symbol_info(request, "square");
+        REQUIRE(info.has_value());
+        CHECK(info->display_name == "square(int)");
+        CHECK(info->status == symbol_resolution_status::resolved_object_only);
+        CHECK(info->source == "symtab_token_prefix");
+    }
+
+    TEST_CASE(
+            "003: short-token resolver prefers object symbol over binary exact collision", "[003][analysis][symbols]") {
+        detail::temp_dir temp{"sontag_m1_resolve_symbol_short_token_rank"};
+
+        auto nm_wrapper_path = temp.path / "tools" / "llvm-nm";
+        detail::make_executable_file(nm_wrapper_path, detail::make_nm_short_token_collision_script());
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.nm_path = nm_wrapper_path;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int open(int x) { return x + 1; }"};
+
+        auto info = resolve_symbol_info(request, "open");
+        REQUIRE(info.has_value());
+        CHECK(info->display_name == "open(int)");
+        CHECK(info->status == symbol_resolution_status::resolved_object_only);
+        CHECK(info->source == "symtab_token_prefix");
+    }
+
+    TEST_CASE("003: addendum alias prefers object symbol over binary exact collision", "[003][analysis][symbols]") {
+        detail::temp_dir temp{"sontag_m1_resolve_symbol_addendum_rank"};
+
+        auto nm_wrapper_path = temp.path / "tools" / "llvm-nm";
+        detail::make_executable_file(nm_wrapper_path, detail::make_nm_addendum_collision_script());
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.nm_path = nm_wrapper_path;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int square(int x) { return x * x; }"};
+
+        auto info = resolve_symbol_info(request, "square@PLT");
+        REQUIRE(info.has_value());
+        CHECK(info->display_name == "square(int)");
+        CHECK(info->status == symbol_resolution_status::resolved_stub);
+        CHECK(info->confidence == symbol_resolution_confidence::exact_relocation);
+        CHECK(info->source == "symtab_token_prefix_relocation_alias_stub");
+    }
+
+    TEST_CASE("003: mem_trace executes for non-main symbol without synthetic entrypoint shim", "[003][analysis][mem]") {
+        detail::temp_dir temp{"sontag_m1_mem_trace_non_main"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.static_link = true;
+        request.decl_cells = {"int square(int x) { int y = x * x; return y; }"};
+        request.exec_cells = {"volatile int sink = square(3);", "return sink;"};
+        request.symbol = "square";
+
+        auto trace_result = run_analysis(request, analysis_kind::mem_trace);
+        CHECK(trace_result.success);
+        CHECK(trace_result.exit_code == 9);
+        CHECK(trace_result.artifact_text.find("symbol=") != std::string::npos);
+        CHECK(trace_result.artifact_text.find("tracee_exit_code=9") != std::string::npos);
+        CHECK(trace_result.artifact_text.find("map_count=0") == std::string::npos);
+        CHECK(trace_result.artifact_text.find("event_count=0") == std::string::npos);
     }
 
 }  // namespace sontag::test

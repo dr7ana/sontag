@@ -179,7 +179,7 @@ namespace sontag::test {
         detail::write_file(
                 test_file,
                 "int square(int x) { return x * x; }\n"
-                "int __sontag_main() { return square(3); }\n");
+                "int main() { return square(3); }\n");
 
         detail::mcp_process mcp{temp.path};
         mcp.handshake();
@@ -199,7 +199,7 @@ namespace sontag::test {
         auto decl_file = temp.path / "decl.hpp";
         detail::write_file(decl_file, "int square(int x) { return x * x; }\n");
         auto main_file = temp.path / "main.cpp";
-        detail::write_file(main_file, "int __sontag_main() { return square(3); }\n");
+        detail::write_file(main_file, "int main() { return square(3); }\n");
 
         detail::mcp_process mcp{temp.path};
         mcp.handshake();

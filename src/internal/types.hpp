@@ -37,6 +37,7 @@ namespace sontag::internal {
         std::string nm_path{"nm"};
         std::string cache_dir{};
         std::string history_file{".sontag/history"};
+        uint32_t cache_ttl_days{3U};
         std::string output{};
         std::string color{};
         std::string color_scheme{"vaporwave"};
@@ -97,6 +98,8 @@ namespace glz {
                        &T::cache_dir,
                        "history_file",
                        &T::history_file,
+                       "cache_ttl_days",
+                       &T::cache_ttl_days,
                        "output",
                        &T::output,
                        "color",

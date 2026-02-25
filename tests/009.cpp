@@ -4,30 +4,30 @@ namespace sontag::test {
 
     TEST_CASE("009: opcode parser handles complex disassembly fixture", "[009][opcode]") {
         auto disassembly = R"(
-0000000000000000 <__sontag_main()>:
+0000000000000000 <main()>:
        0: 55                            push    rbp
        1: 48 89 e5                      mov     rbp, rsp
        4: 48 83 ec 10                   sub     rsp, 0x10
-       8: 8a 05 00 00 00 00             mov     al, byte ptr  <__sontag_main()+0xe>
+       8: 8a 05 00 00 00 00             mov     al, byte ptr  <main()+0xe>
        e: 88 45 ff                      mov     byte ptr [rbp - 0x1], al
-      11: 8b 05 00 00 00 00             mov     eax, dword ptr  <__sontag_main()+0x17>
+      11: 8b 05 00 00 00 00             mov     eax, dword ptr  <main()+0x17>
       17: d1 e0                         shl     eax
       19: 89 45 f8                      mov     dword ptr [rbp - 0x8], eax
-      1c: 8b 05 00 00 00 00             mov     eax, dword ptr  <__sontag_main()+0x22>
-      22: 89 05 00 00 00 00             mov     dword ptr , eax <__sontag_main()+0x28>
+      1c: 8b 05 00 00 00 00             mov     eax, dword ptr  <main()+0x22>
+      22: 89 05 00 00 00 00             mov     dword ptr , eax <main()+0x28>
       28: 8b 45 f8                      mov     eax, dword ptr [rbp - 0x8]
-      2b: 89 05 00 00 00 00             mov     dword ptr , eax <__sontag_main()+0x31>
-      31: 8b 3d 00 00 00 00             mov     edi, dword ptr  <__sontag_main()+0x37>
-      37: 8b 35 00 00 00 00             mov     esi, dword ptr  <__sontag_main()+0x3d>
+      2b: 89 05 00 00 00 00             mov     dword ptr , eax <main()+0x31>
+      31: 8b 3d 00 00 00 00             mov     edi, dword ptr  <main()+0x37>
+      37: 8b 35 00 00 00 00             mov     esi, dword ptr  <main()+0x3d>
       3d: e8 00 00 00 00                call     <L0>
 <L0>:
-      42: 89 05 00 00 00 00             mov     dword ptr , eax <__sontag_main()+0x48>
-      48: 8b 3d 00 00 00 00             mov     edi, dword ptr  <__sontag_main()+0x4e>
-      4e: 8b 35 00 00 00 00             mov     esi, dword ptr  <__sontag_main()+0x54>
+      42: 89 05 00 00 00 00             mov     dword ptr , eax <main()+0x48>
+      48: 8b 3d 00 00 00 00             mov     edi, dword ptr  <main()+0x4e>
+      4e: 8b 35 00 00 00 00             mov     esi, dword ptr  <main()+0x54>
       54: ba 03 00 00 00                mov     edx, 0x3
       59: e8 00 00 00 00                call     <L1>
 <L1>:
-      5e: 89 05 00 00 00 00             mov     dword ptr , eax <__sontag_main()+0x64>
+      5e: 89 05 00 00 00 00             mov     dword ptr , eax <main()+0x64>
       64: 31 c0                         xor     eax, eax
       66: 48 83 c4 10                   add     rsp, 0x10
       6a: 5d                            pop     rbp
@@ -132,7 +132,7 @@ Disassembly of section .text._Z4foldiii:
     }
 
     TEST_CASE("009: opcode parser interns objdump mnemonics in first-seen order", "[009][opcode]") {
-        auto disassembly = R"(0000000000000000 <__sontag_main>:
+        auto disassembly = R"(0000000000000000 <main>:
    0:   55                      push   rbp
    1:   48 89 e5                mov    rbp, rsp
    4:   31 c0                   xor    eax, eax

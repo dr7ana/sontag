@@ -11,6 +11,7 @@
 #include "internal/mem.hpp"
 #include "internal/opcode.hpp"
 #include "internal/platform.hpp"
+#include "internal/symbols.hpp"
 #include "internal/tables.hpp"
 #include "internal/types.hpp"
 
@@ -47,6 +48,7 @@ extern "C" {
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace sontag::literals;
@@ -129,6 +131,7 @@ namespace sontag::cli { namespace detail {
         size_t globals{};
         size_t unknown{};
         bool trace_enabled{false};
+        std::optional<int> trace_exit_code{};
         bool trace_truncated{false};
         size_t trace_event_count{};
     };
@@ -154,6 +157,8 @@ namespace sontag::cli { namespace detail {
         std::vector<size_t> source_refs{};
         std::optional<std::string> runtime_address{};
         std::optional<std::string> observed_value{};
+        std::string value_status{};
+        std::string value_source{};
         size_t value_variation_count{};
         std::vector<std::string> trace_samples{};
     };
@@ -162,6 +167,11 @@ namespace sontag::cli { namespace detail {
         std::string command{"inspect mem"};
         std::string symbol{};
         std::string symbol_display{};
+        std::string symbol_canonical{};
+        std::optional<std::string> symbol_addendum{};
+        std::string symbol_status{};
+        std::string symbol_confidence{};
+        std::string symbol_source{};
         mem_summary_output_record summary{};
         std::vector<mem_row_output_record> rows{};
     };
@@ -178,6 +188,9 @@ namespace sontag::cli { namespace detail {
         bool success{false};
         int exit_code{-1};
         std::string artifact_path{};
+        std::string symbol_status{};
+        std::string symbol_confidence{};
+        std::string symbol_source{};
         std::vector<delta_operation_output_record> operations{};
         std::vector<metric_output_record> metrics{};
         std::string diagnostics_text{};
@@ -189,6 +202,11 @@ namespace sontag::cli { namespace detail {
         bool success{false};
         std::string symbol{};
         std::string symbol_display{};
+        std::string symbol_canonical{};
+        std::optional<std::string> symbol_addendum{};
+        std::string symbol_status{};
+        std::string symbol_confidence{};
+        std::string symbol_source{};
         std::string baseline{};
         std::string target{};
         std::vector<delta_opcode_entry> opcode_table{};
@@ -294,6 +312,12 @@ namespace glz {
                        &T::exit_code,
                        "artifact_path",
                        &T::artifact_path,
+                       "symbol_status",
+                       &T::symbol_status,
+                       "symbol_confidence",
+                       &T::symbol_confidence,
+                       "symbol_source",
+                       &T::symbol_source,
                        "operations",
                        &T::operations,
                        "metrics",
@@ -316,6 +340,16 @@ namespace glz {
                        &T::symbol,
                        "symbol_display",
                        &T::symbol_display,
+                       "symbol_canonical",
+                       &T::symbol_canonical,
+                       "symbol_addendum",
+                       &T::symbol_addendum,
+                       "symbol_status",
+                       &T::symbol_status,
+                       "symbol_confidence",
+                       &T::symbol_confidence,
+                       "symbol_source",
+                       &T::symbol_source,
                        "baseline",
                        &T::baseline,
                        "target",
@@ -378,6 +412,8 @@ namespace glz {
                        &T::unknown,
                        "trace_enabled",
                        &T::trace_enabled,
+                       "trace_exit_code",
+                       &T::trace_exit_code,
                        "trace_truncated",
                        &T::trace_truncated,
                        "trace_event_count",
@@ -428,6 +464,10 @@ namespace glz {
                        &T::runtime_address,
                        "observed_value",
                        &T::observed_value,
+                       "value_status",
+                       &T::value_status,
+                       "value_source",
+                       &T::value_source,
                        "value_variation_count",
                        &T::value_variation_count,
                        "trace_samples",
@@ -444,6 +484,16 @@ namespace glz {
                        &T::symbol,
                        "symbol_display",
                        &T::symbol_display,
+                       "symbol_canonical",
+                       &T::symbol_canonical,
+                       "symbol_addendum",
+                       &T::symbol_addendum,
+                       "symbol_status",
+                       &T::symbol_status,
+                       "symbol_confidence",
+                       &T::symbol_confidence,
+                       "symbol_source",
+                       &T::symbol_source,
                        "summary",
                        &T::summary,
                        "rows",
@@ -1127,17 +1177,6 @@ namespace sontag::cli {
             }
 
             auto source_text = read_text_file(source_path);
-            auto sontag_probe = probe_driver_ast(cfg, source_path, "__sontag_main"sv);
-            if (!sontag_probe.success) {
-                if (!sontag_probe.message.empty()) {
-                    err << sontag_probe.message;
-                    if (!sontag_probe.message.ends_with('\n')) {
-                        err << '\n';
-                    }
-                }
-                return std::nullopt;
-            }
-
             auto main_probe = probe_driver_ast(cfg, source_path, "main"sv);
             if (!main_probe.success) {
                 if (!main_probe.message.empty()) {
@@ -1149,23 +1188,12 @@ namespace sontag::cli {
                 return std::nullopt;
             }
 
-            if (sontag_probe.found && main_probe.found) {
-                err << "file contains both __sontag_main and main; keep only one driver function\n";
+            if (!main_probe.found) {
+                err << "no main() function found; use :declfile <path> for declarative-only imports\n";
                 return std::nullopt;
             }
 
-            const auto* selected = static_cast<const ast_probe_result*>(nullptr);
-            if (sontag_probe.found) {
-                selected = &sontag_probe;
-            }
-            else if (main_probe.found) {
-                selected = &main_probe;
-            }
-            else {
-                err << "no driver function found (expected main or __sontag_main); "
-                       "use :declfile <path> for declarative-only imports\n";
-                return std::nullopt;
-            }
+            const auto* selected = &main_probe;
 
             auto line_offsets = build_line_offsets(source_text);
             auto function_start_offset =
@@ -1332,6 +1360,7 @@ namespace sontag::cli {
             data.nm_path = cfg.nm_path.string();
             data.cache_dir = cfg.cache_dir.string();
             data.history_file = cfg.history_file.string();
+            data.cache_ttl_days = static_cast<uint32_t>(cfg.cache_ttl_days);
             data.output = "{}"_format(cfg.output);
             data.color = "{}"_format(cfg.color);
             data.color_scheme = "{}"_format(cfg.delta_color_scheme);
@@ -1365,6 +1394,7 @@ namespace sontag::cli {
             if (!data.history_file.empty()) {
                 cfg.history_file = data.history_file;
             }
+            cfg.cache_ttl_days = data.cache_ttl_days;
             cfg.editor = data.editor;
             if (data.formatter.empty()) {
                 cfg.formatter = "clang-format";
@@ -1681,6 +1711,101 @@ namespace sontag::cli {
             return latest;
         }
 
+        static std::optional<fs::path> resolve_resume_session_directory(
+                const startup_config& cfg, std::string_view resume_id) {
+            auto sessions_root = session_root(cfg);
+            if (resume_id == "latest"sv) {
+                return find_latest_session(sessions_root);
+            }
+
+            auto candidate = sessions_root / std::string(resume_id);
+            std::error_code ec{};
+            if (fs::exists(candidate, ec) && !ec && fs::is_directory(candidate, ec) && !ec) {
+                return candidate;
+            }
+            return std::nullopt;
+        }
+
+        static fs::path require_resume_session_directory(const startup_config& cfg, std::string_view resume_id) {
+            auto resolved = resolve_resume_session_directory(cfg, resume_id);
+            if (!resolved) {
+                throw std::runtime_error("unable to resolve --resume target: {}"_format(resume_id));
+            }
+            return *resolved;
+        }
+
+        static std::optional<fs::file_time_type> newest_write_time_recursive(const fs::path& path) {
+            std::error_code ec{};
+            auto latest = fs::last_write_time(path, ec);
+            if (ec) {
+                return std::nullopt;
+            }
+
+            if (!fs::is_directory(path, ec) || ec) {
+                return latest;
+            }
+
+            for (fs::recursive_directory_iterator it(path, fs::directory_options::skip_permission_denied, ec), end;
+                 it != end;
+                 it.increment(ec)) {
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
+                std::error_code ts_ec{};
+                auto current = fs::last_write_time(it->path(), ts_ec);
+                if (!ts_ec && current > latest) {
+                    latest = current;
+                }
+            }
+
+            return latest;
+        }
+
+        static void prune_stale_session_entries(
+                const startup_config& cfg, const std::optional<fs::path>& preserved_session_dir) {
+            if (cfg.cache_ttl_days == 0U) {
+                return;
+            }
+
+            auto sessions_root = session_root(cfg);
+            std::error_code ec{};
+            if (!fs::exists(sessions_root, ec) || ec) {
+                return;
+            }
+
+            auto retention_window = std::chrono::hours{24} * static_cast<int64_t>(cfg.cache_ttl_days);
+            auto cutoff = fs::file_time_type::clock::now() -
+                          std::chrono::duration_cast<fs::file_time_type::duration>(retention_window);
+
+            for (fs::directory_iterator it(sessions_root, fs::directory_options::skip_permission_denied, ec), end;
+                 it != end;
+                 it.increment(ec)) {
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
+
+                std::error_code is_dir_ec{};
+                if (!it->is_directory(is_dir_ec) || is_dir_ec) {
+                    continue;
+                }
+
+                auto entry_path = it->path();
+                if (preserved_session_dir && entry_path == *preserved_session_dir) {
+                    continue;
+                }
+
+                auto newest_write_time = newest_write_time_recursive(entry_path);
+                if (!newest_write_time || *newest_write_time >= cutoff) {
+                    continue;
+                }
+
+                std::error_code remove_ec{};
+                fs::remove_all(entry_path, remove_ec);
+            }
+        }
+
         static repl_state bootstrap_session(const startup_config& cfg) {
             auto sessions_root = cfg.cache_dir / "sessions";
             std::error_code ec{};
@@ -1706,26 +1831,8 @@ namespace sontag::cli {
             return state;
         }
 
-        static repl_state resume_session(startup_config& cfg, std::string_view resume_id) {
-            auto sessions_root = session_root(cfg);
-
-            std::optional<fs::path> session_dir{};
-            if (resume_id == "latest"sv) {
-                session_dir = find_latest_session(sessions_root);
-            }
-            else {
-                auto candidate = sessions_root / std::string(resume_id);
-                std::error_code ec{};
-                if (fs::exists(candidate, ec) && !ec && fs::is_directory(candidate, ec) && !ec) {
-                    session_dir = candidate;
-                }
-            }
-
-            if (!session_dir) {
-                throw std::runtime_error("unable to resolve --resume target: {}"_format(resume_id));
-            }
-
-            auto state = make_state_paths(*session_dir);
+        static repl_state resume_session_from_directory(startup_config& cfg, const fs::path& session_dir) {
+            auto state = make_state_paths(session_dir);
             auto persisted_cfg = read_json_file<persisted_config>(state.config_path, true);
             validate_supported_schema_version(persisted_cfg.schema_version, state.config_path);
             apply_persisted_config(persisted_cfg, cfg);
@@ -1795,8 +1902,12 @@ namespace sontag::cli {
 
         static repl_state start_session(startup_config& cfg) {
             if (cfg.resume_session) {
-                return resume_session(cfg, *cfg.resume_session);
+                auto session_dir = require_resume_session_directory(cfg, *cfg.resume_session);
+                auto preserved_session_dir = std::optional<fs::path>{session_dir};
+                prune_stale_session_entries(cfg, preserved_session_dir);
+                return resume_session_from_directory(cfg, session_dir);
             }
+            prune_stale_session_entries(cfg, std::nullopt);
             return bootstrap_session(cfg);
         }
 
@@ -1810,7 +1921,9 @@ namespace sontag::cli {
                    "  cpu={}\n"
                    "  toolchain_dir={}\n"
                    "  mca_cpu={}\n"
+                   "  static={}\n"
                    "  cache_dir={}\n"
+                   "  cache_ttl_days={}\n"
                    "  output={}\n"
                    "  banner={}\n"
                    "  color={}\n"
@@ -1823,7 +1936,9 @@ namespace sontag::cli {
                            effective_cpu_value(cfg),
                            internal::platform::toolchain_bin_prefix,
                            effective_mca_cpu_value(cfg),
+                           cfg.static_link,
                            display_absolute_path(cfg.cache_dir),
+                           cfg.cache_ttl_days,
                            cfg.output,
                            cfg.banner_enabled,
                            cfg.color,
@@ -1898,24 +2013,10 @@ namespace sontag::cli {
 
         static std::array<const char*, 6> config_category_menu_completions{
                 "ui", "build", "editor", "session", "q", nullptr};
-        static std::array<const char*, 17> config_build_menu_completions{
-                "std",
-                "std=c++20",
-                "std=c++23",
-                "std=c++2c",
-                "opt",
-                "opt=O0",
-                "opt=O1",
-                "opt=O2",
-                "opt=O3",
-                "opt=Ofast",
-                "opt=Oz",
-                "target",
-                "cpu",
-                "toolchain_dir",
-                "mca_cpu",
-                "q",
-                nullptr};
+        static std::array<const char*, 21> config_build_menu_completions{
+                "std",     "std=c++20", "std=c++23",   "std=c++2c",    "opt",       "opt=O0", "opt=O1",
+                "opt=O2",  "opt=O3",    "opt=Ofast",   "opt=Oz",       "target",    "cpu",    "toolchain_dir",
+                "mca_cpu", "static",    "static=true", "static=false", "libraries", "q",      nullptr};
         static std::array<const char*, 12> config_ui_menu_completions{
                 "output",
                 "output=table",
@@ -1929,7 +2030,8 @@ namespace sontag::cli {
                 "color_scheme=vaporwave",
                 "q",
                 nullptr};
-        static std::array<const char*, 4> config_session_menu_completions{"cache_dir", "history_file", "q", nullptr};
+        static std::array<const char*, 5> config_session_menu_completions{
+                "cache_dir", "history_file", "cache_ttl_days", "q", nullptr};
         static std::array<const char*, 9> config_editor_menu_completions{
                 "editor",
                 "editor=auto",
@@ -2057,13 +2159,14 @@ namespace sontag::cli {
 
         static bool is_valid_config_key_for_category(std::string_view category, std::string_view key) {
             if (category == "build"sv) {
-                return key == "std"sv || key == "opt"sv || key == "target"sv || key == "cpu"sv || key == "mca_cpu"sv;
+                return key == "std"sv || key == "opt"sv || key == "target"sv || key == "cpu"sv || key == "mca_cpu"sv ||
+                       key == "static"sv || key == "libraries"sv;
             }
             if (category == "ui"sv) {
                 return key == "output"sv || key == "color"sv || key == "color_scheme"sv;
             }
             if (category == "session"sv) {
-                return key == "cache_dir"sv || key == "history_file"sv;
+                return key == "cache_dir"sv || key == "history_file"sv || key == "cache_ttl_days"sv;
             }
             if (category == "editor"sv) {
                 return key == "editor"sv || key == "formatter"sv;
@@ -2179,6 +2282,8 @@ namespace sontag::cli {
                 os << "  cpu={}\n"_format(effective_cpu_value(cfg));
                 os << "  toolchain_dir={}\n"_format(internal::platform::toolchain_bin_prefix);
                 os << "  mca_cpu={}\n"_format(effective_mca_cpu_value(cfg));
+                os << "  static={}\n"_format(cfg.static_link ? "true" : "false");
+                os << "  libraries={}\n"_format(utils::join_with_separator(cfg.libraries, ","sv));
                 return true;
             }
             if (key == "ui"sv) {
@@ -2192,6 +2297,7 @@ namespace sontag::cli {
                 os << "session:\n";
                 os << "  cache_dir={}\n"_format(display_absolute_path(cfg.cache_dir));
                 os << "  history_file={}\n"_format(cfg.history_file.string());
+                os << "  cache_ttl_days={}\n"_format(cfg.cache_ttl_days);
                 return true;
             }
             if (key == "editor"sv) {
@@ -2233,6 +2339,14 @@ namespace sontag::cli {
                     os << "build:\n  mca_cpu={}\n"_format(effective_mca_cpu_value(cfg));
                     return true;
                 }
+                if (selected_key == "static"sv) {
+                    os << "build:\n  static={}\n"_format(cfg.static_link ? "true" : "false");
+                    return true;
+                }
+                if (selected_key == "libraries"sv) {
+                    os << "build:\n  libraries={}\n"_format(utils::join_with_separator(cfg.libraries, ","sv));
+                    return true;
+                }
                 return false;
             }
             if (category_key == "ui"sv) {
@@ -2257,6 +2371,10 @@ namespace sontag::cli {
                 }
                 if (selected_key == "history_file"sv) {
                     os << "session:\n  history_file={}\n"_format(cfg.history_file.string());
+                    return true;
+                }
+                if (selected_key == "cache_ttl_days"sv) {
+                    os << "session:\n  cache_ttl_days={}\n"_format(cfg.cache_ttl_days);
                     return true;
                 }
                 return false;
@@ -2289,6 +2407,7 @@ namespace sontag::cli {
             cfg.delta_color_scheme = defaults.delta_color_scheme;
             cfg.cache_dir = defaults.cache_dir;
             cfg.history_file = defaults.history_file;
+            cfg.cache_ttl_days = defaults.cache_ttl_days;
             cfg.editor = defaults.editor;
             cfg.formatter = defaults.formatter;
         }
@@ -2304,6 +2423,21 @@ namespace sontag::cli {
                 return std::nullopt;
             }
             return std::string{trimmed};
+        }
+
+        static constexpr bool try_parse_bool(std::string_view value, bool& out) {
+            auto trimmed = trim_view(value);
+            if (utils::str_case_eq(trimmed, "true"sv) || utils::str_case_eq(trimmed, "1"sv) ||
+                utils::str_case_eq(trimmed, "yes"sv) || utils::str_case_eq(trimmed, "on"sv)) {
+                out = true;
+                return true;
+            }
+            if (utils::str_case_eq(trimmed, "false"sv) || utils::str_case_eq(trimmed, "0"sv) ||
+                utils::str_case_eq(trimmed, "no"sv) || utils::str_case_eq(trimmed, "off"sv)) {
+                out = false;
+                return true;
+            }
+            return false;
         }
 
         static bool apply_config_assignment(startup_config& cfg, std::string_view assignment, std::ostream& err) {
@@ -2346,6 +2480,29 @@ namespace sontag::cli {
                 cfg.mca_cpu = parse_optional_config_value(value);
                 return true;
             }
+            if (key == "build.static"sv) {
+                if (!try_parse_bool(value, cfg.static_link)) {
+                    err << "invalid build.static: {} (expected true|false)\n"_format(value);
+                    return false;
+                }
+                return true;
+            }
+            if (key == "build.libraries"sv) {
+                cfg.libraries.clear();
+                auto remaining = std::string_view{value};
+                while (!remaining.empty()) {
+                    auto comma = remaining.find(',');
+                    auto token = comma == std::string_view::npos ? remaining : remaining.substr(0U, comma);
+                    auto trimmed = trim_view(token);
+                    if (!trimmed.empty()) {
+                        cfg.libraries.emplace_back(trimmed);
+                    }
+                    if (comma == std::string_view::npos)
+                        break;
+                    remaining = remaining.substr(comma + 1U);
+                }
+                return true;
+            }
             if (key == "ui.output"sv) {
                 if (!try_parse_output_mode(value, cfg.output)) {
                     err << "invalid ui.output: {} (expected table|json)\n"_format(value);
@@ -2373,6 +2530,15 @@ namespace sontag::cli {
             }
             if (key == "session.history_file"sv) {
                 cfg.history_file = fs::path{value};
+                return true;
+            }
+            if (key == "session.cache_ttl_days"sv) {
+                auto parsed = utils::parse_arithmetic<size_t>(value);
+                if (!parsed) {
+                    err << "invalid session.cache_ttl_days: {} (expected unsigned integer)\n"_format(value);
+                    return false;
+                }
+                cfg.cache_ttl_days = *parsed;
                 return true;
             }
             if (key == "editor.editor"sv) {
@@ -2408,11 +2574,11 @@ namespace sontag::cli {
   :reset file <path>
   :mark <name>
   :snapshots
-  :asm [symbol|@last] (default: __sontag_main)
+  :asm [symbol|@last] (default: main)
   :asm explore [symbol|@last]
-  :mem [symbol|@last] (default: __sontag_main)
+  :mem [symbol|@last] (default: main)
   :mem explore [symbol|@last]
-  :ir [symbol|@last] (default: __sontag_main)
+  :ir [symbol|@last] (default: main)
   :ir explore [symbol|@last]
   :diag [symbol|@last]
   :mca [symbol|@last]
@@ -2493,6 +2659,18 @@ examples:
             return std::optional<std::string_view>{tail};
         }
 
+        static bool source_needs_pthread(const std::vector<std::string>& cells) {
+            for (const auto& cell : cells) {
+                if (cell.find("#include <mutex>") != std::string::npos ||
+                    cell.find("#include <thread>") != std::string::npos ||
+                    cell.find("#include <condition_variable>") != std::string::npos ||
+                    cell.find("#include <atomic>") != std::string::npos) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         static analysis_request make_analysis_request(const startup_config& cfg, const repl_state& state) {
             analysis_request request{};
             request.clang_path = cfg.clang_path;
@@ -2511,6 +2689,16 @@ examples:
             request.graph_format = cfg.graph_format;
             request.dot_path = cfg.dot_path;
             request.verbose = cfg.verbose;
+            request.static_link = cfg.static_link;
+            request.no_link = cfg.no_link;
+            request.library_dirs = cfg.library_dirs;
+            request.libraries = cfg.libraries;
+            request.linker_args = cfg.linker_args;
+            if (source_needs_pthread(request.decl_cells) || source_needs_pthread(request.exec_cells)) {
+                if (std::ranges::find(request.libraries, "pthread") == request.libraries.end()) {
+                    request.libraries.emplace_back("pthread");
+                }
+            }
             return request;
         }
 
@@ -2932,6 +3120,11 @@ examples:
             payload.success = report.success;
             payload.symbol = report.symbol;
             payload.symbol_display = report.symbol_display;
+            payload.symbol_canonical = report.symbol_resolution.canonical_name;
+            payload.symbol_addendum = report.symbol_resolution.addendum;
+            payload.symbol_status = "{}"_format(report.symbol_resolution.status);
+            payload.symbol_confidence = "{}"_format(report.symbol_resolution.confidence);
+            payload.symbol_source = report.symbol_resolution.source;
             payload.baseline = report.baseline_label;
             payload.target = report.target_label;
             payload.opcode_table = report.opcode_table;
@@ -2944,6 +3137,9 @@ examples:
                         .success = level.success,
                         .exit_code = level.exit_code,
                         .artifact_path = level.artifact_path.string(),
+                        .symbol_status = "{}"_format(level.symbol_status),
+                        .symbol_confidence = "{}"_format(level.symbol_confidence),
+                        .symbol_source = level.symbol_source,
                         .diagnostics_text = level.diagnostics_text};
                 level_payload.operations.reserve(level.operations.size());
                 for (const auto& operation : level.operations) {
@@ -3047,13 +3243,14 @@ examples:
             std::vector<std::pair<std::string, size_t>> opcode_counts{};
             size_t alias_groups{};
             bool trace_enabled{false};
+            std::optional<int> trace_exit_code{};
             bool trace_truncated{false};
             size_t trace_event_count{};
         };
 
         struct mem_analysis_data {
             analysis_result asm_result{};
-            std::string symbol_display{"__sontag_main()"};
+            std::string symbol_display{"main()"};
             mem_summary summary{};
             std::vector<internal::explorer::instruction_info> row_info{};
             internal::explorer::resource_pressure_table resource_pressure{};
@@ -4314,9 +4511,19 @@ examples:
                     }
                 }
 
-                std::sort(scored.begin(), scored.end(), [](const auto& lhs, const auto& rhs) {
+                auto distance_from_row = [row_line = row.line + 1U](size_t ir_line) constexpr {
+                    return ir_line > row_line ? ir_line - row_line : row_line - ir_line;
+                };
+
+                // for equal values, take the closest/matching IR line
+                std::ranges::sort(scored.begin(), scored.end(), [&](auto& lhs, auto& rhs) {
                     if (lhs.first != rhs.first) {
                         return lhs.first > rhs.first;
+                    }
+                    auto lhs_distance = distance_from_row(lhs.second);
+                    auto rhs_distance = distance_from_row(rhs.second);
+                    if (lhs_distance != rhs_distance) {
+                        return lhs_distance < rhs_distance;
                     }
                     return lhs.second < rhs.second;
                 });
@@ -4378,6 +4585,7 @@ examples:
 
         struct mem_trace_artifact {
             std::string symbol{};
+            std::optional<int> tracee_exit_code{};
             bool truncated{false};
             size_t dropped_events{};
             std::vector<mem_trace_map_record> map{};
@@ -4522,6 +4730,12 @@ examples:
                             if (key == "symbol"sv) {
                                 artifact.symbol = std::string{value};
                             }
+                            else if (key == "tracee_exit_code"sv) {
+                                auto raw_exit = uint64_t{0};
+                                if (parse_uint64_decimal(value, raw_exit)) {
+                                    artifact.tracee_exit_code = static_cast<int>(raw_exit);
+                                }
+                            }
                             else if (key == "truncated"sv) {
                                 artifact.truncated = (value == "true"sv);
                             }
@@ -4568,6 +4782,68 @@ examples:
             return out.str();
         }
 
+        struct runtime_sample_key {
+            uint64_t value{};
+            uint64_t width_bytes{};
+
+            bool operator==(const runtime_sample_key&) const = default;
+        };
+
+        struct runtime_sample_key_hash {
+            size_t operator()(const runtime_sample_key& sample) const noexcept {
+                auto value_hash = std::hash<uint64_t>{}(sample.value);
+                auto width_hash = std::hash<uint64_t>{}(sample.width_bytes);
+                return value_hash ^ (width_hash + 0x9e3779b97f4a7c15ULL + (value_hash << 6U) + (value_hash >> 2U));
+            }
+        };
+
+        struct runtime_rmw_pair_key {
+            runtime_sample_key before{};
+            runtime_sample_key after{};
+
+            bool operator==(const runtime_rmw_pair_key&) const = default;
+        };
+
+        struct runtime_rmw_pair_key_hash {
+            size_t operator()(const runtime_rmw_pair_key& pair) const noexcept {
+                auto sample_hash = runtime_sample_key_hash{};
+                auto before_hash = sample_hash(pair.before);
+                auto after_hash = sample_hash(pair.after);
+                return before_hash ^ (after_hash + 0x9e3779b97f4a7c15ULL + (before_hash << 6U) + (before_hash >> 2U));
+            }
+        };
+
+        static runtime_sample_key make_runtime_sample_key(const mem_trace_event_record& event) {
+            return runtime_sample_key{.value = event.value, .width_bytes = event.width_bytes};
+        }
+
+        static size_t count_distinct_runtime_values(const std::vector<const mem_trace_event_record*>& events) {
+            auto distinct = std::unordered_set<runtime_sample_key, runtime_sample_key_hash>{};
+            distinct.reserve(events.size());
+            for (const auto* event : events) {
+                distinct.insert(make_runtime_sample_key(*event));
+            }
+            return distinct.size();
+        }
+
+        static size_t count_distinct_runtime_rmw_pairs(const std::vector<const mem_trace_event_record*>& events) {
+            auto distinct_pairs = std::unordered_set<runtime_rmw_pair_key, runtime_rmw_pair_key_hash>{};
+            distinct_pairs.reserve(events.size() / 2U + 1U);
+            auto pending_before = std::optional<runtime_sample_key>{};
+            for (const auto* event : events) {
+                if (event->access == internal::mem::access_kind::load) {
+                    pending_before = make_runtime_sample_key(*event);
+                    continue;
+                }
+                if (event->access == internal::mem::access_kind::store && pending_before.has_value()) {
+                    distinct_pairs.insert(
+                            runtime_rmw_pair_key{.before = *pending_before, .after = make_runtime_sample_key(*event)});
+                    pending_before.reset();
+                }
+            }
+            return distinct_pairs.size();
+        }
+
         static constexpr bool is_ir_symbol_char(char c) noexcept {
             auto lower = static_cast<char>(utils::char_tolower(c));
             return (c >= '0' && c <= '9') || (lower >= 'a' && lower <= 'z') || c == '_' || c == '$' || c == '.';
@@ -4580,6 +4856,29 @@ examples:
             auto needle = "@{}"_format(symbol);
             auto pos = pointer_expr.find(needle);
             if (pos == std::string_view::npos) {
+                auto index = size_t{0U};
+                while (index < pointer_expr.size()) {
+                    auto at = pointer_expr.find('@', index);
+                    if (at == std::string_view::npos || at + 1U >= pointer_expr.size()) {
+                        break;
+                    }
+                    auto token_begin = at + 1U;
+                    auto token_end = token_begin;
+                    while (token_end < pointer_expr.size() && is_ir_symbol_char(pointer_expr[token_end])) {
+                        ++token_end;
+                    }
+                    auto token = pointer_expr.substr(token_begin, token_end - token_begin);
+                    if (!token.empty() && internal::symbols::symbol_names_equivalent(token, symbol)) {
+                        return true;
+                    }
+                    if (!token.empty()) {
+                        if (auto demangled = demangle_itanium_token(token);
+                            demangled.has_value() && internal::symbols::symbol_names_equivalent(*demangled, symbol)) {
+                            return true;
+                        }
+                    }
+                    index = token_end > at ? token_end : at + 1U;
+                }
                 return false;
             }
             auto end = pos + needle.size();
@@ -4646,6 +4945,7 @@ examples:
             }
 
             summary.trace_enabled = true;
+            summary.trace_exit_code = parsed->tracee_exit_code;
             summary.trace_truncated = parsed->truncated;
             summary.trace_event_count = parsed->events.size();
 
@@ -4665,16 +4965,17 @@ examples:
                     [&](const std::vector<const mem_trace_map_record*>& map_entries,
                         const internal::mem::row& row) -> std::vector<const mem_trace_event_record*> {
                 auto matches = std::vector<const mem_trace_event_record*>{};
-                auto matching_map_entries = std::vector<const mem_trace_map_record*>{};
-                matching_map_entries.reserve(map_entries.size());
+                auto seen_trace_ids = std::unordered_set<uint64_t>{};
+                seen_trace_ids.reserve(map_entries.size());
                 for (const auto* map_entry : map_entries) {
-                    if (mem_trace_map_matches_row(row, *map_entry)) {
-                        matching_map_entries.push_back(map_entry);
+                    if (!mem_trace_map_matches_row(row, *map_entry)) {
+                        continue;
                     }
-                }
-                for (const auto* map_entry : matching_map_entries) {
-                    auto trace_id = map_entry->trace_id;
-                    if (auto event_it = events_by_trace_id.find(trace_id); event_it != events_by_trace_id.end()) {
+                    if (!seen_trace_ids.insert(map_entry->trace_id).second) {
+                        continue;
+                    }
+                    if (auto event_it = events_by_trace_id.find(map_entry->trace_id);
+                        event_it != events_by_trace_id.end()) {
                         for (const auto* event : event_it->second) {
                             if (event->access == row.access || row.access == internal::mem::access_kind::rmw ||
                                 event->access == internal::mem::access_kind::rmw) {
@@ -4686,7 +4987,10 @@ examples:
                 return matches;
             };
 
-            for (auto& row : summary.rows) {
+            auto row_candidate_events = std::vector<std::vector<const mem_trace_event_record*>>(summary.rows.size());
+
+            for (size_t row_index = 0U; row_index < summary.rows.size(); ++row_index) {
+                auto& row = summary.rows[row_index];
                 if (!row.symbol.has_value() && (row.mnemonic == "push"sv || row.mnemonic == "pop"sv ||
                                                 row.mnemonic == "call"sv || row.mnemonic == "ret"sv)) {
                     continue;
@@ -4694,15 +4998,15 @@ examples:
 
                 auto candidate_events = std::vector<const mem_trace_event_record*>{};
 
-                // primary matching via ir_line_hints
+                // primary matching via all ir_line_hints (aggregate first, then resolve)
+                auto hinted_map_entries = std::vector<const mem_trace_map_record*>{};
                 for (const auto ir_line : row.ir_line_hints) {
                     if (auto it = map_entries_by_line.find(ir_line); it != map_entries_by_line.end()) {
-                        auto matches = collect_events_for_map_entries(it->second, row);
-                        if (!matches.empty()) {
-                            candidate_events = std::move(matches);
-                            break;
-                        }
+                        hinted_map_entries.insert(hinted_map_entries.end(), it->second.begin(), it->second.end());
                     }
+                }
+                if (!hinted_map_entries.empty()) {
+                    candidate_events = collect_events_for_map_entries(hinted_map_entries, row);
                 }
 
                 // fallback: scan all map entries matching by access + symbol
@@ -4745,6 +5049,123 @@ examples:
                 std::ranges::sort(candidate_events, [](const auto* lhs, const auto* rhs) {
                     return lhs->sequence < rhs->sequence;
                 });
+                row_candidate_events[row_index] = std::move(candidate_events);
+            }
+
+            auto alias_group_address_counts = std::unordered_map<size_t, std::unordered_map<uint64_t, size_t>>{};
+            for (size_t row_index = 0U; row_index < summary.rows.size(); ++row_index) {
+                auto& row = summary.rows[row_index];
+                auto& candidate_events = row_candidate_events[row_index];
+                if (!row.alias_group.has_value() || candidate_events.empty()) {
+                    continue;
+                }
+                auto& address_counts = alias_group_address_counts[*row.alias_group];
+                for (const auto* event : candidate_events) {
+                    ++address_counts[event->address];
+                }
+            }
+
+            auto alias_groups = std::vector<size_t>{};
+            alias_groups.reserve(alias_group_address_counts.size());
+            for (const auto& [alias_group, _] : alias_group_address_counts) {
+                alias_groups.push_back(alias_group);
+            }
+            std::ranges::sort(alias_groups);
+
+            auto preferred_address_by_alias_group = std::unordered_map<size_t, uint64_t>{};
+            auto used_addresses = std::unordered_set<uint64_t>{};
+
+            for (const auto alias_group : alias_groups) {
+                auto counts_it = alias_group_address_counts.find(alias_group);
+                if (counts_it == alias_group_address_counts.end()) {
+                    continue;
+                }
+                const auto& address_counts = counts_it->second;
+                if (address_counts.size() != 1U) {
+                    continue;
+                }
+                auto only = address_counts.begin();
+                preferred_address_by_alias_group.emplace(alias_group, only->first);
+                used_addresses.insert(only->first);
+            }
+
+            for (const auto alias_group : alias_groups) {
+                if (preferred_address_by_alias_group.contains(alias_group)) {
+                    continue;
+                }
+                auto counts_it = alias_group_address_counts.find(alias_group);
+                if (counts_it == alias_group_address_counts.end()) {
+                    continue;
+                }
+                const auto& address_counts = counts_it->second;
+                if (address_counts.empty()) {
+                    continue;
+                }
+
+                auto selected_address = uint64_t{0U};
+                auto selected_count = size_t{0U};
+                auto selected_used = true;
+                auto has_selected = false;
+                for (const auto& [address, count] : address_counts) {
+                    auto candidate_used = used_addresses.contains(address);
+                    auto choose = false;
+                    if (!has_selected) {
+                        choose = true;
+                    }
+                    else if (selected_used != candidate_used) {
+                        choose = selected_used && !candidate_used;
+                    }
+                    else if (count != selected_count) {
+                        choose = count > selected_count;
+                    }
+                    else if (address != selected_address) {
+                        choose = address < selected_address;
+                    }
+
+                    if (choose) {
+                        selected_address = address;
+                        selected_count = count;
+                        selected_used = candidate_used;
+                        has_selected = true;
+                    }
+                }
+                if (has_selected) {
+                    preferred_address_by_alias_group.emplace(alias_group, selected_address);
+                    used_addresses.insert(selected_address);
+                }
+            }
+
+            for (size_t row_index = 0U; row_index < summary.rows.size(); ++row_index) {
+                auto& row = summary.rows[row_index];
+                auto& candidate_events = row_candidate_events[row_index];
+                if (candidate_events.empty()) {
+                    continue;
+                }
+
+                if (row.alias_group.has_value()) {
+                    if (auto preferred_it = preferred_address_by_alias_group.find(*row.alias_group);
+                        preferred_it != preferred_address_by_alias_group.end()) {
+                        auto preferred_address = preferred_it->second;
+                        auto has_preferred = std::ranges::any_of(
+                                candidate_events, [preferred_address](const mem_trace_event_record* event) {
+                                    return event->address == preferred_address;
+                                });
+                        if (has_preferred) {
+                            std::erase_if(candidate_events, [preferred_address](const mem_trace_event_record* event) {
+                                return event->address != preferred_address;
+                            });
+                        }
+                    }
+                }
+
+                auto mark_trace_exact = [&row]() {
+                    row.observed_value_status = internal::mem::value_status::known;
+                    row.observed_value_source = internal::mem::value_source::runtime_trace_exact;
+                };
+                auto mark_trace_sampled = [&row]() {
+                    row.observed_value_status = internal::mem::value_status::varied;
+                    row.observed_value_source = internal::mem::value_source::runtime_trace_sampled;
+                };
 
                 // populate trace_samples (up to 8)
                 for (size_t i = 0U; i < candidate_events.size() && row.trace_samples.size() < 8U; ++i) {
@@ -4772,42 +5193,49 @@ examples:
                         auto after =
                                 format_runtime_hex(latest_store->value, static_cast<size_t>(latest_store->width_bytes));
                         row.observed_value = "{}\u2192{}"_format(before, after);
-                        auto distinct_pairs = std::set<std::string>{};
-                        for (const auto* event : candidate_events) {
-                            distinct_pairs.insert(
-                                    format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes)));
+                        auto distinct_pairs = count_distinct_runtime_rmw_pairs(candidate_events);
+                        row.value_variation_count =
+                                distinct_pairs > 0U ? distinct_pairs : count_distinct_runtime_values(candidate_events);
+                        if (row.value_variation_count <= 1U) {
+                            mark_trace_exact();
                         }
-                        row.value_variation_count = distinct_pairs.size();
+                        else {
+                            mark_trace_sampled();
+                        }
                     }
                     else {
-                        auto distinct_values = std::set<std::string>{};
-                        for (const auto* event : candidate_events) {
-                            distinct_values.insert(
-                                    format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes)));
-                        }
+                        auto distinct_values = count_distinct_runtime_values(candidate_events);
                         row.observed_value =
-                                distinct_values.size() <= 1U
+                                distinct_values <= 1U
                                         ? format_runtime_hex(latest->value, static_cast<size_t>(latest->width_bytes))
                                         : std::string{"<varied>"};
-                        row.value_variation_count = distinct_values.size();
+                        row.value_variation_count = distinct_values;
+                        if (row.value_variation_count <= 1U) {
+                            mark_trace_exact();
+                        }
+                        else {
+                            mark_trace_sampled();
+                        }
                     }
                     row.width_bytes = row.width_bytes.has_value()
                                             ? row.width_bytes
                                             : std::optional<size_t>{static_cast<size_t>(latest->width_bytes)};
                 }
                 else {
-                    auto distinct_values = std::set<std::string>{};
-                    for (const auto* event : candidate_events) {
-                        distinct_values.insert(
-                                format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes)));
-                    }
+                    auto distinct_values = count_distinct_runtime_values(candidate_events);
                     auto* latest = candidate_events.back();
                     row.runtime_address = latest->address;
                     row.observed_value =
-                            distinct_values.size() <= 1U
+                            distinct_values <= 1U
                                     ? format_runtime_hex(latest->value, static_cast<size_t>(latest->width_bytes))
                                     : std::string{"<varied>"};
-                    row.value_variation_count = distinct_values.size();
+                    row.value_variation_count = distinct_values;
+                    if (row.value_variation_count <= 1U) {
+                        mark_trace_exact();
+                    }
+                    else {
+                        mark_trace_sampled();
+                    }
                     row.width_bytes = row.width_bytes.has_value()
                                             ? row.width_bytes
                                             : std::optional<size_t>{static_cast<size_t>(latest->width_bytes)};
@@ -4877,6 +5305,8 @@ examples:
                 if (row.observed_value.has_value()) {
                     lines.push_back("  observed_value={}"_format(*row.observed_value));
                 }
+                lines.push_back("  value_status={}"_format(internal::mem::to_string(row.observed_value_status)));
+                lines.push_back("  value_source={}"_format(internal::mem::to_string(row.observed_value_source)));
                 if (row.value_variation_count > 1U) {
                     lines.push_back("  value_variation_count={}"_format(row.value_variation_count));
                 }
@@ -4965,10 +5395,18 @@ examples:
         }
 
         static mem_inspect_output_record to_mem_inspect_output_record(
-                std::string_view symbol, std::string_view symbol_display, const mem_summary& summary) {
+                std::string_view symbol,
+                std::string_view symbol_display,
+                const symbol_resolution_info& symbol_info,
+                const mem_summary& summary) {
             auto payload = mem_inspect_output_record{};
             payload.symbol = std::string{symbol};
             payload.symbol_display = std::string{symbol_display};
+            payload.symbol_canonical = symbol_info.canonical_name;
+            payload.symbol_addendum = symbol_info.addendum;
+            payload.symbol_status = "{}"_format(symbol_info.status);
+            payload.symbol_confidence = "{}"_format(symbol_info.confidence);
+            payload.symbol_source = symbol_info.source;
             payload.summary.memory_ops = summary.totals.memory_ops;
             payload.summary.loads = summary.totals.loads;
             payload.summary.stores = summary.totals.stores;
@@ -4978,6 +5416,7 @@ examples:
             payload.summary.globals = summary.totals.globals;
             payload.summary.unknown = summary.totals.unknown;
             payload.summary.trace_enabled = summary.trace_enabled;
+            payload.summary.trace_exit_code = summary.trace_exit_code;
             payload.summary.trace_truncated = summary.trace_truncated;
             payload.summary.trace_event_count = summary.trace_event_count;
             payload.rows.reserve(summary.rows.size());
@@ -5007,6 +5446,8 @@ examples:
                                                                    *row.runtime_address, 8U)}
                                                          : std::nullopt,
                                 .observed_value = row.observed_value,
+                                .value_status = std::string{internal::mem::to_string(row.observed_value_status)},
+                                .value_source = std::string{internal::mem::to_string(row.observed_value_source)},
                                 .value_variation_count = row.value_variation_count,
                                 .trace_samples = row.trace_samples});
             }
@@ -5024,6 +5465,14 @@ examples:
             auto dump_text = dump_result.success ? std::string_view{dump_result.artifact_text} : std::string_view{};
 
             auto asm_summary = summarize_asm_artifact(data.asm_result.artifact_text, dump_text);
+            if (asm_summary.rows.empty() && !dump_text.empty()) {
+                asm_summary.rows = parse_dump_rows(dump_text);
+                asm_summary.operations = asm_summary.rows.size();
+                for (const auto& row : asm_summary.rows) {
+                    auto [mnemonic, _] = split_asm_instruction_parts(row.instruction);
+                    append_opcode_count(asm_summary.opcode_counts, mnemonic);
+                }
+            }
             auto mca_result = run_analysis(request, analysis_kind::mca);
             if (mca_result.success) {
                 data.row_info = parse_mca_instruction_info_rows(mca_result.artifact_text);
@@ -5037,9 +5486,11 @@ examples:
             if (ir_result.success) {
                 attach_mem_ir_hints(data.summary, ir_result.artifact_text);
             }
-            auto trace_result = run_analysis(request, analysis_kind::mem_trace);
-            if (trace_result.success) {
-                apply_mem_runtime_trace(data.summary, trace_result.artifact_text);
+            if (request.static_link) {
+                auto trace_result = run_analysis(request, analysis_kind::mem_trace);
+                if (trace_result.success) {
+                    apply_mem_runtime_trace(data.summary, trace_result.artifact_text);
+                }
             }
             if (auto symbol = extract_asm_display_symbol(data.asm_result.artifact_text); symbol.has_value()) {
                 data.symbol_display = *symbol;
@@ -5256,7 +5707,9 @@ examples:
         static void render_mem_artifact_summary_and_body(
                 std::string_view symbol_display,
                 const mem_summary& summary,
+                std::string_view unchanged_color,
                 std::string_view modified_color,
+                bool static_link_enabled,
                 std::ostream& os) {
             os << "mem:\n";
             os << "symbol: {}\n"_format(symbol_display);
@@ -5269,8 +5722,32 @@ examples:
                     summary.alias_groups);
             os << "  stack={} | globals={} | unknown={}\n"_format(
                     summary.totals.stack, summary.totals.globals, summary.totals.unknown);
-            if (!summary.trace_enabled) {
-                os << "  trace: unavailable (compilation or execution failed)\n";
+            if (summary.trace_enabled) {
+                os << "  trace: ";
+                if (!unchanged_color.empty()) {
+                    os << unchanged_color << "enabled" << "\x1b[0m";
+                }
+                else {
+                    os << "enabled";
+                }
+                if (summary.trace_exit_code.has_value() && *summary.trace_exit_code != 0) {
+                    auto exit_code_text = " (exit_code={})"_format(*summary.trace_exit_code);
+                    if (!modified_color.empty()) {
+                        os << modified_color << exit_code_text << "\x1b[0m";
+                    }
+                    else {
+                        os << exit_code_text;
+                    }
+                }
+                os << '\n';
+            }
+            else if (!summary.trace_enabled) {
+                if (!static_link_enabled) {
+                    os << "  trace: disabled in dynamic mode (set build.static=true)\n";
+                }
+                else {
+                    os << "  trace: unavailable (compilation or execution failed)\n";
+                }
             }
             render_mem_rows_table(summary, os, modified_color);
         }
@@ -5567,7 +6044,11 @@ examples:
             if (!level.success) {
                 line.append(" | exit_code={}"_format(level.exit_code));
             }
+            else if (level.exit_code != 0) {
+                line.append(" (exit_code={})"_format(level.exit_code));
+            }
             line.append(" | operations={}"_format(level.operations.size()));
+            line.append(" | symbol_status={}"_format(level.symbol_status));
             auto opcode_counts = summarize_level_opcodes(level.operations);
             line.append(" | ");
             line.append(summarize_opcode_counts_inline(opcode_counts));
@@ -6380,9 +6861,23 @@ examples:
                 color_mode color_mode_value,
                 color_scheme delta_color_scheme_value,
                 std::ostream& os) {
+            auto show_color = should_use_color(color_mode_value);
+            auto palette = resolve_delta_color_palette(delta_color_scheme_value);
+
             os << "delta: {}\n"_format(report.success ? "valid"sv : "invalid"sv);
             os << "mode: {}\n"_format(report.mode);
             os << "symbol: {}\n"_format(report.symbol_display);
+            os << "symbol_resolution: status={} confidence={} source={}\n"_format(
+                    report.symbol_resolution.status,
+                    report.symbol_resolution.confidence,
+                    report.symbol_resolution.source.empty() ? "n/a"sv
+                                                            : std::string_view{report.symbol_resolution.source});
+            if (!report.symbol_resolution.canonical_name.empty()) {
+                os << "symbol_canonical: {}\n"_format(report.symbol_resolution.canonical_name);
+            }
+            if (report.symbol_resolution.addendum.has_value()) {
+                os << "symbol_addendum: {}\n"_format(*report.symbol_resolution.addendum);
+            }
             os << "baseline: {}\n"_format(report.baseline_label);
             os << "target: {}\n"_format(report.target_label);
             os << ("changes: unchanged={} modified={} inserted={} removed={} moved={}\n"_format(
@@ -6395,7 +6890,39 @@ examples:
 
             os << "levels:\n";
             for (const auto& level : report.levels) {
-                os << "{}\n"_format(format_delta_level_summary_line(level));
+                auto level_summary_line = format_delta_level_summary_line(level);
+                if (show_color && level.success && level.exit_code != 0) {
+                    auto marker = " (exit_code="sv;
+                    if (auto marker_pos = level_summary_line.find(marker); marker_pos != std::string::npos) {
+                        level_summary_line = colorize_asm_text_span(
+                                level_summary_line, marker_pos, level_summary_line.size(), palette.modified);
+                    }
+                }
+                os << "{}\n"_format(level_summary_line);
+            }
+
+            std::vector<std::string> optimized_out_levels{};
+            optimized_out_levels.reserve(report.levels.size());
+            for (const auto& level : report.levels) {
+                if (level.symbol_status != symbol_resolution_status::optimized_out) {
+                    continue;
+                }
+                optimized_out_levels.push_back(level.label.empty() ? "{}"_format(level.level) : level.label);
+            }
+            if (!optimized_out_levels.empty()) {
+                auto summary = std::string{"optimized out at: "};
+                for (size_t i = 0U; i < optimized_out_levels.size(); ++i) {
+                    if (i > 0U) {
+                        summary.append(", ");
+                    }
+                    summary.append(optimized_out_levels[i]);
+                }
+                if (show_color) {
+                    os << palette.modified << summary << "\x1b[0m\n";
+                }
+                else {
+                    os << summary << '\n';
+                }
             }
 
             if (!report.success) {
@@ -6417,7 +6944,6 @@ examples:
 
             auto levels = select_delta_side_by_side_levels(report);
             auto render_columns = build_delta_render_columns(levels);
-            auto show_color = should_use_color(color_mode_value);
             render_delta_side_by_side(report, render_columns, show_color, delta_color_scheme_value, os);
             render_delta_metrics_table(render_columns, os);
 
@@ -6571,6 +7097,9 @@ examples:
             report.symbol = current_report.symbol.empty() ? snapshot_report.symbol : current_report.symbol;
             report.symbol_display = current_report.symbol_display.empty() ? snapshot_report.symbol_display
                                                                           : current_report.symbol_display;
+            report.symbol_resolution = current_report.symbol_resolution.raw_name.empty()
+                                             ? snapshot_report.symbol_resolution
+                                             : current_report.symbol_resolution;
 
             auto current_level_record = *current_level;
             current_level_record.level = report.baseline;
@@ -6847,7 +7376,7 @@ examples:
                         (kind == analysis_kind::asm_text || kind == analysis_kind::dump || kind == analysis_kind::ir ||
                          kind == analysis_kind::mca) &&
                         arg->empty()) {
-                    request.symbol = std::string{"__sontag_main"};
+                    request.symbol = std::string{"main"};
                 }
 
                 if (kind == analysis_kind::asm_text && cfg.output != output_mode::json) {
@@ -6920,7 +7449,7 @@ examples:
                 return true;
             }
 
-            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            std::optional<std::string> symbol{std::string{"main"}};
             if (!tail.empty()) {
                 auto split = tail.find_first_of(" \t\r\n");
                 auto token = split == std::string_view::npos ? tail : trim_view(tail.substr(0U, split));
@@ -6946,12 +7475,20 @@ examples:
                     return true;
                 }
 
+                auto unchanged_color = std::string_view{};
                 auto modified_color = std::string_view{};
                 if (should_use_color(cfg.color)) {
                     auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                    unchanged_color = palette.unchanged;
                     modified_color = palette.modified;
                 }
-                render_mem_artifact_summary_and_body(mem_data.symbol_display, mem_data.summary, modified_color, out);
+                render_mem_artifact_summary_and_body(
+                        mem_data.symbol_display,
+                        mem_data.summary,
+                        unchanged_color,
+                        modified_color,
+                        request.static_link,
+                        out);
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());
             }
@@ -6971,7 +7508,7 @@ examples:
                 return true;
             }
 
-            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            std::optional<std::string> symbol{std::string{"main"}};
             if (!arg->empty()) {
                 auto split = arg->find_first_of(" \t\r\n");
                 auto token = split == std::string_view::npos ? *arg : trim_view(arg->substr(0U, split));
@@ -6998,9 +7535,24 @@ examples:
                 }
 
                 if (cfg.output == output_mode::json) {
-                    auto requested_symbol = symbol.value_or("__sontag_main");
-                    auto payload =
-                            to_mem_inspect_output_record(requested_symbol, mem_data.symbol_display, mem_data.summary);
+                    auto requested_symbol = symbol.value_or("main");
+                    auto symbol_info =
+                            resolve_symbol_info(request, requested_symbol).value_or(symbol_resolution_info{});
+                    if (symbol_info.raw_name.empty()) {
+                        symbol_info.raw_name = requested_symbol;
+                    }
+                    if (symbol_info.source.empty()) {
+                        symbol_info.source = "unresolved";
+                    }
+                    if (symbol_info.display_name.empty()) {
+                        symbol_info.display_name = mem_data.symbol_display;
+                    }
+                    if (symbol_info.canonical_name.empty()) {
+                        symbol_info.canonical_name =
+                                std::string{internal::symbols::canonical_symbol_for_match(requested_symbol)};
+                    }
+                    auto payload = to_mem_inspect_output_record(
+                            requested_symbol, mem_data.symbol_display, symbol_info, mem_data.summary);
                     std::string json{};
                     auto ec = glz::write_json(payload, json);
                     if (ec) {
@@ -7010,12 +7562,20 @@ examples:
                     return true;
                 }
 
+                auto unchanged_color = std::string_view{};
                 auto modified_color = std::string_view{};
                 if (should_use_color(cfg.color)) {
                     auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                    unchanged_color = palette.unchanged;
                     modified_color = palette.modified;
                 }
-                render_mem_artifact_summary_and_body(mem_data.symbol_display, mem_data.summary, modified_color, out);
+                render_mem_artifact_summary_and_body(
+                        mem_data.symbol_display,
+                        mem_data.summary,
+                        unchanged_color,
+                        modified_color,
+                        request.static_link,
+                        out);
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());
             }
@@ -7069,8 +7629,8 @@ examples:
                     size_t cursor{};
                 };
 
-                auto active = explore_frame_state{
-                        .symbol = symbol.has_value() ? *symbol : std::string{"__sontag_main"}, .cursor = 0U};
+                auto active =
+                        explore_frame_state{.symbol = symbol.has_value() ? *symbol : std::string{"main"}, .cursor = 0U};
                 std::vector<explore_frame_state> frame_stack{};
                 while (true) {
                     auto request = make_analysis_request(cfg, state);
@@ -7086,6 +7646,14 @@ examples:
                     auto dump_text =
                             dump_result.success ? std::string_view{dump_result.artifact_text} : std::string_view{};
                     auto summary = summarize_asm_artifact(asm_result.artifact_text, dump_text);
+                    if (summary.rows.empty() && !dump_text.empty()) {
+                        summary.rows = parse_dump_rows(dump_text);
+                        summary.operations = summary.rows.size();
+                        for (const auto& row : summary.rows) {
+                            auto [mnemonic, _] = split_asm_instruction_parts(row.instruction);
+                            append_opcode_count(summary.opcode_counts, mnemonic);
+                        }
+                    }
                     std::vector<internal::explorer::instruction_info> row_info{};
                     auto resource_pressure = internal::explorer::resource_pressure_table{};
 
@@ -7106,9 +7674,10 @@ examples:
                         selected_definition_color = palette.modified;
                         call_target_color = palette.removed;
                     }
+                    auto display_symbol = extract_asm_display_symbol(asm_result.artifact_text)
+                                                  .value_or(active.symbol.empty() ? "main()" : active.symbol);
                     auto model = internal::explorer::model{
-                            .symbol_display =
-                                    extract_asm_display_symbol(asm_result.artifact_text).value_or("__sontag_main()"),
+                            .symbol_display = std::move(display_symbol),
                             .operations_total = summary.operations,
                             .opcode_counts = summary.opcode_counts,
                             .rows = summary.rows,
@@ -7164,7 +7733,7 @@ examples:
             }
 
             auto symbol_arg = trim_view(tail.substr("explore"sv.size()));
-            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            std::optional<std::string> symbol{std::string{"main"}};
             if (!symbol_arg.empty()) {
                 auto split = symbol_arg.find_first_of(" \t\r\n");
                 auto token = split == std::string_view::npos ? symbol_arg : trim_view(symbol_arg.substr(0U, split));
@@ -7183,9 +7752,11 @@ examples:
             }
 
             try {
+                auto static_mem_unchanged_color = std::string_view{};
                 auto static_mem_modified_color = std::string_view{};
                 if (should_use_color(cfg.color)) {
                     auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                    static_mem_unchanged_color = palette.unchanged;
                     static_mem_modified_color = palette.modified;
                 }
 
@@ -7194,8 +7765,8 @@ examples:
                     size_t cursor{};
                 };
 
-                auto active = explore_frame_state{
-                        .symbol = symbol.has_value() ? *symbol : std::string{"__sontag_main"}, .cursor = 0U};
+                auto active =
+                        explore_frame_state{.symbol = symbol.has_value() ? *symbol : std::string{"main"}, .cursor = 0U};
                 std::vector<explore_frame_state> frame_stack{};
                 while (true) {
                     auto request = make_analysis_request(cfg, state);
@@ -7230,7 +7801,12 @@ examples:
                     if (launch.status == internal::explorer::launch_status::fallback) {
                         out << "{}\n"_format(launch.message);
                         render_mem_artifact_summary_and_body(
-                                mem_data.symbol_display, mem_data.summary, static_mem_modified_color, out);
+                                mem_data.symbol_display,
+                                mem_data.summary,
+                                static_mem_unchanged_color,
+                                static_mem_modified_color,
+                                request.static_link,
+                                out);
                         return true;
                     }
                     if (launch.next_symbol.has_value() && !launch.next_symbol->empty()) {
@@ -7271,7 +7847,7 @@ examples:
             }
 
             auto symbol_arg = trim_view(tail.substr("explore"sv.size()));
-            std::optional<std::string> symbol{std::string{"__sontag_main"}};
+            std::optional<std::string> symbol{std::string{"main"}};
             if (!symbol_arg.empty()) {
                 auto split = symbol_arg.find_first_of(" \t\r\n");
                 auto token = split == std::string_view::npos ? symbol_arg : trim_view(symbol_arg.substr(0U, split));
@@ -7717,21 +8293,6 @@ examples:
             return std::string(trimmed);
         }
 
-        static constexpr bool try_parse_bool(std::string_view value, bool& out) {
-            auto trimmed = trim_view(value);
-            if (utils::str_case_eq(trimmed, "true"sv) || utils::str_case_eq(trimmed, "1"sv) ||
-                utils::str_case_eq(trimmed, "yes"sv) || utils::str_case_eq(trimmed, "on"sv)) {
-                out = true;
-                return true;
-            }
-            if (utils::str_case_eq(trimmed, "false"sv) || utils::str_case_eq(trimmed, "0"sv) ||
-                utils::str_case_eq(trimmed, "no"sv) || utils::str_case_eq(trimmed, "off"sv)) {
-                out = false;
-                return true;
-            }
-            return false;
-        }
-
         static void delimit_frame([[maybe_unused]] const startup_config& cfg) {
 #ifdef SONTAG_MCP
             if (cfg.frame_delimiter) {
@@ -7868,6 +8429,7 @@ examples:
         std::string resume_arg{};
         std::string cache_dir_arg{cfg.cache_dir.string()};
         std::string history_file_arg{cfg.history_file.string()};
+        std::string cache_ttl_days_arg{"{}"_format(cfg.cache_ttl_days)};
         std::string banner_arg{cfg.banner_enabled ? "true" : "false"};
         bool no_history = false;
         bool no_banner = false;
@@ -7882,6 +8444,7 @@ examples:
         app.add_option("--resume", resume_arg, "Resume session id or latest");
         app.add_option("--cache-dir", cache_dir_arg, "Cache/artifact directory");
         app.add_option("--history-file", history_file_arg, "Persistent REPL history path");
+        app.add_option("--cache-ttl-days", cache_ttl_days_arg, "Prune cache/session entries older than N days");
         app.add_flag("--no-history", no_history, "Disable persistent REPL history");
         app.add_option("--banner", banner_arg, "Show startup banner: true|false");
         app.add_flag("--no-banner", no_banner, "Disable startup banner");
@@ -7898,6 +8461,7 @@ examples:
         app.add_option("--eval", eval_arg, "Execute command and exit");
         std::string snapshot_arg{};
         app.add_option("--snapshot", snapshot_arg, "Create named snapshot after loading files");
+        app.add_flag("--nolink", cfg.no_link, "Disable linking for dump analysis (fall back to .o)");
 #ifdef SONTAG_MCP
         app.add_flag("--frame-delimiter", cfg.frame_delimiter, "Emit \\x1e after each command output");
         app.add_flag("--mcp", cfg.mcp_mode, "Start MCP server");
@@ -7939,6 +8503,12 @@ examples:
             std::cerr << "invalid --banner value: {} (expected true|false)\n"_format(banner_arg);
             return std::optional<int>{2};
         }
+        auto parsed_cache_ttl_days = utils::parse_arithmetic<size_t>(cache_ttl_days_arg);
+        if (!parsed_cache_ttl_days) {
+            std::cerr << "invalid --cache-ttl-days value: {} (expected unsigned integer)\n"_format(cache_ttl_days_arg);
+            return std::optional<int>{2};
+        }
+        cfg.cache_ttl_days = *parsed_cache_ttl_days;
 
         cfg.target_triple = detail::normalize_optional(target_arg);
         cfg.cpu = detail::normalize_optional(cpu_arg);

@@ -136,6 +136,15 @@ function(configure_build_opts)
             "required llvm-nm executable not found in toolchain bin dir: ${sontag_toolchain_bin_dir_resolved}")
     endif()
 
+    set(sontag_lld_candidate "${sontag_toolchain_bin_dir_resolved}/ld.lld-${sontag_clang_version_major}")
+    if(NOT EXISTS "${sontag_lld_candidate}")
+        set(sontag_lld_candidate "${sontag_toolchain_bin_dir_resolved}/ld.lld")
+    endif()
+    if(NOT EXISTS "${sontag_lld_candidate}")
+        message(FATAL_ERROR
+            "required ld.lld executable not found in toolchain bin dir: ${sontag_toolchain_bin_dir_resolved}")
+    endif()
+
     set(SONTAG_TOOLCHAIN_BIN_DIR_RESOLVED "${sontag_toolchain_bin_dir_resolved}" CACHE PATH
         "resolved LLVM toolchain binary directory used by sontag" FORCE)
     set(SONTAG_CLANG_EXECUTABLE "${sontag_clang_candidate}" CACHE FILEPATH
@@ -148,6 +157,8 @@ function(configure_build_opts)
         "llvm-objdump executable path used by sontag" FORCE)
     set(SONTAG_LLVM_NM_EXECUTABLE "${sontag_llvm_nm_candidate}" CACHE FILEPATH
         "llvm-nm executable path used by sontag" FORCE)
+    set(SONTAG_LLD_EXECUTABLE "${sontag_lld_candidate}" CACHE FILEPATH
+        "ld.lld executable path used by sontag" FORCE)
 
     set(sontag_toolchain_bin_dir_resolved_escaped "${sontag_toolchain_bin_dir_resolved}")
     string(REPLACE "\\" "\\\\" sontag_toolchain_bin_dir_resolved_escaped "${sontag_toolchain_bin_dir_resolved_escaped}")
@@ -169,6 +180,10 @@ function(configure_build_opts)
     string(REPLACE "\\" "\\\\" sontag_llvm_nm_candidate_escaped "${sontag_llvm_nm_candidate_escaped}")
     string(REPLACE "\"" "\\\"" sontag_llvm_nm_candidate_escaped "${sontag_llvm_nm_candidate_escaped}")
 
+    set(sontag_lld_candidate_escaped "${sontag_lld_candidate}")
+    string(REPLACE "\\" "\\\\" sontag_lld_candidate_escaped "${sontag_lld_candidate_escaped}")
+    string(REPLACE "\"" "\\\"" sontag_lld_candidate_escaped "${sontag_lld_candidate_escaped}")
+
     add_compile_definitions(
         SONTAG_COMPILER_CLANG=1
         SONTAG_CLANG_VERSION_MAJOR=${sontag_clang_version_major}
@@ -177,6 +192,7 @@ function(configure_build_opts)
         SONTAG_LLVM_MCA_EXECUTABLE_PATH="${sontag_llvm_mca_candidate_escaped}"
         SONTAG_LLVM_OBJDUMP_EXECUTABLE_PATH="${sontag_llvm_objdump_candidate_escaped}"
         SONTAG_LLVM_NM_EXECUTABLE_PATH="${sontag_llvm_nm_candidate_escaped}"
+        SONTAG_LLD_EXECUTABLE_PATH="${sontag_lld_candidate_escaped}"
     )
 
     message(STATUS
@@ -189,6 +205,7 @@ function(configure_build_opts)
     message(STATUS "sontag llvm-mca executable: ${SONTAG_LLVM_MCA_EXECUTABLE}")
     message(STATUS "sontag llvm-objdump executable: ${SONTAG_LLVM_OBJDUMP_EXECUTABLE}")
     message(STATUS "sontag llvm-nm executable: ${SONTAG_LLVM_NM_EXECUTABLE}")
+    message(STATUS "sontag ld.lld executable: ${SONTAG_LLD_EXECUTABLE}")
 
     if(SONTAG_USE_LIBCXX)
         add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>")

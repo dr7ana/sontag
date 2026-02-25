@@ -23,7 +23,7 @@ namespace sontag::cli { namespace detail {
     static std::array<const char*, 2> clear_completions{"last", nullptr};
     static std::array<const char*, 4> reset_completions{"last", "snapshots", "file", nullptr};
     static std::array<const char*, 5> show_completions{"config", "decl", "exec", "all", nullptr};
-    static std::array<const char*, 18> config_completions{
+    static std::array<const char*, 23> config_completions{
             "build",
             "ui",
             "session",
@@ -34,21 +34,26 @@ namespace sontag::cli { namespace detail {
             "build.target=",
             "build.cpu=",
             "build.mca_cpu=",
+            "build.static=",
+            "build.libraries=",
+            "build.library_dirs=",
+            "build.linker_args=",
             "ui.output=",
             "ui.color=",
             "ui.color_scheme=",
             "session.cache_dir=",
             "session.history_file=",
+            "session.cache_ttl_days=",
             "editor.editor=",
             "editor.formatter=",
             nullptr};
     static std::array<const char*, 3> graph_completions{"cfg", "call", nullptr};
-    static std::array<const char*, 4> graph_mode_or_symbol_completions{"export", "@last", "__sontag_main", nullptr};
+    static std::array<const char*, 4> graph_mode_or_symbol_completions{"export", "@last", "main", nullptr};
     static std::array<const char*, 4> inspect_completions{"asm", "mca", "mem", nullptr};
     static std::array<const char*, 3> inspect_mca_completions{"summary", "heatmap", nullptr};
-    static std::array<const char*, 3> analysis_target_completions{"@last", "__sontag_main", nullptr};
+    static std::array<const char*, 3> analysis_target_completions{"@last", "main", nullptr};
     static std::array<const char*, 10> delta_completions{
-            "spectrum", "O0", "O1", "O2", "O3", "Ofast", "Oz", "@last", "__sontag_main", nullptr};
+            "spectrum", "O0", "O1", "O2", "O3", "Ofast", "Oz", "@last", "main", nullptr};
 
     static constexpr std::string_view trim_left(std::string_view value) {
         auto start = value.find_first_not_of(" \t\r\n");

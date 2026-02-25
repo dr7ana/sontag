@@ -16,7 +16,7 @@ sontag commands are organized by output mode:
 - `static`: base command, deterministic text output
   - examples: `:asm`, `:ir`, `:graph cfg`, `:graph call`
 - `explore`: interactive TTY mode (arrows, `j/k`, enter/quit depending on command)
-  - examples: `:asm explore`, `:ir explore`, `:mem_explore`
+  - examples: `:asm explore`, `:ir explore`, `:mem explore`
 - `inspect`: structured JSON export for downstream tooling
   - examples: `:inspect asm`, `:inspect mem`, `:inspect mca summary`, `:inspect mca heatmap`
 
@@ -111,7 +111,7 @@ constexpr int fold(int a, int b, int c) {
     return add(a, b);
 }
 
-int __sontag_main() {
+int main() {
     auto double_value = value * 2;
     values[0] = value;
     values[1] = double_value;
@@ -133,7 +133,7 @@ interactive assembly view with:
 
 controls:
 
-- `up`/`sown` or `j`/`k`: move selection
+- `up`/`down` or `j`/`k`: move selection
 - `enter`: follow callable symbol on selected row (when available)
 - `q`: exit (recursively if you have followed callable symbols)
 
@@ -143,9 +143,12 @@ controls:
 
 interactive IR view with:
 
-- full node table (`id`, `out`, `in`, `label`)
-- Sugiyama layout below the table
+- viewported node table (`id`, `out`, `in`, `label`)
+- Sugiyama layout preview below the table
 - selected/incoming/outgoing node id coloring in the layout
+
+notes:
+- non-interactive fallback (`:ir explore` without a TTY, including MCP stateless calls) prints bounded node/layout sections and includes truncation notes when clipped
 
 controls:
 
@@ -161,10 +164,16 @@ interactive memory access view with instrumented runtime tracing (WIP). rows sho
 - `:mem [symbol|@last]`: traced memory table
 - `:mem explore [symbol|@last]`: interactive row navigation
 - `:inspect mem [symbol|@last]`: structured JSON output
+- trace status line semantics:
+  - `trace: enabled` means trace completed with exit code `0`
+  - `trace: enabled (exit_code=N)` means trace completed with a nonzero runtime exit code
+  - `trace: disabled in dynamic mode (set build.static=true)` means runtime trace was intentionally skipped
 
 controls:
 
 - `up`/`down` or `j`/`k`: move selection
+- `enter`: follow callable symbol on selected row (when available)
+- `enter` on rows with named memory symbols (for example globals) attempts symbol navigation for that symbol
 - `q`: exit
 
 ![ir explore demo](docs/mem_explore.gif)
@@ -180,11 +189,12 @@ currently tested on:
 
 - `:decl <code>`: append declarative cell
 - `:declfile <path>`: import full file as one declarative cell
-- `:file <path>`: import file as decl + exec split from `main`/`__sontag_main`
+- `:file <path>`: import file as decl + exec split from `main`
 - `:openfile <path>`: open editor, run repo `.clang-format`, import with `:file` semantics
 - bare input (non-command): append executable cell
 - `:show <config|decl|exec|all>`: inspect current state
 - `:symbols`: list discovered symbols from current snapshot
+  - in static/full-link mode, this can include many libc/libc++ runtime symbols; this is expected
 - `:clear`: clear terminal screen
 - `:help`: print command help
 - `:quit`: exit REPL
@@ -210,14 +220,32 @@ currently tested on:
 
 ## static analysis commands
 
+### link and resolution modes
+
+- dynamic mode (default): `build.static=false`
+  - faster iteration
+  - `:mem` runtime trace is skipped (`trace: disabled in dynamic mode ...`)
+- static mode: `build.static=true`
+  - enables runtime tracing used by `:mem` value resolution
+  - increases symbol coverage from linked runtime/library code (so `:symbols` can be much larger)
+
+resolution behavior:
+
+- symbol resolution accepts mangled and demangled spellings where possible
+- dynamic relocation addendums (for example `@PLT`) are preserved in resolution metadata when present
+- `:mem` value column is runtime-trace-backed and best-effort:
+  - in static mode with successful trace, values are populated when observed
+  - when trace is disabled/unavailable, values may be missing (`-`) or partial
+
 ### `:asm [symbol|@last]`
 
-- default symbol: `__sontag_main` (equivalent to `main`)
+- default symbol: `main` (equivalent to `main`)
 - prints operation summary, opcode counts, and normalized assembly rows
+- if a requested symbol is not present in TU assembly output, `:asm <symbol>` falls back to linked binary disassembly
 
 ### `:ir [symbol|@last]`
 
-- default symbol: `__sontag_main`
+- default symbol: `main`
 - prints IR node table plus Sugiyama layout keyed by `n*` ids
 
 ### `:diag [symbol|@last]`
@@ -240,8 +268,7 @@ modes:
 
 snapshot mode defaults to implicit symbol scope:
 
-- `:delta <snapshot>` == `:delta <snapshot> __sontag_main`
-- `main` and `__sontag_main` are treated as equivalent
+- `:delta <snapshot>` == `:delta <snapshot> main`
 
 n-way snapshot compare:
 
@@ -406,4 +433,4 @@ if the persistent child crashes, the next `session_eval` returns an error and au
 
 - `color_scheme` currently supports `classic` and `vaporwave` (default).
 - default `build.opt` is `O0`.
-- generated source ensures synthesis of a single trailing `return` in `__sontag_main`.
+- generated source ensures synthesis of a single trailing `return` in `main`.

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "symbols.hpp"
+
 #include "sontag/format.hpp"
 #include "sontag/utils.hpp"
 
@@ -15,6 +17,7 @@ extern "C" {
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <ostream>
 #include <string>
@@ -355,7 +358,7 @@ namespace sontag::internal::explorer {
             bool active{false};
         };
 
-        static constexpr size_t detail_lines_reserve = 16U;
+        static constexpr size_t detail_lines_reserve{12};
 
         static size_t calculate_rows_visible(size_t total_rows, size_t opcode_rows, bool has_resource_pressure) {
             // Fixed rows:
@@ -427,6 +430,15 @@ namespace sontag::internal::explorer {
             return ascii_iequals(mnemonic, "call"sv) || ascii_iequals(mnemonic, "bl"sv);
         }
 
+        static std::optional<std::string_view> normalize_call_target_candidate(std::string_view candidate) {
+            candidate = symbols::normalize_symbol_candidate(candidate);
+            if (candidate.empty()) {
+                return std::nullopt;
+            }
+
+            return candidate;
+        }
+
         static std::optional<std::string_view> extract_call_target_symbol(std::string_view instruction) {
             auto [mnemonic, operands] = split_instruction_parts(instruction);
             if (!is_call_like_mnemonic(mnemonic) || operands.empty()) {
@@ -445,6 +457,38 @@ namespace sontag::internal::explorer {
                 return std::nullopt;
             }
 
+            if (auto open = candidate.find('<'); open != std::string_view::npos) {
+                auto wrapped_target = open == 0U || std::isspace(static_cast<unsigned char>(candidate[open - 1U])) != 0;
+                if (wrapped_target) {
+                    auto depth = size_t{0U};
+                    auto close = std::string_view::npos;
+                    for (size_t i = open; i < candidate.size(); ++i) {
+                        if (candidate[i] == '<') {
+                            ++depth;
+                            continue;
+                        }
+                        if (candidate[i] == '>') {
+                            if (depth == 0U) {
+                                break;
+                            }
+                            --depth;
+                            if (depth == 0U) {
+                                close = i;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (close != std::string_view::npos && close > open + 1U) {
+                        if (auto normalized =
+                                    normalize_call_target_candidate(candidate.substr(open + 1U, close - open - 1U));
+                            normalized.has_value()) {
+                            return normalized;
+                        }
+                    }
+                }
+            }
+
             if (candidate.front() == '<' || candidate.front() == '*' || candidate.front() == '[' ||
                 candidate[0] == '-') {
                 return std::nullopt;
@@ -456,10 +500,35 @@ namespace sontag::internal::explorer {
                 return std::nullopt;
             }
             if (candidate.find('[') != std::string_view::npos || candidate.find(']') != std::string_view::npos) {
-                return std::nullopt;
+                // Allow demangled ABI tags like [abi:ne210108], but reject memory operands.
+                auto scan = size_t{0U};
+                while (scan < candidate.size()) {
+                    auto close = candidate.find(']', scan);
+                    auto open = candidate.find('[', scan);
+                    if (close != std::string_view::npos && (open == std::string_view::npos || close < open)) {
+                        return std::nullopt;
+                    }
+                    if (open == std::string_view::npos) {
+                        break;
+                    }
+                    if (close == std::string_view::npos || close <= open + 1U) {
+                        return std::nullopt;
+                    }
+                    auto tag = candidate.substr(open + 1U, close - open - 1U);
+                    while (!tag.empty() && (tag.front() == ' ' || tag.front() == '\t')) {
+                        tag.remove_prefix(1U);
+                    }
+                    while (!tag.empty() && (tag.back() == ' ' || tag.back() == '\t')) {
+                        tag.remove_suffix(1U);
+                    }
+                    if (!tag.starts_with("abi:"sv)) {
+                        return std::nullopt;
+                    }
+                    scan = close + 1U;
+                }
             }
 
-            return candidate;
+            return normalize_call_target_candidate(candidate);
         }
 
         static std::string format_aligned_instruction(std::string_view instruction, size_t mnemonic_width) {
@@ -823,14 +892,24 @@ namespace sontag::internal::explorer {
             return total_rows - fixed_rows;
         }
 
-        static size_t calculate_graph_rows_visible_table_only(size_t total_rows) {
+        static size_t calculate_ir_layout_rows_visible(size_t total_rows) {
+            if (total_rows <= 12U) {
+                return 1U;
+            }
+            auto budget = std::clamp(total_rows / 3U, size_t{6U}, size_t{18U});
+            auto max_budget = total_rows - 12U;
+            return std::max<size_t>(1U, std::min(budget, max_budget));
+        }
+
+        static size_t calculate_graph_rows_visible_table_only(size_t total_rows, size_t layout_rows_reserved = 0U) {
             // Fixed rows:
             // 5 (header/title/counts/blank) +
             // 3 (node heading/header/separator) +
+            // layout_rows_reserved (optional layout viewport budget) +
             // 1 (blank before layout) +
             // 1 (layout heading) +
             // 1 (controls)
-            auto fixed_rows = 11U;
+            auto fixed_rows = 11U + layout_rows_reserved;
             if (total_rows <= fixed_rows) {
                 return 1U;
             }
@@ -1276,8 +1355,7 @@ namespace sontag::internal::explorer {
             return frame;
         }
 
-        static std::string render_frame(
-                const model& data, size_t cursor, size_t top_row, size_t rows_visible, size_t terminal_cols) {
+        static std::string render_frame(const model& data, size_t cursor, size_t top_row, size_t rows_visible) {
             std::string frame{};
             frame.reserve(4096U);
 
@@ -1925,9 +2003,18 @@ namespace sontag::internal::explorer {
                 const graph_model& data,
                 std::ostream& out,
                 bool include_header = true,
-                const std::unordered_map<std::string, std::string_view>* node_id_colors = nullptr) {
-            auto terminal_cols = isatty(STDOUT_FILENO) ? query_terminal_dims().cols : size_t{4096U};
-            auto append_line = [&](std::string_view line) { out << line << '\n'; };
+                const std::unordered_map<std::string, std::string_view>* node_id_colors = nullptr,
+                size_t max_lines = std::numeric_limits<size_t>::max()) {
+            auto emitted_lines = size_t{0U};
+            auto truncated_lines = false;
+            auto append_line = [&](std::string_view line) {
+                if (emitted_lines >= max_lines) {
+                    truncated_lines = true;
+                    return;
+                }
+                out << line << '\n';
+                ++emitted_lines;
+            };
 
             if (include_header) {
                 append_line("graph:");
@@ -1939,6 +2026,9 @@ namespace sontag::internal::explorer {
 
             if (data.nodes.empty()) {
                 append_line("<empty>");
+                if (truncated_lines) {
+                    out << "note: layout truncated (showing first {} lines)\n"_format(max_lines);
+                }
                 return;
             }
 
@@ -2130,6 +2220,9 @@ namespace sontag::internal::explorer {
                 append_line("");
                 append_line("note: '^' marks back-edges reversed only for layering.");
             }
+            if (truncated_lines) {
+                out << "note: layout truncated (showing first {} lines)\n"_format(max_lines);
+            }
         }
 
     }  // namespace detail
@@ -2172,7 +2265,7 @@ namespace sontag::internal::explorer {
                     !data.resource_pressure.resources.empty());
             detail::clamp_viewport(data.rows.size(), rows_visible, cursor, top_row);
 
-            out << detail::render_frame(data, cursor, top_row, rows_visible, dims.cols);
+            out << detail::render_frame(data, cursor, top_row, rows_visible);
             out.flush();
 
             auto event = detail::read_key_event(STDIN_FILENO);
@@ -2240,7 +2333,8 @@ namespace sontag::internal::explorer {
         if (data.kind_label == "ir"sv) {
             while (running) {
                 auto dims = detail::query_terminal_dims();
-                auto rows_visible = detail::calculate_graph_rows_visible_table_only(dims.rows);
+                auto layout_rows_visible = detail::calculate_ir_layout_rows_visible(dims.rows);
+                auto rows_visible = detail::calculate_graph_rows_visible_table_only(dims.rows, layout_rows_visible);
                 detail::clamp_graph_viewport(data.nodes.size(), rows_visible, cursor, top_row);
                 auto safe_cursor = std::min(cursor, data.nodes.size() - 1U);
 
@@ -2282,7 +2376,7 @@ namespace sontag::internal::explorer {
                         data, cursor, top_row, rows_visible, dims.cols, true, false, true, false);
                 out << '\n';
                 out << "layout:\n";
-                detail::render_graph_sugiyama(data, out, false, &node_colors);
+                detail::render_graph_sugiyama(data, out, false, &node_colors, layout_rows_visible);
                 out << "controls: up/down j/k q | {}/{}\n"_format(safe_cursor + 1U, data.nodes.size());
                 out.flush();
 
@@ -2364,46 +2458,19 @@ namespace sontag::internal::explorer {
             return;
         }
 
-        out << "graph explorer:\n";
-        out << "type: {}\n"_format(data.kind_label);
-        out << "root: {}\n"_format(data.title);
-        out << "nodes: {} | edges: {}\n"_format(data.nodes.size(), data.edges.size());
-        out << '\n';
+        auto dims = detail::query_terminal_dims();
+        auto layout_rows_visible = detail::calculate_ir_layout_rows_visible(dims.rows);
+        auto rows_visible = detail::calculate_graph_rows_visible_table_only(dims.rows, layout_rows_visible);
+        rows_visible = std::max<size_t>(1U, rows_visible);
 
-        auto id_width = std::string_view{"id"}.size();
-        auto out_width = std::string_view{"out"}.size();
-        auto in_width = std::string_view{"in"}.size();
-        auto label_width = std::string_view{"label"}.size();
-        for (const auto& node : data.nodes) {
-            id_width = std::max(id_width, node.id.size());
-            out_width = std::max(out_width, "{}"_format(node.outgoing_count).size());
-            in_width = std::max(in_width, "{}"_format(node.incoming_count).size());
-            label_width = std::max(label_width, node.short_label.size());
+        auto frame = detail::render_graph_frame(data, 0U, 0U, rows_visible, dims.cols, false, false, false, false);
+        out << frame;
+        if (data.nodes.size() > rows_visible) {
+            out << "note: node table truncated (showing first {} of {})\n"_format(rows_visible, data.nodes.size());
         }
-
-        out << "nodes:\n";
-        out << detail::pad_cell("id", id_width) << " | " << detail::pad_cell("out", out_width) << " | "
-            << detail::pad_cell("in", in_width) << " | " << detail::pad_cell("label", label_width) << '\n';
-        out << std::string(id_width, '-') << "-+-" << std::string(out_width, '-') << "-+-" << std::string(in_width, '-')
-            << "-+-" << std::string(label_width, '-') << '\n';
-
-        if (data.nodes.empty()) {
-            out << detail::pad_cell("<none>", id_width) << " | " << detail::pad_cell("", out_width) << " | "
-                << detail::pad_cell("", in_width) << " | " << detail::pad_cell("", label_width) << '\n';
-            return;
-        }
-
-        for (const auto& node : data.nodes) {
-            auto label = detail::colorize_defuse_label(node.short_label, data.selected_detail_color);
-            out << detail::pad_cell(node.id, id_width) << " | "
-                << detail::pad_cell("{}"_format(node.outgoing_count), out_width) << " | "
-                << detail::pad_cell("{}"_format(node.incoming_count), in_width) << " | "
-                << detail::pad_cell(label, label_width) << '\n';
-        }
-
         out << '\n';
         out << "layout:\n";
-        detail::render_graph_sugiyama(data, out, false);
+        detail::render_graph_sugiyama(data, out, false, nullptr, layout_rows_visible);
     }
 
 }  // namespace sontag::internal::explorer

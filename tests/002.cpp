@@ -29,6 +29,8 @@ namespace sontag::test {
                 "/tmp/sontag_tests",
                 "--history-file",
                 "/tmp/sontag_tests/history.txt",
+                "--cache-ttl-days",
+                "9",
                 "--banner",
                 "false",
                 "--output",
@@ -54,6 +56,7 @@ namespace sontag::test {
         CHECK(*cfg.resume_session == "latest");
         CHECK(cfg.cache_dir == "/tmp/sontag_tests");
         CHECK(cfg.history_file == "/tmp/sontag_tests/history.txt");
+        CHECK(cfg.cache_ttl_days == 9U);
         CHECK_FALSE(cfg.banner_enabled);
         CHECK(cfg.output == output_mode::json);
         CHECK(cfg.color == color_mode::never);
@@ -94,6 +97,16 @@ namespace sontag::test {
         SECTION("invalid color scheme value is rejected") {
             startup_config cfg{};
             std::vector<std::string> args{"sontag", "--color-scheme", "synthwave"};
+            auto argv = detail::to_argv(args);
+
+            auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);
+            REQUIRE(result);
+            CHECK(*result == 2);
+        }
+
+        SECTION("invalid cache ttl value is rejected") {
+            startup_config cfg{};
+            std::vector<std::string> args{"sontag", "--cache-ttl-days", "abc"};
             auto argv = detail::to_argv(args);
 
             auto result = cli::parse_cli(static_cast<int>(argv.size()), argv.data(), cfg);

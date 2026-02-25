@@ -18,7 +18,11 @@ namespace sontag::test { namespace detail {
         }
     };
 
-    static analysis_request make_request(const fs::path& session_dir, std::string decl_cell, std::string exec_cell) {
+    static analysis_request make_request(
+            const fs::path& session_dir,
+            std::string decl_cell,
+            std::string exec_cell,
+            optimization_level opt_level = optimization_level::o2) {
         auto request = analysis_request{};
         request.clang_path = fs::path{internal::platform::tool::clangxx_path};
         request.objdump_path = fs::path{internal::platform::tool::llvm_objdump_path};
@@ -26,7 +30,7 @@ namespace sontag::test { namespace detail {
         request.nm_path = fs::path{internal::platform::tool::llvm_nm_path};
         request.session_dir = session_dir;
         request.language_standard = cxx_standard::cxx23;
-        request.opt_level = optimization_level::o2;
+        request.opt_level = opt_level;
         request.decl_cells = {std::move(decl_cell)};
         request.exec_cells = {std::move(exec_cell)};
         return request;
@@ -60,7 +64,7 @@ namespace sontag::test {
         REQUIRE(report.levels.size() == 2U);
         CHECK(report.levels[0].level == optimization_level::o0);
         CHECK(report.levels[1].level == optimization_level::o2);
-        CHECK(report.symbol_display.find("__sontag_main") != std::string::npos);
+        CHECK(report.symbol_display.find("main") != std::string::npos);
 
         bool any_operations = false;
         bool any_triplets = false;
@@ -83,7 +87,8 @@ namespace sontag::test {
                 temp.path / "session",
                 "volatile int sink = 0;\n"
                 "__attribute__((noinline)) int add(int a, int b) { return a + b; }\n",
-                "sink = add(7, 11);");
+                "sink = add(7, 11);",
+                optimization_level::o0);
 
         auto report = collect_delta_report(request, delta_request{.symbol = "add"});
 

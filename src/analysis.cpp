@@ -9,6 +9,7 @@
 #include "internal/metrics.hpp"
 #include "internal/opcode.hpp"
 #include "internal/platform.hpp"
+#include "internal/symbols.hpp"
 
 #include <glaze/glaze.hpp>
 
@@ -31,6 +32,7 @@ extern "C" {
 #include <iomanip>
 #include <iostream>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -54,6 +56,11 @@ namespace sontag::detail {
         int schema_version{1};
         std::string symbol{};
         std::string symbol_display{};
+        std::string symbol_canonical{};
+        std::optional<std::string> symbol_addendum{};
+        std::string symbol_status{};
+        std::string symbol_confidence{};
+        std::string symbol_source{};
         std::vector<inspect_line_record> source{};
         std::vector<inspect_line_record> ir{};
         std::vector<inspect_line_record> asm_lines{};
@@ -65,6 +72,11 @@ namespace sontag::detail {
         int schema_version{1};
         std::string symbol{};
         std::string symbol_display{};
+        std::string symbol_canonical{};
+        std::optional<std::string> symbol_addendum{};
+        std::string symbol_status{};
+        std::string symbol_confidence{};
+        std::string symbol_source{};
         std::string source_path{};
         int iterations{};
         int instructions{};
@@ -89,6 +101,11 @@ namespace sontag::detail {
         int schema_version{1};
         std::string symbol{};
         std::string symbol_display{};
+        std::string symbol_canonical{};
+        std::optional<std::string> symbol_addendum{};
+        std::string symbol_status{};
+        std::string symbol_confidence{};
+        std::string symbol_source{};
         std::vector<inspect_mca_heatmap_row> rows{};
         std::vector<analysis_opcode_entry> opcode_table{};
         std::vector<analysis_operation_entry> operations{};
@@ -127,6 +144,16 @@ namespace glz {
                        &T::symbol,
                        "symbol_display",
                        &T::symbol_display,
+                       "symbol_canonical",
+                       &T::symbol_canonical,
+                       "symbol_addendum",
+                       &T::symbol_addendum,
+                       "symbol_status",
+                       &T::symbol_status,
+                       "symbol_confidence",
+                       &T::symbol_confidence,
+                       "symbol_source",
+                       &T::symbol_source,
                        "source",
                        &T::source,
                        "ir",
@@ -149,6 +176,16 @@ namespace glz {
                        &T::symbol,
                        "symbol_display",
                        &T::symbol_display,
+                       "symbol_canonical",
+                       &T::symbol_canonical,
+                       "symbol_addendum",
+                       &T::symbol_addendum,
+                       "symbol_status",
+                       &T::symbol_status,
+                       "symbol_confidence",
+                       &T::symbol_confidence,
+                       "symbol_source",
+                       &T::symbol_source,
                        "source_path",
                        &T::source_path,
                        "iterations",
@@ -191,6 +228,16 @@ namespace glz {
                        &T::symbol,
                        "symbol_display",
                        &T::symbol_display,
+                       "symbol_canonical",
+                       &T::symbol_canonical,
+                       "symbol_addendum",
+                       &T::symbol_addendum,
+                       "symbol_status",
+                       &T::symbol_status,
+                       "symbol_confidence",
+                       &T::symbol_confidence,
+                       "symbol_source",
+                       &T::symbol_source,
                        "rows",
                        &T::rows,
                        "opcode_table",
@@ -387,15 +434,21 @@ namespace sontag {
             return !trim_ascii(sanitized).empty();
         }
 
-        static std::optional<size_t> trailing_return_start_offset(std::string_view text) {
+        struct trailing_return_statement {
+            size_t token_start{};
+            size_t expression_start{};
+            size_t semicolon_offset{};
+        };
+
+        static std::optional<trailing_return_statement> parse_trailing_return_statement(std::string_view text) {
             auto sanitized = strip_comments_and_string_literals(text);
             auto sanitized_view = std::string_view{sanitized};
-            auto last_non_whitespace = sanitized_view.find_last_not_of(" \t\r\n");
-            if (last_non_whitespace == std::string_view::npos || sanitized_view[last_non_whitespace] != ';') {
+            auto semicolon_offset = sanitized_view.find_last_not_of(" \t\r\n");
+            if (semicolon_offset == std::string_view::npos || sanitized_view[semicolon_offset] != ';') {
                 return std::nullopt;
             }
 
-            auto prefix = sanitized_view.substr(0U, last_non_whitespace);
+            auto prefix = sanitized_view.substr(0U, semicolon_offset);
             auto statement_separator = prefix.find_last_of(";{}");
             auto statement_start = statement_separator == std::string_view::npos ? 0U : statement_separator + 1U;
             auto token_start = prefix.find_first_not_of(" \t\r\n", statement_start);
@@ -412,7 +465,33 @@ namespace sontag {
                 return std::nullopt;
             }
 
-            return token_start;
+            auto expression_start = token_start + return_keyword.size();
+            while (expression_start < semicolon_offset &&
+                   std::isspace(static_cast<unsigned char>(sanitized_view[expression_start])) != 0) {
+                ++expression_start;
+            }
+
+            return trailing_return_statement{
+                    .token_start = token_start,
+                    .expression_start = expression_start,
+                    .semicolon_offset = semicolon_offset};
+        }
+
+        static constexpr std::string_view trailing_return_expression(
+                std::string_view text, const trailing_return_statement& trailing_return) noexcept {
+            return trim_ascii(text.substr(
+                    trailing_return.expression_start,
+                    trailing_return.semicolon_offset - trailing_return.expression_start));
+        }
+
+        static constexpr bool trailing_return_has_expression(
+                std::string_view text, const trailing_return_statement& trailing_return) noexcept {
+            return !trailing_return_expression(text, trailing_return).empty();
+        }
+
+        static bool has_terminal_return_expression(std::string_view cell) {
+            auto trailing_return = parse_trailing_return_statement(cell);
+            return trailing_return.has_value() && trailing_return_has_expression(cell, *trailing_return);
         }
 
         static constexpr std::string_view trim_trailing_ascii(std::string_view value) {
@@ -426,20 +505,20 @@ namespace sontag {
             return value;
         }
 
-        static std::vector<std::string_view> prepare_exec_cells_for_render(const std::vector<std::string>& exec_cells) {
-            std::vector<std::string_view> render_cells{};
+        static std::vector<std::string> prepare_exec_cells_for_render(const std::vector<std::string>& exec_cells) {
+            std::vector<std::string> render_cells{};
             render_cells.reserve(exec_cells.size());
             for (const auto& cell : exec_cells) {
-                auto render_cell = std::string_view{cell};
+                auto render_cell = std::string{cell};
                 if (has_effective_code(render_cell)) {
-                    // Strip only a terminal trailing return in each cell.
-                    // Early returns inside control-flow remain untouched.
-                    if (auto return_start = trailing_return_start_offset(render_cell)) {
-                        render_cell = render_cell.substr(0U, *return_start);
+                    // Strip only terminal bare `return;`. Keep `return <expr>;` so caller-selected exit values survive.
+                    if (auto trailing_return = parse_trailing_return_statement(render_cell)) {
+                        if (!trailing_return_has_expression(render_cell, *trailing_return)) {
+                            render_cell.erase(trailing_return->token_start);
+                        }
                     }
                 }
-                render_cell = trim_trailing_ascii(render_cell);
-                render_cells.push_back(render_cell);
+                render_cells.emplace_back(trim_trailing_ascii(render_cell));
             }
 
             return render_cells;
@@ -498,6 +577,14 @@ namespace sontag {
                 const std::vector<std::string>& decl_cells, const std::vector<std::string>& exec_cells) {
             std::ostringstream source{};
             auto render_exec_cells = prepare_exec_cells_for_render(exec_cells);
+            auto append_canonical_return = true;
+            for (auto it = render_exec_cells.rbegin(); it != render_exec_cells.rend(); ++it) {
+                if (!has_effective_code(*it)) {
+                    continue;
+                }
+                append_canonical_return = !has_terminal_return_expression(*it);
+                break;
+            }
 
             source << "// generated by sontag m1\n";
             for (size_t i = 0U; i < decl_cells.size(); ++i) {
@@ -505,7 +592,7 @@ namespace sontag {
                 source << decl_cells[i] << "\n\n";
             }
 
-            source << "int __sontag_main() {\n";
+            source << "int main() {\n";
             for (size_t i = 0U; i < render_exec_cells.size(); ++i) {
                 source << "    // exec cell " << (i + 1U) << '\n';
                 write_exec_cell(source, render_exec_cells[i]);
@@ -513,41 +600,348 @@ namespace sontag {
                     source << '\n';
                 }
             }
-            if (!render_exec_cells.empty()) {
+            if (!render_exec_cells.empty() && append_canonical_return) {
                 source << '\n';
             }
-            source << "    return 0;\n";
+            if (append_canonical_return) {
+                source << "    return 0;\n";
+            }
             source << "}\n";
             return source.str();
         }
 
-        static std::string make_artifact_id(const analysis_request& request, analysis_kind kind) {
-            std::ostringstream key{};
-            key << "{}\n{}\n{}\n"_format(kind, request.language_standard, request.opt_level);
-            key << request.asm_syntax << '\n';
+        static void ensure_dir(const fs::path& path);
+        static void attach_opcode_mapping(
+                analysis_result& result, std::span<const opcode::operation_stream_input> streams);
+
+        static std::string hash_fnv1a_64_hex(std::string_view text) {
+            auto hash = uint64_t{14695981039346656037ULL};
+            constexpr auto prime = uint64_t{1099511628211ULL};
+            for (unsigned char c : text) {
+                hash ^= static_cast<uint64_t>(c);
+                hash *= prime;
+            }
+            std::ostringstream out{};
+            out << std::hex << hash;
+            return out.str();
+        }
+
+        static std::string format_optional_value(const std::optional<std::string>& value) {
+            if (!value) {
+                return "<none>";
+            }
+            return *value;
+        }
+
+        static std::string normalize_requested_symbol_for_cache(const analysis_request& request) {
             if (request.symbol) {
-                key << *request.symbol << '\n';
+                return *request.symbol;
             }
-            if (request.target_triple) {
-                key << *request.target_triple << '\n';
+            return "<default>";
+        }
+
+        static std::string render_build_unit_payload(const analysis_request& request, std::string_view source_text) {
+            std::ostringstream payload{};
+            payload << "clang_path=" << request.clang_path.string() << '\n';
+            payload << "language_standard=" << "{}"_format(request.language_standard) << '\n';
+            payload << "opt_level=" << "{}"_format(request.opt_level) << '\n';
+            payload << "target_triple=" << format_optional_value(request.target_triple) << '\n';
+            payload << "cpu=" << format_optional_value(request.cpu) << '\n';
+            payload << "mca_cpu=" << format_optional_value(request.mca_cpu) << '\n';
+            payload << "objdump_path=" << request.objdump_path.string() << '\n';
+            payload << "nm_path=" << request.nm_path.string() << '\n';
+            payload << "mca_path=" << request.mca_path.string() << '\n';
+            payload << "asm_syntax=" << request.asm_syntax << '\n';
+            payload << "static_link=" << (request.static_link ? "true" : "false") << '\n';
+            payload << "no_link=" << (request.no_link ? "true" : "false") << '\n';
+            payload << "graph_format=" << request.graph_format << '\n';
+            payload << "source_digest=" << hash_fnv1a_64_hex(source_text) << '\n';
+            payload << "source_bytes=" << source_text.size() << '\n';
+
+            for (size_t i = 0U; i < request.library_dirs.size(); ++i) {
+                payload << "library_dir[" << i << "]=" << request.library_dirs[i].string() << '\n';
             }
-            if (request.cpu) {
-                key << *request.cpu << '\n';
+            for (size_t i = 0U; i < request.libraries.size(); ++i) {
+                payload << "library[" << i << "]=" << request.libraries[i] << '\n';
             }
-            if (request.mca_cpu) {
-                key << *request.mca_cpu << '\n';
-            }
-            for (const auto& cell : request.decl_cells) {
-                key << "decl:" << cell << '\n';
-            }
-            for (const auto& cell : request.exec_cells) {
-                key << "exec:" << cell << '\n';
+            for (size_t i = 0U; i < request.linker_args.size(); ++i) {
+                payload << "linker_arg[" << i << "]=" << request.linker_args[i] << '\n';
             }
 
-            auto hash_value = std::hash<std::string>{}(key.str());
-            std::ostringstream id{};
-            id << std::hex << hash_value;
-            return id.str();
+            return payload.str();
+        }
+
+        static std::string render_symbol_view_payload(
+                std::string_view build_unit_hash, const analysis_request& request, analysis_kind kind) {
+            std::ostringstream payload{};
+            payload << "build_unit_hash=" << build_unit_hash << '\n';
+            payload << "analysis_kind=" << to_string(kind) << '\n';
+            payload << "requested_symbol=" << normalize_requested_symbol_for_cache(request) << '\n';
+            payload << "asm_syntax=" << request.asm_syntax << '\n';
+            payload << "graph_format=" << request.graph_format << '\n';
+            return payload.str();
+        }
+
+        static std::string render_trace_payload(std::string_view build_unit_hash, const analysis_request& request) {
+            std::ostringstream payload{};
+            payload << "build_unit_hash=" << build_unit_hash << '\n';
+            payload << "analysis_kind=mem_trace\n";
+            payload << "requested_symbol=" << normalize_requested_symbol_for_cache(request) << '\n';
+            payload << "trace_mode=runtime_instrumented\n";
+            return payload.str();
+        }
+
+        static std::string make_merkle_node_hash(
+                std::string_view node_kind, std::string_view payload_hash, std::span<const std::string> child_hashes) {
+            std::ostringstream key{};
+            key << "node_kind=" << node_kind << '\n';
+            key << "payload_hash=" << payload_hash << '\n';
+            for (size_t i = 0U; i < child_hashes.size(); ++i) {
+                key << "child[" << i << "]=" << child_hashes[i] << '\n';
+            }
+            return hash_fnv1a_64_hex(key.str());
+        }
+
+        static std::string make_build_unit_hash(const analysis_request& request, std::string_view source_text) {
+            auto build_payload = render_build_unit_payload(request, source_text);
+            auto build_payload_hash = hash_fnv1a_64_hex(build_payload);
+            auto empty_children = std::array<std::string, 0U>{};
+            return make_merkle_node_hash("build_unit", build_payload_hash, empty_children);
+        }
+
+        static std::string make_symbol_view_hash(
+                std::string_view build_unit_hash, const analysis_request& request, analysis_kind kind) {
+            auto symbol_payload = render_symbol_view_payload(build_unit_hash, request, kind);
+            auto symbol_payload_hash = hash_fnv1a_64_hex(symbol_payload);
+            auto symbol_children = std::array<std::string, 1U>{std::string{build_unit_hash}};
+            return make_merkle_node_hash("symbol_view", symbol_payload_hash, symbol_children);
+        }
+
+        static std::string make_trace_hash(std::string_view build_unit_hash, const analysis_request& request) {
+            auto trace_payload = render_trace_payload(build_unit_hash, request);
+            auto trace_payload_hash = hash_fnv1a_64_hex(trace_payload);
+            auto trace_children = std::array<std::string, 1U>{std::string{build_unit_hash}};
+            return make_merkle_node_hash("trace", trace_payload_hash, trace_children);
+        }
+
+        static std::string make_artifact_id(
+                std::string_view build_unit_hash, const analysis_request& request, analysis_kind kind) {
+            if (kind == analysis_kind::mem_trace) {
+                return make_trace_hash(build_unit_hash, request);
+            }
+            return make_symbol_view_hash(build_unit_hash, request, kind);
+        }
+
+        static void persist_merkle_node(
+                const fs::path& root_dir,
+                std::string_view node_kind,
+                std::string_view payload,
+                std::span<const std::string> child_hashes,
+                std::span<const fs::path> artifacts) {
+            auto payload_hash = hash_fnv1a_64_hex(payload);
+            auto node_hash = make_merkle_node_hash(node_kind, payload_hash, child_hashes);
+            auto node_dir = root_dir / node_hash;
+            ensure_dir(node_dir);
+
+            auto payload_path = node_dir / "payload.txt";
+            auto manifest_path = node_dir / "manifest.txt";
+            (void)write_text_file(payload_path, payload);
+
+            std::ostringstream manifest{};
+            manifest << "node_kind=" << node_kind << '\n';
+            manifest << "node_hash=" << node_hash << '\n';
+            manifest << "payload_hash=" << payload_hash << '\n';
+            manifest << "payload_file=payload.txt\n";
+            for (size_t i = 0U; i < child_hashes.size(); ++i) {
+                manifest << "child[" << i << "]=" << child_hashes[i] << '\n';
+            }
+            for (size_t i = 0U; i < artifacts.size(); ++i) {
+                manifest << "artifact[" << i << "]=" << artifacts[i].string() << '\n';
+            }
+            (void)write_text_file(manifest_path, manifest.str());
+        }
+
+        static void persist_merkle_cache_manifests(
+                const analysis_request& request,
+                analysis_kind kind,
+                std::string_view source_text,
+                std::string_view build_unit_hash,
+                const fs::path& source_path,
+                const fs::path& artifact_path) {
+            try {
+                auto cache_root = request.session_dir / "artifacts" / "cache";
+                auto units_root = cache_root / "units";
+                auto symbols_root = cache_root / "symbols";
+                auto traces_root = cache_root / "traces";
+                ensure_dir(units_root);
+                ensure_dir(symbols_root);
+                ensure_dir(traces_root);
+
+                auto build_payload = render_build_unit_payload(request, source_text);
+                auto empty_children = std::array<std::string, 0U>{};
+                auto build_artifacts = std::array<fs::path, 1U>{source_path};
+                persist_merkle_node(units_root, "build_unit", build_payload, empty_children, build_artifacts);
+
+                auto symbol_payload = render_symbol_view_payload(build_unit_hash, request, kind);
+                auto symbol_children = std::array<std::string, 1U>{std::string{build_unit_hash}};
+                auto symbol_artifacts = std::array<fs::path, 1U>{artifact_path};
+                persist_merkle_node(symbols_root, "symbol_view", symbol_payload, symbol_children, symbol_artifacts);
+
+                if (kind == analysis_kind::mem_trace) {
+                    auto trace_payload = render_trace_payload(build_unit_hash, request);
+                    auto trace_children = std::array<std::string, 1U>{std::string{build_unit_hash}};
+                    auto trace_artifacts = std::array<fs::path, 1U>{artifact_path};
+                    persist_merkle_node(traces_root, "trace", trace_payload, trace_children, trace_artifacts);
+                }
+            } catch (...) {
+                // Cache-manifest writes are best-effort and must not affect analysis behavior.
+            }
+        }
+
+        static bool looks_like_mem_trace_payload(std::string_view text) {
+            return text.find("symbol="sv) != std::string_view::npos &&
+                   text.find("tracee_exit_code="sv) != std::string_view::npos &&
+                   text.find("--events--"sv) != std::string_view::npos;
+        }
+
+        static std::optional<int> parse_mem_trace_exit_code(std::string_view text) {
+            constexpr auto prefix = "tracee_exit_code="sv;
+            size_t begin = 0U;
+            while (begin <= text.size()) {
+                auto end = text.find('\n', begin);
+                if (end == std::string_view::npos) {
+                    end = text.size();
+                }
+
+                auto line = text.substr(begin, end - begin);
+                if (line.starts_with(prefix)) {
+                    auto value_text = line.substr(prefix.size());
+                    int value = 0;
+                    auto* value_begin = value_text.data();
+                    auto* value_end = value_begin + value_text.size();
+                    auto parsed = std::from_chars(value_begin, value_end, value);
+                    if (parsed.ec == std::errc{} && parsed.ptr == value_end) {
+                        return value;
+                    }
+                    return std::nullopt;
+                }
+
+                if (end == text.size()) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+            return std::nullopt;
+        }
+
+        static std::optional<analysis_result> try_load_cached_mem_trace_result(
+                const fs::path& source_path,
+                const fs::path& artifact_path,
+                const fs::path& stdout_path,
+                const fs::path& stderr_path) {
+            auto cached = read_text_file(artifact_path);
+            if (cached.empty() || !looks_like_mem_trace_payload(cached)) {
+                return std::nullopt;
+            }
+
+            auto cached_result = analysis_result{
+                    .kind = analysis_kind::mem_trace,
+                    .success = true,
+                    .exit_code = parse_mem_trace_exit_code(cached).value_or(0),
+                    .source_path = source_path,
+                    .artifact_path = artifact_path,
+                    .stdout_path = stdout_path,
+                    .stderr_path = stderr_path,
+                    .artifact_text = std::move(cached)};
+            return cached_result;
+        }
+
+        static bool supports_text_cache_hit(analysis_kind kind) {
+            return kind == analysis_kind::asm_text || kind == analysis_kind::ir || kind == analysis_kind::dump;
+        }
+
+        static bool supports_summary_cache_hit(analysis_kind kind) {
+            return kind == analysis_kind::graph_cfg || kind == analysis_kind::graph_call ||
+                   kind == analysis_kind::graph_defuse || kind == analysis_kind::inspect_asm_map ||
+                   kind == analysis_kind::inspect_mca_summary || kind == analysis_kind::inspect_mca_heatmap;
+        }
+
+        static fs::path summary_sidecar_path_for_artifact(const fs::path& artifact_path) {
+            return fs::path{artifact_path.string() + ".summary.txt"};
+        }
+
+        static void write_summary_sidecar(const fs::path& artifact_path, std::string_view summary_text) {
+            (void)write_text_file(summary_sidecar_path_for_artifact(artifact_path), summary_text);
+        }
+
+        static std::optional<analysis_result> try_load_cached_text_artifact_result(
+                analysis_kind kind,
+                const fs::path& source_path,
+                const fs::path& artifact_path,
+                const fs::path& stdout_path,
+                const fs::path& stderr_path) {
+            if (!supports_text_cache_hit(kind)) {
+                return std::nullopt;
+            }
+
+            auto cached = read_text_file(artifact_path);
+            if (trim_ascii(cached).empty()) {
+                return std::nullopt;
+            }
+
+            auto cached_result = analysis_result{
+                    .kind = kind,
+                    .success = true,
+                    .exit_code = 0,
+                    .source_path = source_path,
+                    .artifact_path = artifact_path,
+                    .stdout_path = stdout_path,
+                    .stderr_path = stderr_path,
+                    .artifact_text = std::move(cached),
+                    .diagnostics_text = read_text_file(stderr_path)};
+            if (kind == analysis_kind::dump) {
+                auto dump_streams = std::array{
+                        opcode::operation_stream_input{.name = "asm", .disassembly = cached_result.artifact_text}};
+                attach_opcode_mapping(cached_result, dump_streams);
+            }
+            return cached_result;
+        }
+
+        static std::optional<analysis_result> try_load_cached_summary_result(
+                analysis_kind kind,
+                const fs::path& source_path,
+                const fs::path& artifact_path,
+                const fs::path& stdout_path,
+                const fs::path& stderr_path) {
+            if (!supports_summary_cache_hit(kind)) {
+                return std::nullopt;
+            }
+
+            auto summary_text = read_text_file(summary_sidecar_path_for_artifact(artifact_path));
+            auto artifact_payload = read_text_file(artifact_path);
+            if (trim_ascii(summary_text).empty() || trim_ascii(artifact_payload).empty()) {
+                return std::nullopt;
+            }
+
+            auto cached_result = analysis_result{
+                    .kind = kind,
+                    .success = true,
+                    .exit_code = 0,
+                    .source_path = source_path,
+                    .artifact_path = artifact_path,
+                    .stdout_path = stdout_path,
+                    .stderr_path = stderr_path,
+                    .artifact_text = std::move(summary_text),
+                    .diagnostics_text = read_text_file(stderr_path)};
+            return cached_result;
+        }
+
+        template <typename T, typename TryLoadFn, typename BuildFn>
+        static T get_or_create(TryLoadFn&& try_load, BuildFn&& build) {
+            if (auto loaded = std::invoke(std::forward<TryLoadFn>(try_load)); loaded.has_value()) {
+                return std::move(*loaded);
+            }
+            return std::invoke(std::forward<BuildFn>(build));
         }
 
         static void ensure_dir(const fs::path& path) {
@@ -630,6 +1024,7 @@ namespace sontag {
         namespace arg_tokens {
             static constexpr auto std_prefix = "-std="sv;
             static constexpr auto opt_prefix = "-"sv;
+            static constexpr auto stdlib_libcpp = "-stdlib=libc++"sv;
             static constexpr auto target_prefix = "--target="sv;
             static constexpr auto cpu_prefix = "-mcpu="sv;
             static constexpr auto mtriple_prefix = "-mtriple="sv;
@@ -708,8 +1103,9 @@ namespace sontag {
 
         static std::vector<std::string> base_clang_args(const analysis_request& request) {
             std::vector<std::string> base_args{};
-            base_args.reserve(9U);
+            base_args.reserve(10U);
             base_args.push_back(request.clang_path.string());
+            base_args.emplace_back(arg_tokens::stdlib_libcpp);
             append_prefixed_arg(base_args, arg_tokens::std_prefix, request.language_standard);
             append_prefixed_arg(base_args, arg_tokens::opt_prefix, request.opt_level);
             append_optional_prefixed_arg(base_args, arg_tokens::target_prefix, request.target_triple);
@@ -851,15 +1247,36 @@ namespace sontag {
         }
 
         static std::string join_with_separator(const std::vector<std::string>& values, std::string_view separator) {
-            if (values.empty()) {
-                return {};
-            }
+            return utils::join_with_separator(values, separator);
+        }
 
-            std::string joined{values.front()};
-            for (size_t i = 1U; i < values.size(); ++i) {
-                joined = "{}{}{}"_format(joined, separator, values[i]);
+        static void append_link_flags(std::vector<std::string>& args, const analysis_request& request) {
+            args.push_back("-fuse-ld=" + std::string{internal::platform::tool::lld_path});
+            args.emplace_back("-fPIC");
+            args.emplace_back("-flto=thin");
+            args.emplace_back("-nostdlib++");
+            args.emplace_back("-Wl,--push-state,-Bstatic");
+            args.emplace_back("-lc++");
+            args.emplace_back("-lc");
+            args.emplace_back("-Wl,--pop-state");
+
+            args.emplace_back("-lc++abi");
+            if (request.static_link) {
+                args.emplace_back("-static");
+                args.emplace_back("-static-libgcc");
             }
-            return joined;
+            else {
+                args.emplace_back("-ldl");
+            }
+            for (const auto& dir : request.library_dirs) {
+                args.push_back("-L" + dir.string());
+            }
+            for (const auto& lib : request.libraries) {
+                args.push_back("-l" + lib);
+            }
+            for (const auto& arg : request.linker_args) {
+                args.push_back(arg);
+            }
         }
 
         static std::optional<std::string> parse_clang_name_suffix(std::string_view clang_name) {
@@ -1049,20 +1466,19 @@ namespace sontag {
         }
 
         static constexpr std::string_view strip_one_leading_underscore(std::string_view symbol) noexcept {
-            if (!symbol.empty() && symbol.front() == '_') {
-                symbol.remove_prefix(1U);
-            }
-            return symbol;
+            return internal::symbols::strip_one_leading_underscore(symbol);
+        }
+
+        static constexpr std::string_view strip_symbol_addendum(std::string_view symbol) noexcept {
+            return internal::symbols::strip_symbol_addendum(symbol);
+        }
+
+        static constexpr std::string_view canonical_symbol_for_match(std::string_view symbol) noexcept {
+            return internal::symbols::canonical_symbol_for_match(symbol);
         }
 
         static constexpr bool symbol_names_equivalent(std::string_view lhs, std::string_view rhs) noexcept {
-            if (lhs == rhs) {
-                return true;
-            }
-
-            auto lhs_stripped = strip_one_leading_underscore(lhs);
-            auto rhs_stripped = strip_one_leading_underscore(rhs);
-            return lhs_stripped == rhs || lhs == rhs_stripped || lhs_stripped == rhs_stripped;
+            return internal::symbols::symbol_names_equivalent(lhs, rhs);
         }
 
         static constexpr bool ascii_is_digit(char c) noexcept {
@@ -1173,8 +1589,10 @@ namespace sontag {
 
         static std::optional<std::vector<analysis_symbol>> try_collect_defined_symbols(
                 const analysis_request& request) {
-            auto inputs_dir = request.session_dir / "artifacts" / "inputs";
-            auto source_path = inputs_dir / "symbol_index.cpp";
+            auto source_text = render_source(request.decl_cells, request.exec_cells);
+            auto build_unit_hash = make_build_unit_hash(request, source_text);
+            auto inputs_dir = request.session_dir / "artifacts" / "inputs" / build_unit_hash;
+            auto source_path = inputs_dir / "source.cpp";
             auto object_path = inputs_dir / "symbol_index.o";
             auto clang_stdout_path = inputs_dir / "symbol_index.clang.stdout.txt";
             auto clang_stderr_path = inputs_dir / "symbol_index.clang.stderr.txt";
@@ -1182,31 +1600,122 @@ namespace sontag {
             auto nm_stderr_path = inputs_dir / "symbol_index.nm.stderr.txt";
 
             ensure_dir(inputs_dir);
-            write_text_file(source_path, render_source(request.decl_cells, request.exec_cells));
+            write_text_file(source_path, source_text);
+
+            auto collect_symbols_from_target = [&](const fs::path& target_path,
+                                                   bool from_object) -> std::optional<std::vector<analysis_symbol>> {
+                std::vector<std::string> nm_args{};
+                nm_args.push_back(request.nm_path.string());
+                nm_args.emplace_back(arg_tokens::nm_defined_only);
+                nm_args.emplace_back(arg_tokens::nm_posix_format);
+                nm_args.push_back(target_path.string());
+                auto nm_exit = run_process(nm_args, nm_stdout_path, nm_stderr_path);
+                if (nm_exit != 0) {
+                    return std::nullopt;
+                }
+                auto nm_output = read_text_file(nm_stdout_path);
+                auto symbols = parse_nm_symbols(nm_output);
+                for (auto& symbol : symbols) {
+                    symbol.present_in_object = from_object;
+                    symbol.present_in_binary = !from_object;
+                }
+                return symbols;
+            };
 
             auto compile_args = base_clang_args(request);
             compile_args.emplace_back("-c");
             compile_args.push_back(source_path.string());
             compile_args.emplace_back("-o");
             compile_args.push_back(object_path.string());
-
             auto compile_exit = run_process(compile_args, clang_stdout_path, clang_stderr_path);
             if (compile_exit != 0) {
                 return std::nullopt;
             }
 
-            std::vector<std::string> nm_args{};
-            nm_args.push_back(request.nm_path.string());
-            nm_args.emplace_back(arg_tokens::nm_defined_only);
-            nm_args.emplace_back(arg_tokens::nm_posix_format);
-            nm_args.push_back(object_path.string());
-            auto nm_exit = run_process(nm_args, nm_stdout_path, nm_stderr_path);
-            if (nm_exit != 0) {
+            auto merged_symbols = std::vector<analysis_symbol>{};
+            if (auto object_symbols = collect_symbols_from_target(object_path, true); object_symbols.has_value()) {
+                merged_symbols = std::move(*object_symbols);
+            }
+            else {
                 return std::nullopt;
             }
 
-            auto nm_output = read_text_file(nm_stdout_path);
-            return parse_nm_symbols(nm_output);
+            auto binary_path = inputs_dir / "symbol_index.bin";
+            bool linked = false;
+
+            if (!request.no_link) {
+                auto link_args = base_clang_args(request);
+                link_args.push_back(source_path.string());
+                link_args.emplace_back("-o");
+                link_args.push_back(binary_path.string());
+                append_link_flags(link_args, request);
+                auto link_exit = run_process(link_args, clang_stdout_path, clang_stderr_path);
+                linked = (link_exit == 0);
+                if (!linked && request.verbose) {
+                    auto link_stderr = read_text_file(clang_stderr_path);
+                    if (!link_stderr.empty()) {
+                        debug_log("symbol index link failed (exit {}): {}", link_exit, link_stderr);
+                    }
+                }
+            }
+
+            if (linked) {
+                if (auto linked_symbols = collect_symbols_from_target(binary_path, false); linked_symbols.has_value()) {
+                    merged_symbols.insert(
+                            merged_symbols.end(),
+                            std::make_move_iterator(linked_symbols->begin()),
+                            std::make_move_iterator(linked_symbols->end()));
+                }
+                else if (request.verbose) {
+                    auto link_nm_stderr = read_text_file(nm_stderr_path);
+                    if (!link_nm_stderr.empty()) {
+                        debug_log("symbol index nm failed for linked binary: {}", link_nm_stderr);
+                    }
+                }
+
+                std::error_code ec{};
+                fs::remove(binary_path, ec);
+            }
+
+            auto merged_by_mangled = std::unordered_map<std::string, analysis_symbol>{};
+            merged_by_mangled.reserve(merged_symbols.size());
+            auto prefer_kind = [](char current, char incoming) {
+                auto current_upper = std::isupper(static_cast<unsigned char>(current)) != 0;
+                auto incoming_upper = std::isupper(static_cast<unsigned char>(incoming)) != 0;
+                if (incoming_upper && !current_upper) {
+                    return incoming;
+                }
+                return current;
+            };
+            for (const auto& symbol : merged_symbols) {
+                auto [it, inserted] = merged_by_mangled.try_emplace(symbol.mangled, symbol);
+                if (inserted) {
+                    continue;
+                }
+                auto& existing = it->second;
+                existing.kind = prefer_kind(existing.kind, symbol.kind);
+                if (existing.demangled == existing.mangled && symbol.demangled != symbol.mangled) {
+                    existing.demangled = symbol.demangled;
+                }
+                existing.present_in_object = existing.present_in_object || symbol.present_in_object;
+                existing.present_in_binary = existing.present_in_binary || symbol.present_in_binary;
+            }
+
+            auto out_symbols = std::vector<analysis_symbol>{};
+            out_symbols.reserve(merged_by_mangled.size());
+            for (auto& [_, symbol] : merged_by_mangled) {
+                out_symbols.push_back(std::move(symbol));
+            }
+            std::ranges::sort(out_symbols, [](const analysis_symbol& lhs, const analysis_symbol& rhs) {
+                if (lhs.demangled != rhs.demangled) {
+                    return lhs.demangled < rhs.demangled;
+                }
+                if (lhs.mangled != rhs.mangled) {
+                    return lhs.mangled < rhs.mangled;
+                }
+                return lhs.kind < rhs.kind;
+            });
+            return out_symbols;
         }
 
         static constexpr std::optional<size_t> parse_header_line_number(
@@ -1322,17 +1831,300 @@ namespace sontag {
             return "no diagnostics matched symbol '{}'\n"_format(symbol);
         }
 
-        static std::optional<std::string> resolve_symbol_name(
+        struct resolved_symbol_match {
+            std::string mangled{};
+            symbol_resolution_info info{};
+        };
+
+        static symbol_resolution_status adjust_status_from_symbol_addendum(
+                symbol_resolution_status base_status, std::optional<std::string_view> addendum) {
+            if (!addendum.has_value()) {
+                return base_status;
+            }
+            if (internal::symbols::addendum_implies_stub(*addendum)) {
+                return symbol_resolution_status::resolved_stub;
+            }
+            if (internal::symbols::addendum_implies_indirect(*addendum)) {
+                return symbol_resolution_status::unresolved_indirect;
+            }
+            return base_status;
+        }
+
+        static symbol_resolution_info make_symbol_resolution_info(
+                std::string_view requested,
+                const analysis_symbol& candidate,
+                symbol_resolution_confidence confidence,
+                std::string_view source_hint = {}) {
+            auto info = symbol_resolution_info{};
+            info.raw_name = std::string{requested};
+            info.canonical_name = std::string{canonical_symbol_for_match(candidate.mangled)};
+            info.display_name =
+                    candidate.demangled.empty() ? demangle_symbol_name(candidate.mangled) : candidate.demangled;
+            auto requested_addendum = internal::symbols::extract_symbol_addendum(requested);
+            auto mangled_addendum = internal::symbols::extract_symbol_addendum(candidate.mangled);
+            auto selected_addendum = mangled_addendum.has_value() ? mangled_addendum : requested_addendum;
+            if (selected_addendum.has_value()) {
+                info.addendum = std::string{*selected_addendum};
+            }
+
+            if (candidate.present_in_binary) {
+                info.status = symbol_resolution_status::resolved_final;
+                info.source = source_hint.empty() ? "symtab_bin" : std::string{source_hint};
+            }
+            else if (candidate.present_in_object) {
+                info.status = symbol_resolution_status::resolved_object_only;
+                info.source = source_hint.empty() ? "symtab_obj" : std::string{source_hint};
+            }
+            else {
+                info.status = symbol_resolution_status::missing;
+                info.source = source_hint.empty() ? "symtab_unknown" : std::string{source_hint};
+            }
+            info.status = adjust_status_from_symbol_addendum(info.status, selected_addendum);
+            if (info.status == symbol_resolution_status::resolved_stub) {
+                info.source = "{}_stub"_format(info.source);
+            }
+            else if (info.status == symbol_resolution_status::unresolved_indirect) {
+                info.source = "{}_indirect"_format(info.source);
+            }
+            info.confidence = confidence;
+            return info;
+        }
+
+        static symbol_resolution_info make_missing_symbol_resolution_info(std::string_view requested) {
+            auto info = symbol_resolution_info{};
+            info.raw_name = std::string{requested};
+            info.canonical_name = std::string{canonical_symbol_for_match(requested)};
+            info.display_name = std::string{trim_ascii(requested)};
+            if (auto addendum = internal::symbols::extract_symbol_addendum(requested); addendum.has_value()) {
+                info.addendum = std::string{*addendum};
+                if (internal::symbols::addendum_implies_stub(*addendum) ||
+                    internal::symbols::addendum_implies_indirect(*addendum)) {
+                    info.status = symbol_resolution_status::unresolved_indirect;
+                    info.source = "unresolved_indirect";
+                }
+            }
+            info.confidence = symbol_resolution_confidence::heuristic_match;
+            if (info.source.empty()) {
+                info.source = "unresolved";
+            }
+            return info;
+        }
+
+        static std::optional<resolved_symbol_match> resolve_symbol_match(
                 const std::vector<analysis_symbol>& symbols, std::string_view symbol) {
+            auto requested = trim_ascii(symbol);
+            auto requested_canonical = canonical_symbol_for_match(requested);
+            auto requested_addendum = internal::symbols::extract_symbol_addendum(requested);
+            auto is_symbol_char = [](char c) {
+                auto u = static_cast<unsigned char>(c);
+                auto lower = static_cast<char>(u | 0x20);
+                return (u >= '0' && u <= '9') || (lower >= 'a' && lower <= 'z') || c == '_' || c == '$' || c == ':';
+            };
+            auto starts_with_symbol_token = [&](std::string_view haystack, std::string_view needle) {
+                if (needle.empty() || haystack.size() < needle.size()) {
+                    return false;
+                }
+                if (!haystack.starts_with(needle)) {
+                    return false;
+                }
+                if (haystack.size() == needle.size()) {
+                    return true;
+                }
+                auto next = haystack[needle.size()];
+                return !is_symbol_char(next) || next == '(' || next == '<';
+            };
+
+            enum class match_kind : uint8_t { exact, canonical_exact, token_prefix };
+            struct ranked_match {
+                const analysis_symbol* candidate{nullptr};
+                match_kind kind{match_kind::token_prefix};
+                symbol_resolution_confidence confidence{symbol_resolution_confidence::heuristic_match};
+                std::string_view source{"symtab_token_prefix"};
+                int presence_rank{2};
+                int addendum_rank{0};
+                size_t canonical_length_delta{};
+            };
+
+            auto compute_addendum_rank = [&](const analysis_symbol& candidate) {
+                if (!requested_addendum.has_value()) {
+                    return 0;
+                }
+                auto candidate_addendum = internal::symbols::extract_symbol_addendum(candidate.mangled);
+                if (!candidate_addendum.has_value()) {
+                    return 1;
+                }
+                return internal::symbols::ascii_iequals(*candidate_addendum, *requested_addendum) ? 0 : 2;
+            };
+
+            auto compute_presence_rank = [](const analysis_symbol& candidate, match_kind kind) {
+                // For exact/canonical matches, final binary remains authoritative.
+                if (kind == match_kind::exact || kind == match_kind::canonical_exact) {
+                    if (candidate.present_in_binary) {
+                        return 0;
+                    }
+                    if (candidate.present_in_object) {
+                        return 1;
+                    }
+                    return 2;
+                }
+
+                // For token-prefix matches (heuristic), prefer snapshot-owned/object symbols first.
+                // This avoids short-token ambiguity against large static runtime symbol sets.
+                if (candidate.present_in_object) {
+                    return 0;
+                }
+                if (candidate.present_in_binary) {
+                    return 1;
+                }
+                return 2;
+            };
+
+            auto apply_relocation_alias_metadata = [&](ranked_match& match) {
+                if (!requested_addendum.has_value() || match.addendum_rank == 0) {
+                    return;
+                }
+                match.confidence = symbol_resolution_confidence::exact_relocation;
+                switch (match.kind) {
+                    case match_kind::exact:
+                        match.source = "symtab_relocation_alias";
+                        break;
+                    case match_kind::canonical_exact:
+                        match.source = "symtab_canonical_relocation_alias";
+                        break;
+                    case match_kind::token_prefix:
+                        match.source = "symtab_token_prefix_relocation_alias";
+                        break;
+                }
+            };
+
+            auto is_short_query = requested_canonical.size() <= 4U;
+            auto has_addendum_query = requested_addendum.has_value();
+            auto should_prioritize_snapshot_before_kind = [&](const ranked_match& lhs,
+                                                              const ranked_match& rhs) constexpr {
+                if (has_addendum_query) {
+                    // For addendum aliases (e.g. @PLT) without exact addendum matches, avoid static-runtime
+                    // exact/canonical collisions and prefer snapshot/object-owned candidates first.
+                    return lhs.addendum_rank > 0 && rhs.addendum_rank > 0;
+                }
+                // For short tokens, exact static-runtime names can dominate; prefer snapshot ownership first.
+                return is_short_query;
+            };
+
+            auto is_better = [&](const ranked_match& lhs, const ranked_match& rhs) {
+                if (lhs.addendum_rank != rhs.addendum_rank) {
+                    return lhs.addendum_rank < rhs.addendum_rank;
+                }
+                if (should_prioritize_snapshot_before_kind(lhs, rhs)) {
+                    if (lhs.presence_rank != rhs.presence_rank) {
+                        return lhs.presence_rank < rhs.presence_rank;
+                    }
+                    if (lhs.candidate->present_in_object != rhs.candidate->present_in_object) {
+                        return lhs.candidate->present_in_object;
+                    }
+                }
+                if (lhs.kind != rhs.kind) {
+                    return lhs.kind < rhs.kind;
+                }
+                if (lhs.presence_rank != rhs.presence_rank) {
+                    return lhs.presence_rank < rhs.presence_rank;
+                }
+                if (lhs.canonical_length_delta != rhs.canonical_length_delta) {
+                    return lhs.canonical_length_delta < rhs.canonical_length_delta;
+                }
+                if (lhs.candidate->mangled.size() != rhs.candidate->mangled.size()) {
+                    return lhs.candidate->mangled.size() < rhs.candidate->mangled.size();
+                }
+                return lhs.candidate->mangled < rhs.candidate->mangled;
+            };
+
+            std::optional<ranked_match> best{};
             for (const auto& candidate : symbols) {
                 auto mangled = std::string_view{candidate.mangled};
                 auto demangled = std::string_view{candidate.demangled};
-                if (symbol_names_equivalent(mangled, symbol) || symbol_names_equivalent(demangled, symbol) ||
-                    contains_token(mangled, symbol) || contains_token(demangled, symbol) ||
-                    contains_token(strip_one_leading_underscore(mangled), symbol) ||
-                    contains_token(strip_one_leading_underscore(demangled), symbol)) {
-                    return candidate.mangled;
+                auto mangled_canonical = canonical_symbol_for_match(mangled);
+                auto demangled_canonical = canonical_symbol_for_match(demangled);
+
+                auto exact_match =
+                        symbol_names_equivalent(mangled, requested) || symbol_names_equivalent(demangled, requested);
+                if (exact_match) {
+                    auto match = ranked_match{
+                            .candidate = &candidate,
+                            .kind = match_kind::exact,
+                            .confidence = symbol_resolution_confidence::exact_symtab,
+                            .source = "symtab_exact",
+                            .presence_rank = compute_presence_rank(candidate, match_kind::exact),
+                            .addendum_rank = compute_addendum_rank(candidate),
+                            .canonical_length_delta = 0U};
+                    apply_relocation_alias_metadata(match);
+                    if (!best.has_value() || is_better(match, *best)) {
+                        best = match;
+                    }
+                    continue;
                 }
+
+                auto canonical_exact_match =
+                        !requested_canonical.empty() &&
+                        (mangled_canonical == requested_canonical || demangled_canonical == requested_canonical);
+                if (canonical_exact_match) {
+                    auto match = ranked_match{
+                            .candidate = &candidate,
+                            .kind = match_kind::canonical_exact,
+                            .confidence = symbol_resolution_confidence::exact_label_match,
+                            .source = "symtab_canonical_exact",
+                            .presence_rank = compute_presence_rank(candidate, match_kind::canonical_exact),
+                            .addendum_rank = compute_addendum_rank(candidate),
+                            .canonical_length_delta = 0U};
+                    apply_relocation_alias_metadata(match);
+                    if (!best.has_value() || is_better(match, *best)) {
+                        best = match;
+                    }
+                    continue;
+                }
+
+                auto mangled_prefix_match = !requested_canonical.empty() &&
+                                            starts_with_symbol_token(mangled_canonical, requested_canonical);
+                auto demangled_prefix_match = !requested_canonical.empty() &&
+                                              starts_with_symbol_token(demangled_canonical, requested_canonical);
+                auto token_prefix_match = mangled_prefix_match || demangled_prefix_match;
+                if (token_prefix_match) {
+                    auto canonical_delta = std::string_view::npos;
+                    if (mangled_prefix_match && mangled_canonical.size() >= requested_canonical.size()) {
+                        canonical_delta = mangled_canonical.size() - requested_canonical.size();
+                    }
+                    if (demangled_prefix_match && demangled_canonical.size() >= requested_canonical.size()) {
+                        auto demangled_delta = demangled_canonical.size() - requested_canonical.size();
+                        canonical_delta = std::min(canonical_delta, demangled_delta);
+                    }
+                    if (canonical_delta == std::string_view::npos) {
+                        canonical_delta = 0U;
+                    }
+                    auto match = ranked_match{
+                            .candidate = &candidate,
+                            .kind = match_kind::token_prefix,
+                            .confidence = symbol_resolution_confidence::heuristic_match,
+                            .source = "symtab_token_prefix",
+                            .presence_rank = compute_presence_rank(candidate, match_kind::token_prefix),
+                            .addendum_rank = compute_addendum_rank(candidate),
+                            .canonical_length_delta = canonical_delta};
+                    apply_relocation_alias_metadata(match);
+                    if (!best.has_value() || is_better(match, *best)) {
+                        best = match;
+                    }
+                }
+            }
+            if (best.has_value() && best->candidate != nullptr) {
+                return resolved_symbol_match{
+                        .mangled = best->candidate->mangled,
+                        .info = make_symbol_resolution_info(
+                                requested, *best->candidate, best->confidence, best->source)};
+            }
+            return std::nullopt;
+        }
+
+        static std::optional<std::string> resolve_symbol_name(
+                const std::vector<analysis_symbol>& symbols, std::string_view symbol) {
+            if (auto match = resolve_symbol_match(symbols, symbol)) {
+                return match->mangled;
             }
             return std::nullopt;
         }
@@ -1344,6 +2136,15 @@ namespace sontag {
                 return std::nullopt;
             }
             return resolve_symbol_name(*symbols, symbol);
+        }
+
+        static std::optional<resolved_symbol_match> resolve_symbol_match(
+                const analysis_request& request, std::string_view symbol) {
+            auto symbols = try_collect_defined_symbols(request);
+            if (!symbols) {
+                return std::nullopt;
+            }
+            return resolve_symbol_match(*symbols, symbol);
         }
 
         static std::optional<std::string_view> parse_ir_function_name_from_define_line(std::string_view line) {
@@ -1422,6 +2223,7 @@ namespace sontag {
 
         struct mem_trace_payload {
             std::string symbol{};
+            int tracee_exit_code{0};
             bool truncated{false};
             size_t dropped_events{};
             std::vector<mem_trace_map_entry> map_entries{};
@@ -1890,63 +2692,102 @@ namespace sontag {
             return out;
         }
 
-        static std::string build_mem_trace_runtime_source(std::string_view entry_symbol) {
-            auto escaped_symbol = escape_c_string_literal(entry_symbol);
+        static std::string build_mem_trace_runtime_source(
+                std::string_view trace_events_path, std::string_view trace_stats_path) {
+            auto escaped_events_path = escape_c_string_literal(trace_events_path);
+            auto escaped_stats_path = escape_c_string_literal(trace_stats_path);
             return R"cpp(#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 
-extern "C" int __sontag_entrypoint() asm(")cpp" +
-                   escaped_symbol +
-                   R"cpp(");
+                         namespace {
+                             constexpr const char* kTraceEventsPath = ")cpp" +
+                   escaped_events_path +
+                   R"cpp(";
+                                 constexpr const char* kTraceStatsPath = ")cpp" +
+                   escaped_stats_path +
+                   R"cpp(";
 
-                                 namespace {
+                                 constexpr uint64_t kMaxTraceEvents = 50000;
+                         std::FILE* g_trace_file = nullptr;
+                         std::FILE* g_stats_file = nullptr;
+                         uint64_t g_sequence = 0;
+                         uint64_t g_written_events = 0;
+                         uint64_t g_dropped_events = 0;
 
-                             constexpr uint64_t kMaxTraceEvents = 50000;
-                             std::FILE* g_trace_file = nullptr;
-                             std::FILE* g_stats_file = nullptr;
-                             uint64_t g_sequence = 0;
-                             uint64_t g_written_events = 0;
-                             uint64_t g_dropped_events = 0;
-
-                             uint64_t read_value(const void* address, uint64_t width) {
-                                 if (address == nullptr) {
-                                     return 0;
-                                 }
-                                 if (width == 0) {
-                                     width = 1;
-                                 }
-                                 if (width > 8) {
-                                     width = 8;
-                                 }
-                                 uint64_t value = 0;
-                                 std::memcpy(&value, address, static_cast<size_t>(width));
-                                 return value;
+                         void init_trace_files() {
+                             if (kTraceEventsPath != nullptr && kTraceEventsPath[0] != '\0') {
+                                 g_trace_file = std::fopen(kTraceEventsPath, "w");
                              }
-
-                             void write_trace(uint64_t id, char access, const void* address, uint64_t width) {
-                                 if (g_trace_file == nullptr) {
-                                     return;
-                                 }
-                                 ++g_sequence;
-                                 if (g_written_events >= kMaxTraceEvents) {
-                                     ++g_dropped_events;
-                                     return;
-                                 }
-                                 auto addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(address));
-                                 auto value = read_value(address, width);
-                                 std::fprintf(
-                                         g_trace_file,
-                                         "%" PRIu64 "|%" PRIu64 "|%c|0x%016" PRIx64 "|%" PRIu64 "|0x%016" PRIx64 "\n",
-                                         g_sequence,
-                                         id,
-                                         access,
-                                         addr,
-                                         width,
-                                         value);
-                                 ++g_written_events;
+                             if (kTraceStatsPath != nullptr && kTraceStatsPath[0] != '\0') {
+                                 g_stats_file = std::fopen(kTraceStatsPath, "w");
                              }
+                         }
+
+                         void flush_trace_stats() {
+                             if (g_stats_file == nullptr) {
+                                 return;
+                             }
+                             std::fprintf(g_stats_file, "truncated=%s\n", g_dropped_events > 0 ? "true" : "false");
+                             std::fprintf(g_stats_file, "dropped_events=%" PRIu64 "\n", g_dropped_events);
+                             std::fprintf(g_stats_file, "written_events=%" PRIu64 "\n", g_written_events);
+                             std::fprintf(g_stats_file, "max_events=%" PRIu64 "\n", kMaxTraceEvents);
+                         }
+
+                         uint64_t read_value(const void* address, uint64_t width) {
+                             if (address == nullptr) {
+                                 return 0;
+                             }
+                             if (width == 0) {
+                                 width = 1;
+                             }
+                             if (width > 8) {
+                                 width = 8;
+                             }
+                             uint64_t value = 0;
+                             std::memcpy(&value, address, static_cast<size_t>(width));
+                             return value;
+                         }
+
+                         void write_trace(uint64_t id, char access, const void* address, uint64_t width) {
+                             if (g_trace_file == nullptr) {
+                                 return;
+                             }
+                             ++g_sequence;
+                             if (g_written_events >= kMaxTraceEvents) {
+                                 ++g_dropped_events;
+                                 return;
+                             }
+                             auto addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(address));
+                             auto value = read_value(address, width);
+                             std::fprintf(
+                                     g_trace_file,
+                                     "%" PRIu64 "|%" PRIu64 "|%c|0x%016" PRIx64 "|%" PRIu64 "|0x%016" PRIx64 "\n",
+                                     g_sequence,
+                                     id,
+                                     access,
+                                     addr,
+                                     width,
+                                     value);
+                             ++g_written_events;
+                         }
+
+                         __attribute__((constructor)) void init_trace_runtime() {
+                             init_trace_files();
+                         }
+
+                         __attribute__((destructor)) void shutdown_trace_runtime() {
+                             if (g_trace_file != nullptr) {
+                                 std::fclose(g_trace_file);
+                                 g_trace_file = nullptr;
+                             }
+                             if (g_stats_file != nullptr) {
+                                 flush_trace_stats();
+                                 std::fclose(g_stats_file);
+                                 g_stats_file = nullptr;
+                             }
+                         }
 
                          }  // namespace
 
@@ -1956,29 +2797,6 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
 
                          extern "C" void __sontag_mem_trace_store(uint64_t id, const void* address, uint64_t width) {
                              write_trace(id, 'S', address, width);
-                         }
-
-                         int main(int argc, char** argv) {
-                             if (argc >= 2 && argv[1] != nullptr) {
-                                 g_trace_file = std::fopen(argv[1], "w");
-                             }
-                             if (argc >= 3 && argv[2] != nullptr) {
-                                 g_stats_file = std::fopen(argv[2], "w");
-                             }
-                             auto exit_code = __sontag_entrypoint();
-                             if (g_trace_file != nullptr) {
-                                 std::fclose(g_trace_file);
-                                 g_trace_file = nullptr;
-                             }
-                             if (g_stats_file != nullptr) {
-                                 std::fprintf(g_stats_file, "truncated=%s\n", g_dropped_events > 0 ? "true" : "false");
-                                 std::fprintf(g_stats_file, "dropped_events=%" PRIu64 "\n", g_dropped_events);
-                                 std::fprintf(g_stats_file, "written_events=%" PRIu64 "\n", g_written_events);
-                                 std::fprintf(g_stats_file, "max_events=%" PRIu64 "\n", kMaxTraceEvents);
-                                 std::fclose(g_stats_file);
-                                 g_stats_file = nullptr;
-                             }
-                             return exit_code;
                          }
                    )cpp";
         }
@@ -2113,6 +2931,7 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
         static std::string render_mem_trace_payload(const mem_trace_payload& payload) {
             auto out = std::ostringstream{};
             out << "symbol=" << payload.symbol << '\n';
+            out << "tracee_exit_code=" << payload.tracee_exit_code << '\n';
             out << "truncated=" << (payload.truncated ? "true" : "false") << '\n';
             out << "dropped_events=" << payload.dropped_events << '\n';
             out << "map_count=" << payload.map_entries.size() << '\n';
@@ -2369,6 +3188,74 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
             }
 #endif
             prepared.append(sanitized_input);
+            return prepared;
+        }
+
+        static std::string prepare_mca_from_objdump(
+                std::string_view objdump_text, [[maybe_unused]] std::string_view asm_syntax) {
+            auto lines = split_lines(objdump_text);
+            std::string instructions{};
+            instructions.reserve(objdump_text.size());
+
+            for (const auto& line : lines) {
+                auto trimmed = trim_ascii(line);
+                if (trimmed.empty()) {
+                    continue;
+                }
+
+                auto colon = trimmed.find(':');
+                if (colon == std::string_view::npos) {
+                    continue;
+                }
+
+                auto tail = trimmed.substr(colon + 1U);
+                size_t cursor = 0U;
+                bool found_hex = false;
+                std::optional<size_t> instruction_start{};
+
+                while (cursor < tail.size()) {
+                    while (cursor < tail.size() && (tail[cursor] == ' ' || tail[cursor] == '\t')) {
+                        ++cursor;
+                    }
+                    if (cursor >= tail.size())
+                        break;
+
+                    auto token_end = cursor;
+                    while (token_end < tail.size() && tail[token_end] != ' ' && tail[token_end] != '\t') {
+                        ++token_end;
+                    }
+
+                    auto token = tail.substr(cursor, token_end - cursor);
+                    if (opcode::is_hex_blob_token(token)) {
+                        found_hex = true;
+                        cursor = token_end;
+                        continue;
+                    }
+
+                    instruction_start = cursor;
+                    break;
+                }
+
+                if (!found_hex || !instruction_start.has_value()) {
+                    continue;
+                }
+
+                auto instruction = trim_ascii(tail.substr(*instruction_start));
+                if (!instruction.empty()) {
+                    instructions.append(instruction);
+                    instructions.push_back('\n');
+                }
+            }
+
+            std::string prepared{};
+            prepared.reserve(instructions.size() + 64U);
+            prepared.append(".text\n");
+#if SONTAG_ARCH_X86_64
+            if (asm_syntax == "intel"sv) {
+                prepared.append(".intel_syntax noprefix\n");
+            }
+#endif
+            prepared.append(instructions);
             return prepared;
         }
 
@@ -2663,6 +3550,7 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
             std::optional<std::string> mangled{};
             std::string display{};
             bool resolved{false};
+            symbol_resolution_info info{};
             std::string diagnostics_text{};
         };
 
@@ -2792,7 +3680,9 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
             }
 
             auto missing_symbol = !symbol_resolution.mangled.has_value();
-            if (missing_symbol || !level_record.success) {
+            auto unresolved_for_mca = missing_symbol || !level_record.success ||
+                                      level_record.symbol_status == symbol_resolution_status::optimized_out;
+            if (unresolved_for_mca) {
                 metrics.push_back(make_na_metric("mca.block_rthroughput"sv, "cycles_per_iteration"sv));
                 metrics.push_back(make_na_metric("mca.ipc"sv, "inst_per_cycle"sv));
                 metrics.push_back(make_na_metric("mca.total_uops"sv, "count"sv));
@@ -2848,8 +3738,9 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
         static delta_symbol_resolution resolve_delta_symbol(
                 const analysis_request& request, const std::optional<std::string>& symbol) {
             auto resolution = delta_symbol_resolution{};
-            auto requested_symbol = symbol.value_or("__sontag_main");
+            auto requested_symbol = symbol.value_or("main");
             resolution.display = requested_symbol;
+            resolution.info = make_missing_symbol_resolution_info(requested_symbol);
 
             auto symbols = try_collect_defined_symbols(request);
             if (!symbols) {
@@ -2857,34 +3748,38 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
                 return resolution;
             }
 
-            auto assign_from_mangled = [&](std::string_view mangled) {
-                resolution.mangled = std::string{mangled};
-                for (const auto& symbol : *symbols) {
-                    if (symbol.mangled == mangled) {
-                        resolution.display = symbol.demangled;
-                        return;
-                    }
-                }
-                resolution.display = demangle_symbol_name(mangled);
+            auto assign_from_match = [&](const resolved_symbol_match& match) {
+                resolution.mangled = match.mangled;
+                resolution.display =
+                        match.info.display_name.empty() ? demangle_symbol_name(match.mangled) : match.info.display_name;
+                resolution.info = match.info;
             };
 
-            if (auto resolved_requested = resolve_symbol_name(*symbols, requested_symbol)) {
-                assign_from_mangled(*resolved_requested);
+            if (auto match = resolve_symbol_match(*symbols, requested_symbol)) {
+                assign_from_match(*match);
                 resolution.resolved = true;
                 return resolution;
             }
 
             if (!symbol) {
-                if (auto resolved_default = resolve_symbol_name(*symbols, "__sontag_main"sv)) {
-                    assign_from_mangled(*resolved_default);
+                if (auto match = resolve_symbol_match(*symbols, "main"sv)) {
+                    assign_from_match(*match);
                     resolution.resolved = true;
                     return resolution;
                 }
-                for (const auto& symbol : *symbols) {
-                    if (!is_function_symbol_kind(symbol.kind)) {
+                for (const auto& candidate : *symbols) {
+                    if (!is_function_symbol_kind(candidate.kind)) {
                         continue;
                     }
-                    assign_from_mangled(symbol.mangled);
+                    assign_from_match(
+                            resolved_symbol_match{
+                                    .mangled = candidate.mangled,
+                                    .info = make_symbol_resolution_info(
+                                            requested_symbol,
+                                            candidate,
+                                            symbol_resolution_confidence::exact_symtab,
+                                            candidate.present_in_binary ? "symtab_bin_fallback"
+                                                                        : "symtab_obj_fallback")});
                     resolution.resolved = true;
                     return resolution;
                 }
@@ -2962,36 +3857,40 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
             throw std::runtime_error("analysis requires at least one stored cell");
         }
 
+        auto source_text = detail::render_source(request.decl_cells, request.exec_cells);
+        auto build_unit_hash = detail::make_build_unit_hash(request, source_text);
+
         auto artifacts_root = request.session_dir / "artifacts";
-        auto inputs_dir = artifacts_root / "inputs";
-        fs::path kind_dir{};
+        auto inputs_dir = artifacts_root / "inputs" / build_unit_hash;
+        fs::path kind_root{};
         switch (kind) {
             case analysis_kind::graph_cfg:
-                kind_dir = artifacts_root / "graphs" / "cfg";
+                kind_root = artifacts_root / "graphs" / "cfg";
                 break;
             case analysis_kind::graph_call:
-                kind_dir = artifacts_root / "graphs" / "call";
+                kind_root = artifacts_root / "graphs" / "call";
                 break;
             case analysis_kind::graph_defuse:
-                kind_dir = artifacts_root / "graphs" / "defuse";
+                kind_root = artifacts_root / "graphs" / "defuse";
                 break;
             case analysis_kind::inspect_asm_map:
-                kind_dir = artifacts_root / "inspect" / "asm";
+                kind_root = artifacts_root / "inspect" / "asm";
                 break;
             case analysis_kind::inspect_mca_summary:
             case analysis_kind::inspect_mca_heatmap:
-                kind_dir = artifacts_root / "inspect" / "mca";
+                kind_root = artifacts_root / "inspect" / "mca";
                 break;
             default:
-                kind_dir = artifacts_root / "{}"_format(kind);
+                kind_root = artifacts_root / "{}"_format(kind);
                 break;
         }
+        auto kind_dir = kind_root / build_unit_hash;
 
         detail::ensure_dir(inputs_dir);
         detail::ensure_dir(kind_dir);
 
-        auto id = detail::make_artifact_id(request, kind);
-        auto source_path = inputs_dir / (id + ".cpp");
+        auto id = detail::make_artifact_id(build_unit_hash, request, kind);
+        auto source_path = inputs_dir / "source.cpp";
 
         std::string extension{};
         switch (kind) {
@@ -3025,28 +3924,14 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
         auto stdout_path = kind_dir / (id + ".stdout.txt");
         auto stderr_path = kind_dir / (id + ".stderr.txt");
 
-        if (kind == analysis_kind::mem_trace) {
-            auto cached = detail::read_text_file(artifact_path);
-            if (!cached.empty()) {
-                auto cached_result = analysis_result{};
-                cached_result.kind = kind;
-                cached_result.source_path = source_path;
-                cached_result.artifact_path = artifact_path;
-                cached_result.stdout_path = stdout_path;
-                cached_result.stderr_path = stderr_path;
-                cached_result.exit_code = 0;
-                cached_result.success = true;
-                cached_result.artifact_text = std::move(cached);
-                return cached_result;
-            }
-        }
+        detail::persist_merkle_cache_manifests(request, kind, source_text, build_unit_hash, source_path, artifact_path);
 
         {
             std::ofstream out{source_path};
             if (!out) {
                 throw std::runtime_error("failed to write source file: {}"_format(source_path.string()));
             }
-            out << detail::render_source(request.decl_cells, request.exec_cells);
+            out << source_text;
             if (!out) {
                 throw std::runtime_error("failed to write source file: {}"_format(source_path.string()));
             }
@@ -3059,154 +3944,193 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
         result.stdout_path = stdout_path;
         result.stderr_path = stderr_path;
 
+        if (auto cached_text_result = detail::try_load_cached_text_artifact_result(
+                    kind, source_path, artifact_path, stdout_path, stderr_path);
+            cached_text_result.has_value()) {
+            return std::move(*cached_text_result);
+        }
+        if (auto cached_summary_result =
+                    detail::try_load_cached_summary_result(kind, source_path, artifact_path, stdout_path, stderr_path);
+            cached_summary_result.has_value()) {
+            return std::move(*cached_summary_result);
+        }
+
         if (kind == analysis_kind::mem_trace) {
-            auto ir_path = kind_dir / (id + ".trace.ll");
-            auto ir_stdout_path = kind_dir / (id + ".ir.stdout.txt");
-            auto ir_stderr_path = kind_dir / (id + ".ir.stderr.txt");
+            auto try_load = [&]() -> std::optional<analysis_result> {
+                return detail::try_load_cached_mem_trace_result(source_path, artifact_path, stdout_path, stderr_path);
+            };
 
-            auto ir_command = detail::build_command(request, analysis_kind::ir, source_path, ir_path);
-            auto ir_exit = detail::run_process(ir_command, ir_stdout_path, ir_stderr_path);
-            auto ir_stdout = detail::read_text_file(ir_stdout_path);
-            auto ir_stderr = detail::read_text_file(ir_stderr_path);
-            if (ir_exit != 0) {
-                detail::write_text_file(stdout_path, ir_stdout);
-                detail::write_text_file(stderr_path, ir_stderr);
-                detail::write_text_file(artifact_path, ir_stdout);
+            auto build = [&]() -> analysis_result {
+                auto mem_result = analysis_result{};
+                mem_result.kind = kind;
+                mem_result.source_path = source_path;
+                mem_result.artifact_path = artifact_path;
+                mem_result.stdout_path = stdout_path;
+                mem_result.stderr_path = stderr_path;
 
-                result.exit_code = ir_exit;
-                result.success = false;
-                result.command = std::move(ir_command);
-                result.artifact_text = std::move(ir_stdout);
-                result.diagnostics_text = std::move(ir_stderr);
-                return result;
-            }
+                auto ir_path = kind_dir / (id + ".trace.ll");
+                auto ir_stdout_path = kind_dir / (id + ".ir.stdout.txt");
+                auto ir_stderr_path = kind_dir / (id + ".ir.stderr.txt");
 
-            auto ir_text = detail::read_text_file(ir_path);
-            auto defined_symbols = detail::try_collect_defined_symbols(request);
+                auto ir_command = detail::build_command(request, analysis_kind::ir, source_path, ir_path);
+                auto ir_exit = detail::run_process(ir_command, ir_stdout_path, ir_stderr_path);
+                auto ir_stdout = detail::read_text_file(ir_stdout_path);
+                auto ir_stderr = detail::read_text_file(ir_stderr_path);
+                if (ir_exit != 0) {
+                    detail::write_text_file(stdout_path, ir_stdout);
+                    detail::write_text_file(stderr_path, ir_stderr);
+                    detail::write_text_file(artifact_path, ir_stdout);
 
-            std::optional<std::string> resolved_symbol{};
-            if (request.symbol) {
-                if (defined_symbols) {
-                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, *request.symbol);
+                    mem_result.exit_code = ir_exit;
+                    mem_result.success = false;
+                    mem_result.command = std::move(ir_command);
+                    mem_result.artifact_text = std::move(ir_stdout);
+                    mem_result.diagnostics_text = std::move(ir_stderr);
+                    return mem_result;
                 }
-                if (!resolved_symbol) {
-                    resolved_symbol = detail::resolve_symbol_name(request, *request.symbol);
-                }
-                if (!resolved_symbol) {
-                    resolved_symbol = std::string{*request.symbol};
-                }
-            }
-            else {
-                if (defined_symbols) {
-                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, "__sontag_main"sv);
-                    if (!resolved_symbol && !defined_symbols->empty()) {
-                        resolved_symbol = (*defined_symbols)[0].mangled;
+
+                auto ir_text = detail::read_text_file(ir_path);
+                auto defined_symbols = detail::try_collect_defined_symbols(request);
+
+                std::optional<std::string> resolved_symbol{};
+                if (request.symbol) {
+                    if (defined_symbols) {
+                        resolved_symbol = detail::resolve_symbol_name(*defined_symbols, *request.symbol);
+                    }
+                    if (!resolved_symbol) {
+                        resolved_symbol = detail::resolve_symbol_name(request, *request.symbol);
+                    }
+                    if (!resolved_symbol) {
+                        resolved_symbol = std::string{*request.symbol};
                     }
                 }
-                if (!resolved_symbol) {
-                    auto lines = detail::split_lines(ir_text);
-                    for (const auto& line : lines) {
-                        if (auto symbol = detail::parse_ir_function_name_from_define_line(line); symbol.has_value()) {
-                            resolved_symbol = std::string{*symbol};
-                            break;
+                else {
+                    if (defined_symbols) {
+                        resolved_symbol = detail::resolve_symbol_name(*defined_symbols, "main"sv);
+                        if (!resolved_symbol && !defined_symbols->empty()) {
+                            resolved_symbol = (*defined_symbols)[0].mangled;
+                        }
+                    }
+                    if (!resolved_symbol) {
+                        auto lines = detail::split_lines(ir_text);
+                        for (const auto& line : lines) {
+                            if (auto symbol = detail::parse_ir_function_name_from_define_line(line);
+                                symbol.has_value()) {
+                                resolved_symbol = std::string{*symbol};
+                                break;
+                            }
                         }
                     }
                 }
-            }
 
-            if (!resolved_symbol) {
-                throw std::runtime_error("unable to resolve symbol for memory trace");
-            }
+                if (!resolved_symbol) {
+                    throw std::runtime_error("unable to resolve symbol for memory trace");
+                }
 
-            auto map_entries = std::vector<detail::mem_trace_map_entry>{};
-            auto instrumented_ir = detail::build_instrumented_mem_trace_ir(ir_text, *resolved_symbol, map_entries);
-            auto instrumented_ir_path = kind_dir / (id + ".trace.instrumented.ll");
-            detail::write_text_file(instrumented_ir_path, instrumented_ir);
+                auto map_entries = std::vector<detail::mem_trace_map_entry>{};
+                auto instrumented_ir = detail::build_instrumented_mem_trace_ir(ir_text, *resolved_symbol, map_entries);
+                auto instrumented_ir_path = kind_dir / (id + ".trace.instrumented.ll");
+                detail::write_text_file(instrumented_ir_path, instrumented_ir);
 
-            auto runtime_source_path = kind_dir / (id + ".trace.runtime.cpp");
-            detail::write_text_file(runtime_source_path, detail::build_mem_trace_runtime_source(*resolved_symbol));
+                auto trace_events_path = kind_dir / (id + ".trace.events.log");
+                auto trace_stats_path = kind_dir / (id + ".trace.stats.txt");
+                auto runtime_source_path = kind_dir / (id + ".trace.runtime.cpp");
+                detail::write_text_file(
+                        runtime_source_path,
+                        detail::build_mem_trace_runtime_source(trace_events_path.string(), trace_stats_path.string()));
 
-            auto trace_binary_path = kind_dir / (id + ".trace.bin");
-            auto compile_stdout_path = kind_dir / (id + ".trace.compile.stdout.txt");
-            auto compile_stderr_path = kind_dir / (id + ".trace.compile.stderr.txt");
+                auto trace_binary_path = kind_dir / (id + ".trace.bin");
+                auto compile_stdout_path = kind_dir / (id + ".trace.compile.stdout.txt");
+                auto compile_stderr_path = kind_dir / (id + ".trace.compile.stderr.txt");
 
-            auto compile_command = detail::base_clang_args(request);
-            compile_command.push_back(instrumented_ir_path.string());
-            compile_command.push_back(runtime_source_path.string());
-            compile_command.emplace_back(detail::arg_tokens::output_path);
-            compile_command.push_back(trace_binary_path.string());
+                auto compile_command = detail::base_clang_args(request);
+                compile_command.push_back(instrumented_ir_path.string());
+                compile_command.push_back(runtime_source_path.string());
+                compile_command.emplace_back(detail::arg_tokens::output_path);
+                compile_command.push_back(trace_binary_path.string());
+                detail::append_link_flags(compile_command, request);
 
-            auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
-            auto compile_stdout = detail::read_text_file(compile_stdout_path);
-            auto compile_stderr = detail::read_text_file(compile_stderr_path);
-            if (compile_exit != 0) {
-                auto diagnostics = detail::join_text(ir_stderr, compile_stderr);
-                auto combined_stdout = detail::join_text(ir_stdout, compile_stdout);
-                detail::write_text_file(stdout_path, combined_stdout);
-                detail::write_text_file(stderr_path, diagnostics);
-                detail::write_text_file(artifact_path, combined_stdout);
+                auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
+                auto compile_stdout = detail::read_text_file(compile_stdout_path);
+                auto compile_stderr = detail::read_text_file(compile_stderr_path);
+                if (compile_exit != 0) {
+                    auto diagnostics = detail::join_text(ir_stderr, compile_stderr);
+                    auto combined_stdout = detail::join_text(ir_stdout, compile_stdout);
+                    detail::write_text_file(stdout_path, combined_stdout);
+                    detail::write_text_file(stderr_path, diagnostics);
+                    detail::write_text_file(artifact_path, combined_stdout);
 
-                result.exit_code = compile_exit;
-                result.success = false;
-                result.command = std::move(compile_command);
-                result.artifact_text = std::move(combined_stdout);
-                result.diagnostics_text = std::move(diagnostics);
-                return result;
-            }
+                    mem_result.exit_code = compile_exit;
+                    mem_result.success = false;
+                    mem_result.command = std::move(compile_command);
+                    mem_result.artifact_text = std::move(combined_stdout);
+                    mem_result.diagnostics_text = std::move(diagnostics);
+                    return mem_result;
+                }
 
-            auto trace_events_path = kind_dir / (id + ".trace.events.log");
-            auto trace_stats_path = kind_dir / (id + ".trace.stats.txt");
-            auto run_command = std::vector<std::string>{
-                    trace_binary_path.string(), trace_events_path.string(), trace_stats_path.string()};
-            auto run_exit = detail::run_process(run_command, stdout_path, stderr_path);
-            auto run_stdout = detail::read_text_file(stdout_path);
-            auto run_stderr = detail::read_text_file(stderr_path);
+                auto run_command = std::vector<std::string>{trace_binary_path.string()};
+                auto run_exit = detail::run_process(run_command, stdout_path, stderr_path);
+                auto run_stdout = detail::read_text_file(stdout_path);
+                auto run_stderr = detail::read_text_file(stderr_path);
 
-            if (run_exit != 0) {
+                {
+                    std::error_code ec{};
+                    fs::remove(trace_binary_path, ec);
+                }
+
+                auto run_likely_signaled = run_exit >= 128;
+                if (run_likely_signaled) {
+                    auto diagnostics = detail::join_text(detail::join_text(ir_stderr, compile_stderr), run_stderr);
+                    auto combined_stdout = detail::join_text(detail::join_text(ir_stdout, compile_stdout), run_stdout);
+                    detail::write_text_file(stdout_path, combined_stdout);
+                    detail::write_text_file(stderr_path, diagnostics);
+                    detail::write_text_file(artifact_path, combined_stdout);
+
+                    mem_result.exit_code = run_exit;
+                    mem_result.success = false;
+                    mem_result.command = std::move(run_command);
+                    mem_result.artifact_text = std::move(combined_stdout);
+                    mem_result.diagnostics_text = std::move(diagnostics);
+                    return mem_result;
+                }
+
+                auto events = std::vector<detail::mem_trace_event_entry>{};
+                auto event_lines = detail::split_lines(detail::read_text_file(trace_events_path));
+                for (const auto& line : event_lines) {
+                    if (auto parsed = detail::parse_mem_trace_event_line(line); parsed.has_value()) {
+                        events.push_back(std::move(*parsed));
+                    }
+                }
+                std::ranges::sort(events, [](const auto& lhs, const auto& rhs) { return lhs.sequence < rhs.sequence; });
+
+                auto stats = detail::parse_mem_trace_runtime_stats(detail::read_text_file(trace_stats_path));
+                auto payload = detail::mem_trace_payload{
+                        .symbol = *resolved_symbol,
+                        .tracee_exit_code = run_exit,
+                        .truncated = stats.truncated,
+                        .dropped_events = stats.dropped_events,
+                        .map_entries = std::move(map_entries),
+                        .events = std::move(events)};
+                auto artifact_text = detail::render_mem_trace_payload(payload);
+                detail::write_text_file(artifact_path, artifact_text);
+
                 auto diagnostics = detail::join_text(detail::join_text(ir_stderr, compile_stderr), run_stderr);
+                if (run_exit != 0) {
+                    diagnostics = detail::join_text(diagnostics, "tracee_exit_code={}"_format(run_exit));
+                }
                 auto combined_stdout = detail::join_text(detail::join_text(ir_stdout, compile_stdout), run_stdout);
                 detail::write_text_file(stdout_path, combined_stdout);
                 detail::write_text_file(stderr_path, diagnostics);
-                detail::write_text_file(artifact_path, combined_stdout);
 
-                result.exit_code = run_exit;
-                result.success = false;
-                result.command = std::move(run_command);
-                result.artifact_text = std::move(combined_stdout);
-                result.diagnostics_text = std::move(diagnostics);
-                return result;
-            }
+                mem_result.exit_code = run_exit;
+                mem_result.success = true;
+                mem_result.command = std::move(run_command);
+                mem_result.artifact_text = std::move(artifact_text);
+                mem_result.diagnostics_text = std::move(diagnostics);
+                return mem_result;
+            };
 
-            auto events = std::vector<detail::mem_trace_event_entry>{};
-            auto event_lines = detail::split_lines(detail::read_text_file(trace_events_path));
-            for (const auto& line : event_lines) {
-                if (auto parsed = detail::parse_mem_trace_event_line(line); parsed.has_value()) {
-                    events.push_back(std::move(*parsed));
-                }
-            }
-            std::ranges::sort(events, [](const auto& lhs, const auto& rhs) { return lhs.sequence < rhs.sequence; });
-
-            auto stats = detail::parse_mem_trace_runtime_stats(detail::read_text_file(trace_stats_path));
-            auto payload = detail::mem_trace_payload{
-                    .symbol = *resolved_symbol,
-                    .truncated = stats.truncated,
-                    .dropped_events = stats.dropped_events,
-                    .map_entries = std::move(map_entries),
-                    .events = std::move(events)};
-            auto artifact_text = detail::render_mem_trace_payload(payload);
-            detail::write_text_file(artifact_path, artifact_text);
-
-            auto diagnostics = detail::join_text(detail::join_text(ir_stderr, compile_stderr), run_stderr);
-            auto combined_stdout = detail::join_text(detail::join_text(ir_stdout, compile_stdout), run_stdout);
-            detail::write_text_file(stdout_path, combined_stdout);
-            detail::write_text_file(stderr_path, diagnostics);
-
-            result.exit_code = run_exit;
-            result.success = (run_exit == 0);
-            result.command = std::move(run_command);
-            result.artifact_text = std::move(artifact_text);
-            result.diagnostics_text = std::move(diagnostics);
-            return result;
+            return detail::get_or_create<analysis_result>(try_load, build);
         }
 
         if (kind == analysis_kind::graph_cfg || kind == analysis_kind::graph_call ||
@@ -3248,10 +4172,10 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
             }
             else {
                 if (defined_symbols) {
-                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, "__sontag_main");
+                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, "main");
                 }
                 if (!resolved_symbol) {
-                    resolved_symbol = detail::resolve_symbol_name(request, "__sontag_main");
+                    resolved_symbol = detail::resolve_symbol_name(request, "main");
                 }
                 if (!resolved_symbol) {
                     resolved_symbol = graph::find_first_ir_function_name(ir_text);
@@ -3390,6 +4314,7 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
             result.command = std::move(compile_command);
             result.artifact_text = std::move(artifact_text);
             result.diagnostics_text = std::move(diagnostics_text);
+            detail::write_summary_sidecar(artifact_path, result.artifact_text);
             return result;
         }
 
@@ -3434,12 +4359,19 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
             auto symbol_display_names = detail::make_symbol_display_map(defined_symbols);
 
             std::optional<std::string> resolved_symbol{};
+            auto symbol_info = detail::make_missing_symbol_resolution_info(request.symbol.value_or("main"));
             if (request.symbol) {
                 if (defined_symbols) {
-                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, *request.symbol);
+                    if (auto match = detail::resolve_symbol_match(*defined_symbols, *request.symbol)) {
+                        resolved_symbol = match->mangled;
+                        symbol_info = match->info;
+                    }
                 }
                 if (!resolved_symbol) {
-                    resolved_symbol = detail::resolve_symbol_name(request, *request.symbol);
+                    if (auto match = detail::resolve_symbol_match(request, *request.symbol)) {
+                        resolved_symbol = match->mangled;
+                        symbol_info = match->info;
+                    }
                 }
                 if (!resolved_symbol) {
                     throw std::runtime_error("unable to resolve symbol: {}"_format(*request.symbol));
@@ -3447,10 +4379,16 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
             }
             else {
                 if (defined_symbols) {
-                    resolved_symbol = detail::resolve_symbol_name(*defined_symbols, "__sontag_main");
+                    if (auto match = detail::resolve_symbol_match(*defined_symbols, "main"sv)) {
+                        resolved_symbol = match->mangled;
+                        symbol_info = match->info;
+                    }
                 }
                 if (!resolved_symbol) {
-                    resolved_symbol = detail::resolve_symbol_name(request, "__sontag_main");
+                    if (auto match = detail::resolve_symbol_match(request, "main"sv)) {
+                        resolved_symbol = match->mangled;
+                        symbol_info = match->info;
+                    }
                 }
             }
 
@@ -3467,12 +4405,23 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
 
             auto symbol_name = resolved_symbol ? *resolved_symbol : std::string{"<all>"};
             auto symbol_display = detail::resolve_symbol_display_name(symbol_name, symbol_display_names);
+            if (symbol_info.display_name.empty()) {
+                symbol_info.display_name = symbol_display;
+            }
+            if (symbol_info.canonical_name.empty()) {
+                symbol_info.canonical_name = std::string{detail::canonical_symbol_for_match(symbol_name)};
+            }
             auto inspect_streams = std::array{opcode::operation_stream_input{.name = "asm", .disassembly = asm_text}};
             auto opcode_mapping = detail::build_opcode_mapping(inspect_streams);
 
             auto payload = detail::inspect_asm_map_payload{
                     .symbol = symbol_name,
                     .symbol_display = symbol_display,
+                    .symbol_canonical = symbol_info.canonical_name,
+                    .symbol_addendum = symbol_info.addendum,
+                    .symbol_status = "{}"_format(symbol_info.status),
+                    .symbol_confidence = "{}"_format(symbol_info.confidence),
+                    .symbol_source = symbol_info.source,
                     .source = detail::make_line_records(source_text),
                     .ir = detail::make_line_records(ir_text),
                     .asm_lines = detail::make_line_records(asm_text),
@@ -3495,6 +4444,7 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
                     payload.asm_lines.size(),
                     artifact_path.string());
             result.diagnostics_text = std::move(diagnostics_text);
+            detail::write_summary_sidecar(artifact_path, result.artifact_text);
             return result;
         }
 
@@ -3513,10 +4463,12 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
             auto defined_symbols = detail::try_collect_defined_symbols(request);
             auto symbol_display_names = detail::make_symbol_display_map(defined_symbols);
             std::string symbol_name{};
+            auto symbol_info = detail::make_missing_symbol_resolution_info(request.symbol.value_or("main"));
             if (request.symbol) {
                 if (defined_symbols) {
-                    if (auto resolved = detail::resolve_symbol_name(*defined_symbols, *request.symbol)) {
-                        symbol_name = *resolved;
+                    if (auto match = detail::resolve_symbol_match(*defined_symbols, *request.symbol)) {
+                        symbol_name = match->mangled;
+                        symbol_info = match->info;
                     }
                 }
                 if (symbol_name.empty()) {
@@ -3524,10 +4476,24 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
                 }
             }
             else {
-                symbol_name = "__sontag_main";
+                if (defined_symbols) {
+                    if (auto match = detail::resolve_symbol_match(*defined_symbols, "main"sv)) {
+                        symbol_name = match->mangled;
+                        symbol_info = match->info;
+                    }
+                }
+                if (symbol_name.empty()) {
+                    symbol_name = "main";
+                }
             }
 
             auto symbol_display = detail::resolve_symbol_display_name(symbol_name, symbol_display_names);
+            if (symbol_info.display_name.empty()) {
+                symbol_info.display_name = symbol_display;
+            }
+            if (symbol_info.canonical_name.empty()) {
+                symbol_info.canonical_name = std::string{detail::canonical_symbol_for_match(symbol_name)};
+            }
             auto mca_input_path = mca_result.artifact_path;
             mca_input_path.replace_extension(".input.s");
             auto mca_input_text = detail::read_text_file(mca_input_path);
@@ -3540,6 +4506,11 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
                 auto payload = detail::inspect_mca_summary_payload{
                         .symbol = symbol_name,
                         .symbol_display = symbol_display,
+                        .symbol_canonical = symbol_info.canonical_name,
+                        .symbol_addendum = symbol_info.addendum,
+                        .symbol_status = "{}"_format(symbol_info.status),
+                        .symbol_confidence = "{}"_format(symbol_info.confidence),
+                        .symbol_source = symbol_info.source,
                         .source_path = mca_result.source_path.string(),
                         .opcode_table = detail::to_analysis_opcode_entries(opcode_mapping.opcode_table),
                         .operations = detail::to_analysis_operation_entries(opcode_mapping.streams)};
@@ -3568,6 +4539,11 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
                 auto payload = detail::inspect_mca_heatmap_payload{
                         .symbol = symbol_name,
                         .symbol_display = symbol_display,
+                        .symbol_canonical = symbol_info.canonical_name,
+                        .symbol_addendum = symbol_info.addendum,
+                        .symbol_status = "{}"_format(symbol_info.status),
+                        .symbol_confidence = "{}"_format(symbol_info.confidence),
+                        .symbol_source = symbol_info.source,
                         .rows = detail::parse_mca_heatmap_rows(mca_result.artifact_text),
                         .opcode_table = detail::to_analysis_opcode_entries(opcode_mapping.opcode_table),
                         .operations = detail::to_analysis_operation_entries(opcode_mapping.streams)};
@@ -3591,6 +4567,7 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
             result.command = std::move(mca_result.command);
             result.artifact_text = std::move(artifact_summary);
             result.diagnostics_text = std::move(mca_result.diagnostics_text);
+            detail::write_summary_sidecar(artifact_path, result.artifact_text);
             return result;
         }
 
@@ -3628,9 +4605,17 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
 
                 auto extracted = detail::extract_asm_for_symbol(asm_text, *resolved);
                 if (extracted.empty()) {
-                    throw std::runtime_error("symbol not found in artifact: {}"_format(*resolved));
+                    auto dump_result = run_analysis(request, analysis_kind::dump);
+                    if (dump_result.success && !dump_result.artifact_text.empty()) {
+                        asm_text = detail::prepare_mca_from_objdump(dump_result.artifact_text, request.asm_syntax);
+                    }
+                    else {
+                        throw std::runtime_error("symbol not found in artifact: {}"_format(*resolved));
+                    }
                 }
-                asm_text = detail::prepare_mca_symbol_input(extracted, request.asm_syntax);
+                else {
+                    asm_text = detail::prepare_mca_symbol_input(extracted, request.asm_syntax);
+                }
             }
             else {
                 asm_text = detail::sanitize_mca_input(asm_text, false);
@@ -3685,26 +4670,50 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
 
         if (kind == analysis_kind::dump) {
             auto object_path = kind_dir / (id + ".input.o");
+            auto binary_path = kind_dir / (id + ".bin");
             auto compile_stdout_path = kind_dir / (id + ".compile.stdout.txt");
             auto compile_stderr_path = kind_dir / (id + ".compile.stderr.txt");
 
-            auto compile_command = detail::build_command(request, analysis_kind::dump, source_path, object_path);
-            auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
-            if (compile_exit != 0) {
-                auto compile_stdout = detail::read_text_file(compile_stdout_path);
-                auto compile_stderr = detail::read_text_file(compile_stderr_path);
+            bool linked = false;
+            std::vector<std::string> compile_command{};
 
-                detail::write_text_file(stdout_path, compile_stdout);
-                detail::write_text_file(stderr_path, compile_stderr);
-                detail::write_text_file(artifact_path, compile_stdout);
-
-                result.exit_code = compile_exit;
-                result.success = false;
-                result.command = std::move(compile_command);
-                result.artifact_text = std::move(compile_stdout);
-                result.diagnostics_text = std::move(compile_stderr);
-                return result;
+            if (!request.no_link) {
+                compile_command = detail::base_clang_args(request);
+                compile_command.push_back(source_path.string());
+                compile_command.emplace_back("-o");
+                compile_command.push_back(binary_path.string());
+                detail::append_link_flags(compile_command, request);
+                auto link_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
+                linked = (link_exit == 0);
+                if (!linked && request.verbose) {
+                    auto link_stderr = detail::read_text_file(compile_stderr_path);
+                    if (!link_stderr.empty()) {
+                        debug_log("dump link failed (exit {}): {}", link_exit, link_stderr);
+                    }
+                }
             }
+
+            if (!linked) {
+                compile_command = detail::build_command(request, analysis_kind::dump, source_path, object_path);
+                auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
+                if (compile_exit != 0) {
+                    auto compile_stdout = detail::read_text_file(compile_stdout_path);
+                    auto compile_stderr = detail::read_text_file(compile_stderr_path);
+
+                    detail::write_text_file(stdout_path, compile_stdout);
+                    detail::write_text_file(stderr_path, compile_stderr);
+                    detail::write_text_file(artifact_path, compile_stdout);
+
+                    result.exit_code = compile_exit;
+                    result.success = false;
+                    result.command = std::move(compile_command);
+                    result.artifact_text = std::move(compile_stdout);
+                    result.diagnostics_text = std::move(compile_stderr);
+                    return result;
+                }
+            }
+
+            auto objdump_input = linked ? binary_path : object_path;
 
             std::optional<std::string> resolved_symbol{};
             if (request.symbol) {
@@ -3722,7 +4731,7 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
             auto objdump_candidates = detail::build_objdump_executable_candidates(request, kind_dir, id);
 
             for (const auto& candidate : objdump_candidates) {
-                objdump_command = detail::build_objdump_command(request, object_path, candidate, std::nullopt);
+                objdump_command = detail::build_objdump_command(request, objdump_input, candidate, std::nullopt);
                 objdump_exit = detail::run_process(objdump_command, stdout_path, stderr_path);
                 stdout_text = detail::read_text_file(stdout_path);
                 stderr_text = detail::read_text_file(stderr_path);
@@ -3750,12 +4759,25 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
                 if (!extracted.empty()) {
                     stdout_text = std::move(extracted);
                 }
+                else if (objdump_exit == 0) {
+                    stdout_text.clear();
+                    stderr_text =
+                            detail::join_text(stderr_text, "symbol not found in artifact: {}"_format(*resolved_symbol));
+                    objdump_exit = 1;
+                    detail::write_text_file(stderr_path, stderr_text);
+                }
+            }
+
+            if (linked) {
+                std::error_code ec{};
+                fs::remove(binary_path, ec);
             }
 
             detail::write_text_file(artifact_path, stdout_text);
 
             result.exit_code = objdump_exit;
             result.success = (objdump_exit == 0);
+            result.binary_path = linked ? std::optional<fs::path>{binary_path} : std::nullopt;
             result.command = std::move(objdump_command);
             result.artifact_text = std::move(stdout_text);
             result.diagnostics_text = std::move(stderr_text);
@@ -3833,6 +4855,23 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
                 }
 
                 if (extracted.empty()) {
+                    if (kind == analysis_kind::asm_text) {
+                        auto dump_result = run_analysis(request, analysis_kind::dump);
+                        if (dump_result.success && !detail::trim_ascii(dump_result.artifact_text).empty()) {
+                            extracted = std::move(dump_result.artifact_text);
+                        }
+                        else {
+                            auto details = dump_result.diagnostics_text.empty()
+                                                 ? "symbol not found in artifact: {}"_format(*resolved)
+                                                 : detail::join_text(
+                                                           dump_result.diagnostics_text,
+                                                           "symbol not found in artifact: {}"_format(*resolved));
+                            throw std::runtime_error(details);
+                        }
+                    }
+                }
+
+                if (extracted.empty()) {
                     throw std::runtime_error("symbol not found in artifact: {}"_format(*resolved));
                 }
 
@@ -3860,7 +4899,24 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
         if (!symbols) {
             throw std::runtime_error("failed to collect symbols from current snapshot");
         }
+
+        // `:symbols` should reflect snapshot-owned symbols, not full linked runtime inventories.
+        std::vector<analysis_symbol> filtered = *symbols | std::views::filter([](auto&& symbol) {
+            return symbol.present_in_object;
+        }) | std::ranges::to<std::vector<analysis_symbol>>();
+        if (!filtered.empty()) {
+            return filtered;
+        }
         return *symbols;
+    }
+
+    std::optional<symbol_resolution_info> resolve_symbol_info(
+            const analysis_request& request, std::string_view symbol) {
+        auto match = detail::resolve_symbol_match(request, symbol);
+        if (match) {
+            return match->info;
+        }
+        return detail::make_missing_symbol_resolution_info(symbol);
     }
 
     delta_report collect_delta_report(
@@ -3882,8 +4938,15 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
         report.target_label = "{}"_format(report.target);
 
         auto symbol_resolution = detail::resolve_delta_symbol(request, delta.symbol);
-        report.symbol = symbol_resolution.mangled.value_or(delta.symbol.value_or("__sontag_main"));
+        report.symbol = symbol_resolution.mangled.value_or(delta.symbol.value_or("main"));
         report.symbol_display = symbol_resolution.display.empty() ? report.symbol : symbol_resolution.display;
+        report.symbol_resolution = symbol_resolution.info;
+        if (report.symbol_resolution.display_name.empty()) {
+            report.symbol_resolution.display_name = report.symbol_display;
+        }
+        if (report.symbol_resolution.canonical_name.empty()) {
+            report.symbol_resolution.canonical_name = std::string{detail::canonical_symbol_for_match(report.symbol)};
+        }
         if (!symbol_resolution.resolved) {
             report.success = false;
             return report;
@@ -3899,7 +4962,12 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
         auto invalid_delta = false;
 
         for (auto level : requested_levels) {
-            auto level_record = delta_level_record{.level = level, .label = "{}"_format(level)};
+            auto level_record = delta_level_record{
+                    .level = level,
+                    .label = "{}"_format(level),
+                    .symbol_status = report.symbol_resolution.status,
+                    .symbol_confidence = report.symbol_resolution.confidence,
+                    .symbol_source = report.symbol_resolution.source};
             auto level_disassembly = std::string{};
 
             auto level_request = request;
@@ -3925,11 +4993,15 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
                                                                          symbol_resolution.display)
                                                                : std::string{};
                     if (symbol_resolution.mangled && extracted.empty()) {
-                        invalid_delta = true;
-                        level_record.success = false;
+                        level_record.symbol_status = symbol_resolution_status::optimized_out;
+                        level_record.symbol_source = "objdump_symbol_missing";
                         level_record.diagnostics_text = detail::join_text(
                                 level_record.diagnostics_text,
                                 "symbol not found in artifact: {}"_format(*symbol_resolution.mangled));
+                        if (level == report.baseline) {
+                            invalid_delta = true;
+                            level_record.success = false;
+                        }
                     }
                     else {
                         if (!extracted.empty()) {
@@ -3944,6 +5016,8 @@ extern "C" int __sontag_entrypoint() asm(")cpp" +
                 invalid_delta = true;
                 level_record.success = false;
                 level_record.exit_code = -1;
+                level_record.symbol_status = symbol_resolution_status::missing;
+                level_record.symbol_source = "analysis_exception";
                 level_record.diagnostics_text = e.what();
             }
 

@@ -143,12 +143,18 @@ namespace sontag::graph {
         }
 
         static std::string resolve_display_name(std::string_view symbol_name, const symbol_display_map* display_names) {
+            auto format_function_like = [](std::string name) {
+                if (name.find('(') == std::string::npos) {
+                    name.append("()");
+                }
+                return name;
+            };
             if (display_names != nullptr) {
                 if (auto it = display_names->find(std::string{symbol_name}); it != display_names->end()) {
-                    return it->second;
+                    return format_function_like(it->second);
                 }
             }
-            return demangle_symbol_name(symbol_name);
+            return format_function_like(demangle_symbol_name(symbol_name));
         }
 
         static std::optional<std::string> parse_ir_function_name(std::string_view line) {
