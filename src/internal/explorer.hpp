@@ -457,12 +457,33 @@ namespace sontag::internal::explorer {
             }
 
             if (auto open = candidate.find('<'); open != std::string_view::npos) {
-                auto close = candidate.find('>', open + 1U);
-                if (close != std::string_view::npos && close > open + 1U) {
-                    if (auto normalized =
-                                normalize_call_target_candidate(candidate.substr(open + 1U, close - open - 1U));
-                        normalized.has_value()) {
-                        return normalized;
+                auto wrapped_target = open == 0U || std::isspace(static_cast<unsigned char>(candidate[open - 1U])) != 0;
+                if (wrapped_target) {
+                    auto depth = size_t{0U};
+                    auto close = std::string_view::npos;
+                    for (size_t i = open; i < candidate.size(); ++i) {
+                        if (candidate[i] == '<') {
+                            ++depth;
+                            continue;
+                        }
+                        if (candidate[i] == '>') {
+                            if (depth == 0U) {
+                                break;
+                            }
+                            --depth;
+                            if (depth == 0U) {
+                                close = i;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (close != std::string_view::npos && close > open + 1U) {
+                        if (auto normalized =
+                                    normalize_call_target_candidate(candidate.substr(open + 1U, close - open - 1U));
+                            normalized.has_value()) {
+                            return normalized;
+                        }
                     }
                 }
             }
@@ -478,7 +499,32 @@ namespace sontag::internal::explorer {
                 return std::nullopt;
             }
             if (candidate.find('[') != std::string_view::npos || candidate.find(']') != std::string_view::npos) {
-                return std::nullopt;
+                // Allow demangled ABI tags like [abi:ne210108], but reject memory operands.
+                auto scan = size_t{0U};
+                while (scan < candidate.size()) {
+                    auto close = candidate.find(']', scan);
+                    auto open = candidate.find('[', scan);
+                    if (close != std::string_view::npos && (open == std::string_view::npos || close < open)) {
+                        return std::nullopt;
+                    }
+                    if (open == std::string_view::npos) {
+                        break;
+                    }
+                    if (close == std::string_view::npos || close <= open + 1U) {
+                        return std::nullopt;
+                    }
+                    auto tag = candidate.substr(open + 1U, close - open - 1U);
+                    while (!tag.empty() && (tag.front() == ' ' || tag.front() == '\t')) {
+                        tag.remove_prefix(1U);
+                    }
+                    while (!tag.empty() && (tag.back() == ' ' || tag.back() == '\t')) {
+                        tag.remove_suffix(1U);
+                    }
+                    if (!tag.starts_with("abi:"sv)) {
+                        return std::nullopt;
+                    }
+                    scan = close + 1U;
+                }
             }
 
             return normalize_call_target_candidate(candidate);
@@ -1298,8 +1344,7 @@ namespace sontag::internal::explorer {
             return frame;
         }
 
-        static std::string render_frame(
-                const model& data, size_t cursor, size_t top_row, size_t rows_visible, size_t terminal_cols) {
+        static std::string render_frame(const model& data, size_t cursor, size_t top_row, size_t rows_visible) {
             std::string frame{};
             frame.reserve(4096U);
 
@@ -1948,7 +1993,6 @@ namespace sontag::internal::explorer {
                 std::ostream& out,
                 bool include_header = true,
                 const std::unordered_map<std::string, std::string_view>* node_id_colors = nullptr) {
-            auto terminal_cols = isatty(STDOUT_FILENO) ? query_terminal_dims().cols : size_t{4096U};
             auto append_line = [&](std::string_view line) { out << line << '\n'; };
 
             if (include_header) {
@@ -2194,7 +2238,7 @@ namespace sontag::internal::explorer {
                     !data.resource_pressure.resources.empty());
             detail::clamp_viewport(data.rows.size(), rows_visible, cursor, top_row);
 
-            out << detail::render_frame(data, cursor, top_row, rows_visible, dims.cols);
+            out << detail::render_frame(data, cursor, top_row, rows_visible);
             out.flush();
 
             auto event = detail::read_key_event(STDIN_FILENO);

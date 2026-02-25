@@ -16,7 +16,7 @@ sontag commands are organized by output mode:
 - `static`: base command, deterministic text output
   - examples: `:asm`, `:ir`, `:graph cfg`, `:graph call`
 - `explore`: interactive TTY mode (arrows, `j/k`, enter/quit depending on command)
-  - examples: `:asm explore`, `:ir explore`, `:mem_explore`
+  - examples: `:asm explore`, `:ir explore`, `:mem explore`
 - `inspect`: structured JSON export for downstream tooling
   - examples: `:inspect asm`, `:inspect mem`, `:inspect mca summary`, `:inspect mca heatmap`
 
@@ -133,7 +133,7 @@ interactive assembly view with:
 
 controls:
 
-- `up`/`sown` or `j`/`k`: move selection
+- `up`/`down` or `j`/`k`: move selection
 - `enter`: follow callable symbol on selected row (when available)
 - `q`: exit (recursively if you have followed callable symbols)
 
@@ -161,11 +161,16 @@ interactive memory access view with instrumented runtime tracing (WIP). rows sho
 - `:mem [symbol|@last]`: traced memory table
 - `:mem explore [symbol|@last]`: interactive row navigation
 - `:inspect mem [symbol|@last]`: structured JSON output
+- trace status line semantics:
+  - `trace: enabled` means trace completed with exit code `0`
+  - `trace: enabled (exit_code=N)` means trace completed with a nonzero runtime exit code
+  - `trace: disabled in dynamic mode (set build.static=true)` means runtime trace was intentionally skipped
 
 controls:
 
 - `up`/`down` or `j`/`k`: move selection
 - `enter`: follow callable symbol on selected row (when available)
+- `enter` on rows with named memory symbols (for example globals) attempts symbol navigation for that symbol
 - `q`: exit
 
 ![ir explore demo](docs/mem_explore.gif)
@@ -186,6 +191,7 @@ currently tested on:
 - bare input (non-command): append executable cell
 - `:show <config|decl|exec|all>`: inspect current state
 - `:symbols`: list discovered symbols from current snapshot
+  - in static/full-link mode, this can include many libc/libc++ runtime symbols; this is expected
 - `:clear`: clear terminal screen
 - `:help`: print command help
 - `:quit`: exit REPL
@@ -211,10 +217,28 @@ currently tested on:
 
 ## static analysis commands
 
+### link and resolution modes
+
+- dynamic mode (default): `build.static=false`
+  - faster iteration
+  - `:mem` runtime trace is skipped (`trace: disabled in dynamic mode ...`)
+- static mode: `build.static=true`
+  - enables runtime tracing used by `:mem` value resolution
+  - increases symbol coverage from linked runtime/library code (so `:symbols` can be much larger)
+
+resolution behavior:
+
+- symbol resolution accepts mangled and demangled spellings where possible
+- dynamic relocation addendums (for example `@PLT`) are preserved in resolution metadata when present
+- `:mem` value column is runtime-trace-backed and best-effort:
+  - in static mode with successful trace, values are populated when observed
+  - when trace is disabled/unavailable, values may be missing (`-`) or partial
+
 ### `:asm [symbol|@last]`
 
 - default symbol: `main` (equivalent to `main`)
 - prints operation summary, opcode counts, and normalized assembly rows
+- if a requested symbol is not present in TU assembly output, `:asm <symbol>` falls back to linked binary disassembly
 
 ### `:ir [symbol|@last]`
 

@@ -48,6 +48,7 @@ extern "C" {
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace sontag::literals;
@@ -4781,6 +4782,68 @@ examples:
             return out.str();
         }
 
+        struct runtime_sample_key {
+            uint64_t value{};
+            uint64_t width_bytes{};
+
+            bool operator==(const runtime_sample_key&) const = default;
+        };
+
+        struct runtime_sample_key_hash {
+            size_t operator()(const runtime_sample_key& sample) const noexcept {
+                auto value_hash = std::hash<uint64_t>{}(sample.value);
+                auto width_hash = std::hash<uint64_t>{}(sample.width_bytes);
+                return value_hash ^ (width_hash + 0x9e3779b97f4a7c15ULL + (value_hash << 6U) + (value_hash >> 2U));
+            }
+        };
+
+        struct runtime_rmw_pair_key {
+            runtime_sample_key before{};
+            runtime_sample_key after{};
+
+            bool operator==(const runtime_rmw_pair_key&) const = default;
+        };
+
+        struct runtime_rmw_pair_key_hash {
+            size_t operator()(const runtime_rmw_pair_key& pair) const noexcept {
+                auto sample_hash = runtime_sample_key_hash{};
+                auto before_hash = sample_hash(pair.before);
+                auto after_hash = sample_hash(pair.after);
+                return before_hash ^ (after_hash + 0x9e3779b97f4a7c15ULL + (before_hash << 6U) + (before_hash >> 2U));
+            }
+        };
+
+        static runtime_sample_key make_runtime_sample_key(const mem_trace_event_record& event) {
+            return runtime_sample_key{.value = event.value, .width_bytes = event.width_bytes};
+        }
+
+        static size_t count_distinct_runtime_values(const std::vector<const mem_trace_event_record*>& events) {
+            auto distinct = std::unordered_set<runtime_sample_key, runtime_sample_key_hash>{};
+            distinct.reserve(events.size());
+            for (const auto* event : events) {
+                distinct.insert(make_runtime_sample_key(*event));
+            }
+            return distinct.size();
+        }
+
+        static size_t count_distinct_runtime_rmw_pairs(const std::vector<const mem_trace_event_record*>& events) {
+            auto distinct_pairs = std::unordered_set<runtime_rmw_pair_key, runtime_rmw_pair_key_hash>{};
+            distinct_pairs.reserve(events.size() / 2U + 1U);
+            auto pending_before = std::optional<runtime_sample_key>{};
+            for (const auto* event : events) {
+                if (event->access == internal::mem::access_kind::load) {
+                    pending_before = make_runtime_sample_key(*event);
+                    continue;
+                }
+                if (event->access == internal::mem::access_kind::store && pending_before.has_value()) {
+                    distinct_pairs.insert(
+                            runtime_rmw_pair_key{.before = *pending_before, .after = make_runtime_sample_key(*event)});
+                    pending_before.reset();
+                }
+            }
+            return distinct_pairs.size();
+        }
+
         static constexpr bool is_ir_symbol_char(char c) noexcept {
             auto lower = static_cast<char>(utils::char_tolower(c));
             return (c >= '0' && c <= '9') || (lower >= 'a' && lower <= 'z') || c == '_' || c == '$' || c == '.';
@@ -4793,6 +4856,29 @@ examples:
             auto needle = "@{}"_format(symbol);
             auto pos = pointer_expr.find(needle);
             if (pos == std::string_view::npos) {
+                auto index = size_t{0U};
+                while (index < pointer_expr.size()) {
+                    auto at = pointer_expr.find('@', index);
+                    if (at == std::string_view::npos || at + 1U >= pointer_expr.size()) {
+                        break;
+                    }
+                    auto token_begin = at + 1U;
+                    auto token_end = token_begin;
+                    while (token_end < pointer_expr.size() && is_ir_symbol_char(pointer_expr[token_end])) {
+                        ++token_end;
+                    }
+                    auto token = pointer_expr.substr(token_begin, token_end - token_begin);
+                    if (!token.empty() && internal::symbols::symbol_names_equivalent(token, symbol)) {
+                        return true;
+                    }
+                    if (!token.empty()) {
+                        if (auto demangled = demangle_itanium_token(token);
+                            demangled.has_value() && internal::symbols::symbol_names_equivalent(*demangled, symbol)) {
+                            return true;
+                        }
+                    }
+                    index = token_end > at ? token_end : at + 1U;
+                }
                 return false;
             }
             auto end = pos + needle.size();
@@ -4879,16 +4965,17 @@ examples:
                     [&](const std::vector<const mem_trace_map_record*>& map_entries,
                         const internal::mem::row& row) -> std::vector<const mem_trace_event_record*> {
                 auto matches = std::vector<const mem_trace_event_record*>{};
-                auto matching_map_entries = std::vector<const mem_trace_map_record*>{};
-                matching_map_entries.reserve(map_entries.size());
+                auto seen_trace_ids = std::unordered_set<uint64_t>{};
+                seen_trace_ids.reserve(map_entries.size());
                 for (const auto* map_entry : map_entries) {
-                    if (mem_trace_map_matches_row(row, *map_entry)) {
-                        matching_map_entries.push_back(map_entry);
+                    if (!mem_trace_map_matches_row(row, *map_entry)) {
+                        continue;
                     }
-                }
-                for (const auto* map_entry : matching_map_entries) {
-                    auto trace_id = map_entry->trace_id;
-                    if (auto event_it = events_by_trace_id.find(trace_id); event_it != events_by_trace_id.end()) {
+                    if (!seen_trace_ids.insert(map_entry->trace_id).second) {
+                        continue;
+                    }
+                    if (auto event_it = events_by_trace_id.find(map_entry->trace_id);
+                        event_it != events_by_trace_id.end()) {
                         for (const auto* event : event_it->second) {
                             if (event->access == row.access || row.access == internal::mem::access_kind::rmw ||
                                 event->access == internal::mem::access_kind::rmw) {
@@ -4900,7 +4987,10 @@ examples:
                 return matches;
             };
 
-            for (auto& row : summary.rows) {
+            auto row_candidate_events = std::vector<std::vector<const mem_trace_event_record*>>(summary.rows.size());
+
+            for (size_t row_index = 0U; row_index < summary.rows.size(); ++row_index) {
+                auto& row = summary.rows[row_index];
                 if (!row.symbol.has_value() && (row.mnemonic == "push"sv || row.mnemonic == "pop"sv ||
                                                 row.mnemonic == "call"sv || row.mnemonic == "ret"sv)) {
                     continue;
@@ -4908,15 +4998,15 @@ examples:
 
                 auto candidate_events = std::vector<const mem_trace_event_record*>{};
 
-                // primary matching via ir_line_hints
+                // primary matching via all ir_line_hints (aggregate first, then resolve)
+                auto hinted_map_entries = std::vector<const mem_trace_map_record*>{};
                 for (const auto ir_line : row.ir_line_hints) {
                     if (auto it = map_entries_by_line.find(ir_line); it != map_entries_by_line.end()) {
-                        auto matches = collect_events_for_map_entries(it->second, row);
-                        if (!matches.empty()) {
-                            candidate_events = std::move(matches);
-                            break;
-                        }
+                        hinted_map_entries.insert(hinted_map_entries.end(), it->second.begin(), it->second.end());
                     }
+                }
+                if (!hinted_map_entries.empty()) {
+                    candidate_events = collect_events_for_map_entries(hinted_map_entries, row);
                 }
 
                 // fallback: scan all map entries matching by access + symbol
@@ -4959,6 +5049,114 @@ examples:
                 std::ranges::sort(candidate_events, [](const auto* lhs, const auto* rhs) {
                     return lhs->sequence < rhs->sequence;
                 });
+                row_candidate_events[row_index] = std::move(candidate_events);
+            }
+
+            auto alias_group_address_counts = std::unordered_map<size_t, std::unordered_map<uint64_t, size_t>>{};
+            for (size_t row_index = 0U; row_index < summary.rows.size(); ++row_index) {
+                auto& row = summary.rows[row_index];
+                auto& candidate_events = row_candidate_events[row_index];
+                if (!row.alias_group.has_value() || candidate_events.empty()) {
+                    continue;
+                }
+                auto& address_counts = alias_group_address_counts[*row.alias_group];
+                for (const auto* event : candidate_events) {
+                    ++address_counts[event->address];
+                }
+            }
+
+            auto alias_groups = std::vector<size_t>{};
+            alias_groups.reserve(alias_group_address_counts.size());
+            for (const auto& [alias_group, _] : alias_group_address_counts) {
+                alias_groups.push_back(alias_group);
+            }
+            std::ranges::sort(alias_groups);
+
+            auto preferred_address_by_alias_group = std::unordered_map<size_t, uint64_t>{};
+            auto used_addresses = std::unordered_set<uint64_t>{};
+
+            for (const auto alias_group : alias_groups) {
+                auto counts_it = alias_group_address_counts.find(alias_group);
+                if (counts_it == alias_group_address_counts.end()) {
+                    continue;
+                }
+                const auto& address_counts = counts_it->second;
+                if (address_counts.size() != 1U) {
+                    continue;
+                }
+                auto only = address_counts.begin();
+                preferred_address_by_alias_group.emplace(alias_group, only->first);
+                used_addresses.insert(only->first);
+            }
+
+            for (const auto alias_group : alias_groups) {
+                if (preferred_address_by_alias_group.contains(alias_group)) {
+                    continue;
+                }
+                auto counts_it = alias_group_address_counts.find(alias_group);
+                if (counts_it == alias_group_address_counts.end()) {
+                    continue;
+                }
+                const auto& address_counts = counts_it->second;
+                if (address_counts.empty()) {
+                    continue;
+                }
+
+                auto selected_address = uint64_t{0U};
+                auto selected_count = size_t{0U};
+                auto selected_used = true;
+                auto has_selected = false;
+                for (const auto& [address, count] : address_counts) {
+                    auto candidate_used = used_addresses.contains(address);
+                    auto choose = false;
+                    if (!has_selected) {
+                        choose = true;
+                    }
+                    else if (selected_used != candidate_used) {
+                        choose = selected_used && !candidate_used;
+                    }
+                    else if (count != selected_count) {
+                        choose = count > selected_count;
+                    }
+                    else if (address != selected_address) {
+                        choose = address < selected_address;
+                    }
+
+                    if (choose) {
+                        selected_address = address;
+                        selected_count = count;
+                        selected_used = candidate_used;
+                        has_selected = true;
+                    }
+                }
+                if (has_selected) {
+                    preferred_address_by_alias_group.emplace(alias_group, selected_address);
+                    used_addresses.insert(selected_address);
+                }
+            }
+
+            for (size_t row_index = 0U; row_index < summary.rows.size(); ++row_index) {
+                auto& row = summary.rows[row_index];
+                auto& candidate_events = row_candidate_events[row_index];
+                if (candidate_events.empty()) {
+                    continue;
+                }
+
+                if (row.alias_group.has_value()) {
+                    if (auto preferred_it = preferred_address_by_alias_group.find(*row.alias_group);
+                        preferred_it != preferred_address_by_alias_group.end()) {
+                        auto preferred_address = preferred_it->second;
+                        auto has_preferred = std::ranges::any_of(
+                                candidate_events, [preferred_address](const mem_trace_event_record* event) {
+                                    return event->address == preferred_address;
+                                });
+                        if (has_preferred) {
+                            std::erase_if(candidate_events, [preferred_address](const mem_trace_event_record* event) {
+                                return event->address != preferred_address;
+                            });
+                        }
+                    }
+                }
 
                 auto mark_trace_exact = [&row]() {
                     row.observed_value_status = internal::mem::value_status::known;
@@ -4995,32 +5193,9 @@ examples:
                         auto after =
                                 format_runtime_hex(latest_store->value, static_cast<size_t>(latest_store->width_bytes));
                         row.observed_value = "{}\u2192{}"_format(before, after);
-                        auto distinct_pairs = std::set<std::string>{};
-                        std::optional<std::string> pending_before{};
-                        for (const auto* event : candidate_events) {
-                            if (event->access == internal::mem::access_kind::load) {
-                                pending_before =
-                                        format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes));
-                                continue;
-                            }
-                            if (event->access == internal::mem::access_kind::store && pending_before.has_value()) {
-                                auto sampled_after =
-                                        format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes));
-                                distinct_pairs.insert("{}\u2192{}"_format(*pending_before, sampled_after));
-                                pending_before.reset();
-                            }
-                        }
-                        if (distinct_pairs.empty()) {
-                            auto distinct_values = std::set<std::string>{};
-                            for (const auto* event : candidate_events) {
-                                distinct_values.insert(
-                                        format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes)));
-                            }
-                            row.value_variation_count = distinct_values.size();
-                        }
-                        else {
-                            row.value_variation_count = distinct_pairs.size();
-                        }
+                        auto distinct_pairs = count_distinct_runtime_rmw_pairs(candidate_events);
+                        row.value_variation_count =
+                                distinct_pairs > 0U ? distinct_pairs : count_distinct_runtime_values(candidate_events);
                         if (row.value_variation_count <= 1U) {
                             mark_trace_exact();
                         }
@@ -5029,16 +5204,12 @@ examples:
                         }
                     }
                     else {
-                        auto distinct_values = std::set<std::string>{};
-                        for (const auto* event : candidate_events) {
-                            distinct_values.insert(
-                                    format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes)));
-                        }
+                        auto distinct_values = count_distinct_runtime_values(candidate_events);
                         row.observed_value =
-                                distinct_values.size() <= 1U
+                                distinct_values <= 1U
                                         ? format_runtime_hex(latest->value, static_cast<size_t>(latest->width_bytes))
                                         : std::string{"<varied>"};
-                        row.value_variation_count = distinct_values.size();
+                        row.value_variation_count = distinct_values;
                         if (row.value_variation_count <= 1U) {
                             mark_trace_exact();
                         }
@@ -5051,18 +5222,14 @@ examples:
                                             : std::optional<size_t>{static_cast<size_t>(latest->width_bytes)};
                 }
                 else {
-                    auto distinct_values = std::set<std::string>{};
-                    for (const auto* event : candidate_events) {
-                        distinct_values.insert(
-                                format_runtime_hex(event->value, static_cast<size_t>(event->width_bytes)));
-                    }
+                    auto distinct_values = count_distinct_runtime_values(candidate_events);
                     auto* latest = candidate_events.back();
                     row.runtime_address = latest->address;
                     row.observed_value =
-                            distinct_values.size() <= 1U
+                            distinct_values <= 1U
                                     ? format_runtime_hex(latest->value, static_cast<size_t>(latest->width_bytes))
                                     : std::string{"<varied>"};
-                    row.value_variation_count = distinct_values.size();
+                    row.value_variation_count = distinct_values;
                     if (row.value_variation_count <= 1U) {
                         mark_trace_exact();
                     }
@@ -5540,6 +5707,7 @@ examples:
         static void render_mem_artifact_summary_and_body(
                 std::string_view symbol_display,
                 const mem_summary& summary,
+                std::string_view unchanged_color,
                 std::string_view modified_color,
                 bool static_link_enabled,
                 std::ostream& os) {
@@ -5554,15 +5722,24 @@ examples:
                     summary.alias_groups);
             os << "  stack={} | globals={} | unknown={}\n"_format(
                     summary.totals.stack, summary.totals.globals, summary.totals.unknown);
-            if (summary.trace_enabled && summary.trace_exit_code.has_value() && *summary.trace_exit_code != 0) {
-                auto trace_line = "  trace: enabled (exit_code={})"_format(*summary.trace_exit_code);
-                if (!modified_color.empty()) {
-                    auto marker = " (exit_code="sv;
-                    if (auto marker_pos = trace_line.find(marker); marker_pos != std::string::npos) {
-                        trace_line = colorize_asm_text_span(trace_line, marker_pos, trace_line.size(), modified_color);
+            if (summary.trace_enabled) {
+                os << "  trace: ";
+                if (!unchanged_color.empty()) {
+                    os << unchanged_color << "enabled" << "\x1b[0m";
+                }
+                else {
+                    os << "enabled";
+                }
+                if (summary.trace_exit_code.has_value() && *summary.trace_exit_code != 0) {
+                    auto exit_code_text = " (exit_code={})"_format(*summary.trace_exit_code);
+                    if (!modified_color.empty()) {
+                        os << modified_color << exit_code_text << "\x1b[0m";
+                    }
+                    else {
+                        os << exit_code_text;
                     }
                 }
-                os << trace_line << '\n';
+                os << '\n';
             }
             else if (!summary.trace_enabled) {
                 if (!static_link_enabled) {
@@ -7298,13 +7475,20 @@ examples:
                     return true;
                 }
 
+                auto unchanged_color = std::string_view{};
                 auto modified_color = std::string_view{};
                 if (should_use_color(cfg.color)) {
                     auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                    unchanged_color = palette.unchanged;
                     modified_color = palette.modified;
                 }
                 render_mem_artifact_summary_and_body(
-                        mem_data.symbol_display, mem_data.summary, modified_color, request.static_link, out);
+                        mem_data.symbol_display,
+                        mem_data.summary,
+                        unchanged_color,
+                        modified_color,
+                        request.static_link,
+                        out);
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());
             }
@@ -7378,13 +7562,20 @@ examples:
                     return true;
                 }
 
+                auto unchanged_color = std::string_view{};
                 auto modified_color = std::string_view{};
                 if (should_use_color(cfg.color)) {
                     auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                    unchanged_color = palette.unchanged;
                     modified_color = palette.modified;
                 }
                 render_mem_artifact_summary_and_body(
-                        mem_data.symbol_display, mem_data.summary, modified_color, request.static_link, out);
+                        mem_data.symbol_display,
+                        mem_data.summary,
+                        unchanged_color,
+                        modified_color,
+                        request.static_link,
+                        out);
             } catch (const std::exception& e) {
                 err << "analysis error: {}\n"_format(e.what());
             }
@@ -7561,9 +7752,11 @@ examples:
             }
 
             try {
+                auto static_mem_unchanged_color = std::string_view{};
                 auto static_mem_modified_color = std::string_view{};
                 if (should_use_color(cfg.color)) {
                     auto palette = resolve_delta_color_palette(cfg.delta_color_scheme);
+                    static_mem_unchanged_color = palette.unchanged;
                     static_mem_modified_color = palette.modified;
                 }
 
@@ -7610,6 +7803,7 @@ examples:
                         render_mem_artifact_summary_and_body(
                                 mem_data.symbol_display,
                                 mem_data.summary,
+                                static_mem_unchanged_color,
                                 static_mem_modified_color,
                                 request.static_link,
                                 out);

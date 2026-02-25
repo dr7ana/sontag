@@ -130,6 +130,29 @@ namespace sontag::test {
             script << "fi\n";
             return script.str();
         }
+
+        static std::string make_mca_wrapper_script() {
+            std::ostringstream script{};
+            script << "#!/usr/bin/env bash\n";
+            script << "cat <<'EOF'\n";
+            script << "Iterations:        100\n";
+            script << "Instructions:      200\n";
+            script << "Total Cycles:      57\n";
+            script << "Total uOps:        200\n";
+            script << "Dispatch Width:    6\n";
+            script << "uOps Per Cycle:    3.51\n";
+            script << "IPC:               3.51\n";
+            script << "Block RThroughput: 0.5\n";
+            script << "Resources:\n";
+            script << "[0]   - ALU\n";
+            script << "[1]   - LSU\n";
+            script << "\n";
+            script << "Resource pressure per iteration:\n";
+            script << "[0]    [1]\n";
+            script << "0.50   0.25\n";
+            script << "EOF\n";
+            return script.str();
+        }
     }  // namespace detail
 
     TEST_CASE("003: analysis pipeline emits asm ir and diagnostics", "[003][analysis]") {
@@ -189,6 +212,8 @@ namespace sontag::test {
         REQUIRE(ir_result.success);
         REQUIRE_FALSE(asm_result.command.empty());
         REQUIRE_FALSE(ir_result.command.empty());
+        CHECK(asm_result.source_path == ir_result.source_path);
+        CHECK(asm_result.source_path.filename() == "source.cpp");
         CHECK(asm_result.source_path.parent_path() == ir_result.source_path.parent_path());
         CHECK(asm_result.source_path.parent_path().filename() == asm_result.artifact_path.parent_path().filename());
         CHECK(ir_result.source_path.parent_path().filename() == ir_result.artifact_path.parent_path().filename());
@@ -277,6 +302,161 @@ namespace sontag::test {
         CHECK(cached_result.operations.size() == cold_result.operations.size());
     }
 
+    TEST_CASE("003: graph cfg cache hit preserves summary", "[003][analysis][cache][graph]") {
+        detail::temp_dir temp{"sontag_m3_graph_cfg_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+
+        auto cold_result = run_analysis(request, analysis_kind::graph_cfg);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("function: ") != std::string::npos);
+        CHECK(cold_result.artifact_text.find("dot: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::graph_cfg);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: graph call cache hit preserves summary", "[003][analysis][cache][graph]") {
+        detail::temp_dir temp{"sontag_m3_graph_call_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {
+                "int leaf(int x) { return x + 1; }\n"
+                "int helper(int y) { return leaf(y) * 2; }\n"
+                "int top(int z) { return helper(z) + leaf(z); }\n"};
+        request.symbol = "top";
+
+        auto cold_result = run_analysis(request, analysis_kind::graph_call);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("root: ") != std::string::npos);
+        CHECK(cold_result.artifact_text.find("dot: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::graph_call);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: graph defuse cache hit preserves summary", "[003][analysis][cache][graph]") {
+        detail::temp_dir temp{"sontag_m3_graph_defuse_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {
+                "int foo(int x) {\n"
+                "  auto a = x + 1;\n"
+                "  auto b = a * 2;\n"
+                "  return b;\n"
+                "}\n"};
+        request.symbol = "foo";
+
+        auto cold_result = run_analysis(request, analysis_kind::graph_defuse);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("function: ") != std::string::npos);
+        CHECK(cold_result.artifact_text.find("dot: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::graph_defuse);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: inspect asm cache hit preserves summary", "[003][analysis][cache][inspect]") {
+        detail::temp_dir temp{"sontag_m3_inspect_asm_cache_hit"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+
+        auto cold_result = run_analysis(request, analysis_kind::inspect_asm_map);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("json: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::inspect_asm_map);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: inspect mca summary cache hit preserves summary", "[003][analysis][cache][inspect]") {
+        detail::temp_dir temp{"sontag_m3_inspect_mca_summary_cache_hit"};
+        auto tool_dir = temp.path / "tools";
+        detail::fs::create_directories(tool_dir);
+
+        auto mca_wrapper = tool_dir / "llvm-mca";
+        detail::make_executable_file(mca_wrapper, detail::make_mca_wrapper_script());
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.mca_path = mca_wrapper;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        request.symbol = "add";
+
+        auto cold_result = run_analysis(request, analysis_kind::inspect_mca_summary);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("iterations: 100") != std::string::npos);
+        CHECK(cold_result.artifact_text.find("json: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::inspect_mca_summary);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE("003: inspect mca heatmap cache hit preserves summary", "[003][analysis][cache][inspect]") {
+        detail::temp_dir temp{"sontag_m3_inspect_mca_heatmap_cache_hit"};
+        auto tool_dir = temp.path / "tools";
+        detail::fs::create_directories(tool_dir);
+
+        auto mca_wrapper = tool_dir / "llvm-mca";
+        detail::make_executable_file(mca_wrapper, detail::make_mca_wrapper_script());
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.mca_path = mca_wrapper;
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        request.symbol = "add";
+
+        auto cold_result = run_analysis(request, analysis_kind::inspect_mca_heatmap);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK(cold_result.artifact_text.find("heatmap rows: ") != std::string::npos);
+        CHECK(cold_result.artifact_text.find("json: ") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::inspect_mca_heatmap);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
     TEST_CASE("003: mem_trace command reflects static vs dynamic link policy", "[003][analysis][link]") {
         detail::temp_dir temp{"sontag_m1_link_policy"};
 
@@ -340,6 +520,39 @@ namespace sontag::test {
         CHECK_FALSE(diag_result.success);
         CHECK(diag_result.artifact_text.find("foo") != std::string::npos);
         CHECK(diag_result.artifact_text.find("bar") == std::string::npos);
+    }
+
+    TEST_CASE(
+            "003: asm symbol resolution falls back to linked dump for runtime library symbols",
+            "[003][analysis][symbol][asm]") {
+        detail::temp_dir temp{"sontag_m3_asm_runtime_symbol_fallback"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {
+                "#include <condition_variable>\n"
+                "#include <mutex>\n"
+                "std::condition_variable cv;\n"
+                "std::mutex m;\n"};
+        request.exec_cells = {
+                "std::lock_guard<std::mutex> guard(m);\n"
+                "cv.notify_one();\n"};
+        request.libraries = {"pthread"};
+        request.symbol = "_ZNSt3__118condition_variable10notify_oneEv";
+
+        auto cold_result = run_analysis(request, analysis_kind::asm_text);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        CHECK_FALSE(cold_result.artifact_text.empty());
+        CHECK(cold_result.artifact_text.find("pthread_cond_signal") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::asm_text);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
     }
 
     TEST_CASE("003: in-process command sequence runs all analysis kinds", "[003][analysis][sequence]") {

@@ -860,6 +860,20 @@ namespace sontag {
             return kind == analysis_kind::asm_text || kind == analysis_kind::ir || kind == analysis_kind::dump;
         }
 
+        static bool supports_summary_cache_hit(analysis_kind kind) {
+            return kind == analysis_kind::graph_cfg || kind == analysis_kind::graph_call ||
+                   kind == analysis_kind::graph_defuse || kind == analysis_kind::inspect_asm_map ||
+                   kind == analysis_kind::inspect_mca_summary || kind == analysis_kind::inspect_mca_heatmap;
+        }
+
+        static fs::path summary_sidecar_path_for_artifact(const fs::path& artifact_path) {
+            return fs::path{artifact_path.string() + ".summary.txt"};
+        }
+
+        static void write_summary_sidecar(const fs::path& artifact_path, std::string_view summary_text) {
+            (void)write_text_file(summary_sidecar_path_for_artifact(artifact_path), summary_text);
+        }
+
         static std::optional<analysis_result> try_load_cached_text_artifact_result(
                 analysis_kind kind,
                 const fs::path& source_path,
@@ -890,6 +904,35 @@ namespace sontag {
                         opcode::operation_stream_input{.name = "asm", .disassembly = cached_result.artifact_text}};
                 attach_opcode_mapping(cached_result, dump_streams);
             }
+            return cached_result;
+        }
+
+        static std::optional<analysis_result> try_load_cached_summary_result(
+                analysis_kind kind,
+                const fs::path& source_path,
+                const fs::path& artifact_path,
+                const fs::path& stdout_path,
+                const fs::path& stderr_path) {
+            if (!supports_summary_cache_hit(kind)) {
+                return std::nullopt;
+            }
+
+            auto summary_text = read_text_file(summary_sidecar_path_for_artifact(artifact_path));
+            auto artifact_payload = read_text_file(artifact_path);
+            if (trim_ascii(summary_text).empty() || trim_ascii(artifact_payload).empty()) {
+                return std::nullopt;
+            }
+
+            auto cached_result = analysis_result{
+                    .kind = kind,
+                    .success = true,
+                    .exit_code = 0,
+                    .source_path = source_path,
+                    .artifact_path = artifact_path,
+                    .stdout_path = stdout_path,
+                    .stderr_path = stderr_path,
+                    .artifact_text = std::move(summary_text),
+                    .diagnostics_text = read_text_file(stderr_path)};
             return cached_result;
         }
 
@@ -981,6 +1024,7 @@ namespace sontag {
         namespace arg_tokens {
             static constexpr auto std_prefix = "-std="sv;
             static constexpr auto opt_prefix = "-"sv;
+            static constexpr auto stdlib_libcpp = "-stdlib=libc++"sv;
             static constexpr auto target_prefix = "--target="sv;
             static constexpr auto cpu_prefix = "-mcpu="sv;
             static constexpr auto mtriple_prefix = "-mtriple="sv;
@@ -1059,8 +1103,9 @@ namespace sontag {
 
         static std::vector<std::string> base_clang_args(const analysis_request& request) {
             std::vector<std::string> base_args{};
-            base_args.reserve(9U);
+            base_args.reserve(10U);
             base_args.push_back(request.clang_path.string());
+            base_args.emplace_back(arg_tokens::stdlib_libcpp);
             append_prefixed_arg(base_args, arg_tokens::std_prefix, request.language_standard);
             append_prefixed_arg(base_args, arg_tokens::opt_prefix, request.opt_level);
             append_optional_prefixed_arg(base_args, arg_tokens::target_prefix, request.target_triple);
@@ -1544,8 +1589,10 @@ namespace sontag {
 
         static std::optional<std::vector<analysis_symbol>> try_collect_defined_symbols(
                 const analysis_request& request) {
-            auto inputs_dir = request.session_dir / "artifacts" / "inputs";
-            auto source_path = inputs_dir / "symbol_index.cpp";
+            auto source_text = render_source(request.decl_cells, request.exec_cells);
+            auto build_unit_hash = make_build_unit_hash(request, source_text);
+            auto inputs_dir = request.session_dir / "artifacts" / "inputs" / build_unit_hash;
+            auto source_path = inputs_dir / "source.cpp";
             auto object_path = inputs_dir / "symbol_index.o";
             auto clang_stdout_path = inputs_dir / "symbol_index.clang.stdout.txt";
             auto clang_stderr_path = inputs_dir / "symbol_index.clang.stderr.txt";
@@ -1553,7 +1600,7 @@ namespace sontag {
             auto nm_stderr_path = inputs_dir / "symbol_index.nm.stderr.txt";
 
             ensure_dir(inputs_dir);
-            write_text_file(source_path, render_source(request.decl_cells, request.exec_cells));
+            write_text_file(source_path, source_text);
 
             auto collect_symbols_from_target = [&](const fs::path& target_path,
                                                    bool from_object) -> std::optional<std::vector<analysis_symbol>> {
@@ -3843,7 +3890,7 @@ namespace sontag {
         detail::ensure_dir(kind_dir);
 
         auto id = detail::make_artifact_id(build_unit_hash, request, kind);
-        auto source_path = inputs_dir / (id + ".cpp");
+        auto source_path = inputs_dir / "source.cpp";
 
         std::string extension{};
         switch (kind) {
@@ -3897,10 +3944,15 @@ namespace sontag {
         result.stdout_path = stdout_path;
         result.stderr_path = stderr_path;
 
-        if (auto cached_text_result =
-                    detail::try_load_cached_text_artifact_result(kind, source_path, artifact_path, stdout_path, stderr_path);
+        if (auto cached_text_result = detail::try_load_cached_text_artifact_result(
+                    kind, source_path, artifact_path, stdout_path, stderr_path);
             cached_text_result.has_value()) {
             return std::move(*cached_text_result);
+        }
+        if (auto cached_summary_result =
+                    detail::try_load_cached_summary_result(kind, source_path, artifact_path, stdout_path, stderr_path);
+            cached_summary_result.has_value()) {
+            return std::move(*cached_summary_result);
         }
 
         if (kind == analysis_kind::mem_trace) {
@@ -4262,6 +4314,7 @@ namespace sontag {
             result.command = std::move(compile_command);
             result.artifact_text = std::move(artifact_text);
             result.diagnostics_text = std::move(diagnostics_text);
+            detail::write_summary_sidecar(artifact_path, result.artifact_text);
             return result;
         }
 
@@ -4391,6 +4444,7 @@ namespace sontag {
                     payload.asm_lines.size(),
                     artifact_path.string());
             result.diagnostics_text = std::move(diagnostics_text);
+            detail::write_summary_sidecar(artifact_path, result.artifact_text);
             return result;
         }
 
@@ -4513,6 +4567,7 @@ namespace sontag {
             result.command = std::move(mca_result.command);
             result.artifact_text = std::move(artifact_summary);
             result.diagnostics_text = std::move(mca_result.diagnostics_text);
+            detail::write_summary_sidecar(artifact_path, result.artifact_text);
             return result;
         }
 
@@ -4797,6 +4852,23 @@ namespace sontag {
                 }
                 else if (kind == analysis_kind::ir) {
                     extracted = detail::extract_ir_for_symbol(result.artifact_text, *resolved);
+                }
+
+                if (extracted.empty()) {
+                    if (kind == analysis_kind::asm_text) {
+                        auto dump_result = run_analysis(request, analysis_kind::dump);
+                        if (dump_result.success && !detail::trim_ascii(dump_result.artifact_text).empty()) {
+                            extracted = std::move(dump_result.artifact_text);
+                        }
+                        else {
+                            auto details = dump_result.diagnostics_text.empty()
+                                                 ? "symbol not found in artifact: {}"_format(*resolved)
+                                                 : detail::join_text(
+                                                           dump_result.diagnostics_text,
+                                                           "symbol not found in artifact: {}"_format(*resolved));
+                            throw std::runtime_error(details);
+                        }
+                    }
                 }
 
                 if (extracted.empty()) {

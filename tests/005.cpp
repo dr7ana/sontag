@@ -1,5 +1,7 @@
 #include "utils.hpp"
 
+#include "../src/internal/explorer.hpp"
+
 namespace sontag::test { namespace detail {
     struct temp_dir {
         fs::path path{};
@@ -550,6 +552,47 @@ namespace sontag::test {
         CHECK(detail::has_merkle_node_artifacts(cache_root / "traces"));
     }
 
+    TEST_CASE("005: reset last returns to prior build-hash cache branch", "[005][session][cache][reset_last]") {
+        detail::temp_dir temp{"sontag_cache_reset_last_merkle_stepback"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int seed = 1;\n"
+                "int x = seed + 1;\n"
+                ":asm\n"
+                "int y = x + 2;\n"
+                ":asm\n"
+                ":reset last\n"
+                ":asm\n"
+                ":quit\n");
+
+        CHECK(output.out.find("cleared last transaction (cleared decl=0, exec=1) -> state: valid") !=
+              std::string::npos);
+        CHECK(output.err.empty());
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto inputs_dirs = detail::list_directory_children(session_dir / "artifacts" / "inputs");
+        auto asm_dirs = detail::list_directory_children(session_dir / "artifacts" / "asm");
+
+        auto count_dirs = [](const std::vector<detail::fs::path>& entries) {
+            size_t count = 0U;
+            for (const auto& entry : entries) {
+                if (detail::fs::is_directory(entry)) {
+                    ++count;
+                }
+            }
+            return count;
+        };
+
+        CHECK(count_dirs(inputs_dirs) >= 2U);
+        CHECK(count_dirs(asm_dirs) == 2U);
+    }
+
     TEST_CASE("005: reset snapshots clears named snapshots and keeps current", "[005][session][reset_snapshots]") {
         detail::temp_dir temp{"sontag_reset_snapshots"};
 
@@ -862,6 +905,19 @@ namespace sontag::test {
         CHECK(output.err.empty());
     }
 
+    TEST_CASE("005: call target extraction ignores template argument lists", "[005][session][asm][explore]") {
+        using internal::explorer::detail::extract_call_target_symbol;
+
+        auto wrapped = extract_call_target_symbol("call 0x401120 <waiter()>");
+        REQUIRE(wrapped.has_value());
+        CHECK(*wrapped == "waiter()");
+
+        auto templated =
+                extract_call_target_symbol("call std::__1::thread::thread[abi:ne210108]<void (&)(), 0>(void (&)())");
+        REQUIRE(templated.has_value());
+        CHECK(*templated == "std::__1::thread::thread[abi:ne210108]<void (&)(), 0>(void (&)())");
+    }
+
     TEST_CASE("005: mem reports trace disabled message in dynamic mode", "[005][session][mem]") {
         detail::temp_dir temp{"sontag_mem_dynamic_trace_message"};
 
@@ -905,6 +961,30 @@ namespace sontag::test {
         CHECK(output.err.empty());
     }
 
+    TEST_CASE("005: mem static mode reports bool stores as 0x01", "[005][session][mem]") {
+        detail::temp_dir temp{"sontag_mem_static_bool_true_value"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.color = color_mode::never;
+        cfg.static_link = true;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl bool ready = false;\n"
+                "ready = true;\n"
+                ":mem\n"
+                ":quit\n");
+
+        CHECK(output.out.find("mem:") != std::string::npos);
+        CHECK(output.out.find("trace: enabled") != std::string::npos);
+        CHECK(output.out.find("ready") != std::string::npos);
+        CHECK(output.out.find("0x01") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
     TEST_CASE("005: mem reports nonzero trace exit inline while keeping trace data", "[005][session][mem]") {
         detail::temp_dir temp{"sontag_mem_trace_nonzero_exit"};
 
@@ -927,6 +1007,7 @@ namespace sontag::test {
         CHECK(output.out.find("trace: enabled (exit_code=9)") != std::string::npos);
         CHECK(output.out.find("trace: unavailable (compilation or execution failed)") == std::string::npos);
         CHECK(output.out.find("0x00000003") != std::string::npos);
+        CHECK(output.out.find("0x00000009") != std::string::npos);
         CHECK(output.err.empty());
     }
 
@@ -950,6 +1031,7 @@ namespace sontag::test {
 
         CHECK(output.out.find("\"command\":\"inspect mem\"") != std::string::npos);
         CHECK(output.out.find("\"observed_value\":\"0x00000003\"") != std::string::npos);
+        CHECK(output.out.find("\"observed_value\":\"0x00000009\"") != std::string::npos);
         CHECK(output.out.find("\"value_status\":\"known\"") != std::string::npos);
         CHECK(output.out.find("\"value_source\":\"runtime_trace_exact\"") != std::string::npos);
         CHECK(output.err.empty());
@@ -989,7 +1071,6 @@ namespace sontag::test {
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
         cfg.output = output_mode::json;
-
         auto output = detail::run_repl_script_capture_output(
                 cfg,
                 ":decl int square(int x) { int y = x * x; return y; }\n"
