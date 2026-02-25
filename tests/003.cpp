@@ -1265,4 +1265,74 @@ namespace sontag::test {
         CHECK(trace_result.artifact_text.find("event_count=0") == std::string::npos);
     }
 
+    TEST_CASE("003: import-backed graph cfg resolves symbol from selected translation unit", "[003][analysis][import][graph]") {
+        detail::temp_dir temp{"sontag_m1_import_graph_cfg_symbol"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        auto math_path = src_dir / "math.cpp";
+        detail::write_text_file(
+                math_path,
+                "int square(int x) {\n"
+                "    return x * x;\n"
+                "}\n");
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int __import_graph_anchor = 0;"};
+        request.symbol = "square";
+        request.import_context = analysis_import_context{
+                .mode = "library", .roots = {src_dir}, .files = {math_path}, .main_files = {}, .entry = std::nullopt};
+
+        auto graph_result = run_analysis(request, analysis_kind::graph_cfg);
+        REQUIRE(graph_result.success);
+        CHECK(graph_result.exit_code == 0);
+        CHECK(graph_result.artifact_text.find("function: ") != std::string::npos);
+        CHECK(graph_result.artifact_text.find("square") != std::string::npos);
+        CHECK(graph_result.artifact_text.find("dot: ") != std::string::npos);
+
+        auto dot_text = detail::read_text_file(graph_result.artifact_path);
+        CHECK(dot_text.find("digraph cfg_") != std::string::npos);
+    }
+
+    TEST_CASE("003: import-backed inspect asm resolves symbol from selected translation unit", "[003][analysis][import][inspect]") {
+        detail::temp_dir temp{"sontag_m1_import_inspect_asm_symbol"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        auto math_path = src_dir / "math.cpp";
+        detail::write_text_file(
+                math_path,
+                "int square(int x) {\n"
+                "    return x * x;\n"
+                "}\n");
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int __import_inspect_anchor = 0;"};
+        request.symbol = "square";
+        request.import_context = analysis_import_context{
+                .mode = "library", .roots = {src_dir}, .files = {math_path}, .main_files = {}, .entry = std::nullopt};
+
+        auto inspect_result = run_analysis(request, analysis_kind::inspect_asm_map);
+        REQUIRE(inspect_result.success);
+        CHECK(inspect_result.exit_code == 0);
+        CHECK(inspect_result.artifact_text.find("symbol: ") != std::string::npos);
+        CHECK(inspect_result.artifact_text.find("square") != std::string::npos);
+
+        auto payload_json = detail::read_text_file(inspect_result.artifact_path);
+        CHECK(payload_json.find("\"schema_version\":1") != std::string::npos);
+        CHECK(payload_json.find("\"symbol_display\":\"square(int)\"") != std::string::npos);
+        CHECK(payload_json.find("\"ir\"") != std::string::npos);
+        CHECK(payload_json.find("\"asm\"") != std::string::npos);
+    }
+
 }  // namespace sontag::test

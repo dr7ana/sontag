@@ -5096,24 +5096,32 @@ namespace sontag {
 
         if (kind == analysis_kind::graph_cfg || kind == analysis_kind::graph_call ||
             kind == analysis_kind::graph_defuse) {
-            auto ir_path = kind_dir / (id + ".graph.ll");
-            auto compile_command = detail::build_command(request, analysis_kind::ir, source_path, ir_path);
-            auto compile_exit = detail::run_process(compile_command, stdout_path, stderr_path);
-            auto compile_stdout = detail::read_text_file(stdout_path);
-            auto compile_stderr = detail::read_text_file(stderr_path);
+            auto ir_request = request;
+            ir_request.symbol.reset();
 
-            if (compile_exit != 0) {
-                detail::write_text_file(artifact_path, compile_stdout);
+            auto ir_result = run_analysis(ir_request, analysis_kind::ir);
+            if (!ir_result.success) {
+                auto ir_stdout = detail::read_text_file(ir_result.stdout_path);
+                if (ir_stdout.empty()) {
+                    ir_stdout = ir_result.artifact_text;
+                }
+                detail::write_text_file(stdout_path, ir_stdout);
+                detail::write_text_file(stderr_path, ir_result.diagnostics_text);
+                detail::write_text_file(artifact_path, ir_result.artifact_text);
 
-                result.exit_code = compile_exit;
+                result.exit_code = ir_result.exit_code;
                 result.success = false;
-                result.command = std::move(compile_command);
-                result.artifact_text = std::move(compile_stdout);
-                result.diagnostics_text = std::move(compile_stderr);
+                result.command = std::move(ir_result.command);
+                result.artifact_text = std::move(ir_result.artifact_text);
+                result.diagnostics_text = std::move(ir_result.diagnostics_text);
                 return result;
             }
 
-            auto ir_text = detail::read_text_file(ir_path);
+            auto ir_text = ir_result.artifact_text;
+            auto ir_stdout_text = detail::read_text_file(ir_result.stdout_path);
+            if (ir_stdout_text.empty()) {
+                ir_stdout_text = ir_result.artifact_text;
+            }
             auto defined_symbols = detail::try_collect_defined_symbols(request);
 
             std::optional<std::string> resolved_symbol{};
@@ -5206,7 +5214,7 @@ namespace sontag {
             }
             detail::write_text_file(artifact_path, dot_text);
 
-            auto diagnostics_text = compile_stderr;
+            auto diagnostics_text = ir_result.diagnostics_text;
             auto graph_format = detail::normalize_graph_format(request.graph_format);
             std::optional<fs::path> rendered_path{};
 
@@ -5260,6 +5268,7 @@ namespace sontag {
                 }
             }
 
+            detail::write_text_file(stdout_path, ir_stdout_text);
             detail::write_text_file(stderr_path, diagnostics_text);
 
             auto artifact_text = artifact_summary;
@@ -5272,7 +5281,7 @@ namespace sontag {
 
             result.exit_code = 0;
             result.success = true;
-            result.command = std::move(compile_command);
+            result.command = std::move(ir_result.command);
             result.artifact_text = std::move(artifact_text);
             result.diagnostics_text = std::move(diagnostics_text);
             detail::write_summary_sidecar(artifact_path, result.artifact_text);
@@ -5280,40 +5289,47 @@ namespace sontag {
         }
 
         if (kind == analysis_kind::inspect_asm_map) {
-            auto asm_path = kind_dir / (id + ".viz.s");
-            auto ir_path = kind_dir / (id + ".viz.ll");
+            auto inspect_request = request;
+            inspect_request.symbol.reset();
 
-            auto asm_stdout_path = kind_dir / (id + ".asm.stdout.txt");
-            auto asm_stderr_path = kind_dir / (id + ".asm.stderr.txt");
-            auto ir_stdout_path = kind_dir / (id + ".ir.stdout.txt");
-            auto ir_stderr_path = kind_dir / (id + ".ir.stderr.txt");
+            auto asm_result = run_analysis(inspect_request, analysis_kind::asm_text);
+            if (!asm_result.success) {
+                auto asm_stdout = detail::read_text_file(asm_result.stdout_path);
+                if (asm_stdout.empty()) {
+                    asm_stdout = asm_result.artifact_text;
+                }
+                detail::write_text_file(stdout_path, asm_stdout);
+                detail::write_text_file(stderr_path, asm_result.diagnostics_text);
+                detail::write_text_file(artifact_path, asm_result.artifact_text);
 
-            auto asm_command = detail::build_command(request, analysis_kind::asm_text, source_path, asm_path);
-            auto asm_exit = detail::run_process(asm_command, asm_stdout_path, asm_stderr_path);
-            if (asm_exit != 0) {
-                result.exit_code = asm_exit;
+                result.exit_code = asm_result.exit_code;
                 result.success = false;
-                result.command = std::move(asm_command);
-                result.artifact_text = detail::read_text_file(asm_stdout_path);
-                result.diagnostics_text = detail::read_text_file(asm_stderr_path);
-                detail::write_text_file(artifact_path, result.artifact_text);
+                result.command = std::move(asm_result.command);
+                result.artifact_text = std::move(asm_result.artifact_text);
+                result.diagnostics_text = std::move(asm_result.diagnostics_text);
                 return result;
             }
 
-            auto ir_command = detail::build_command(request, analysis_kind::ir, source_path, ir_path);
-            auto ir_exit = detail::run_process(ir_command, ir_stdout_path, ir_stderr_path);
-            if (ir_exit != 0) {
-                result.exit_code = ir_exit;
+            auto ir_result = run_analysis(inspect_request, analysis_kind::ir);
+            if (!ir_result.success) {
+                auto ir_stdout = detail::read_text_file(ir_result.stdout_path);
+                if (ir_stdout.empty()) {
+                    ir_stdout = ir_result.artifact_text;
+                }
+                detail::write_text_file(stdout_path, ir_stdout);
+                detail::write_text_file(stderr_path, ir_result.diagnostics_text);
+                detail::write_text_file(artifact_path, ir_result.artifact_text);
+
+                result.exit_code = ir_result.exit_code;
                 result.success = false;
-                result.command = std::move(ir_command);
-                result.artifact_text = detail::read_text_file(ir_stdout_path);
-                result.diagnostics_text = detail::read_text_file(ir_stderr_path);
-                detail::write_text_file(artifact_path, result.artifact_text);
+                result.command = std::move(ir_result.command);
+                result.artifact_text = std::move(ir_result.artifact_text);
+                result.diagnostics_text = std::move(ir_result.diagnostics_text);
                 return result;
             }
 
-            auto asm_text = detail::read_text_file(asm_path);
-            auto ir_text = detail::read_text_file(ir_path);
+            auto asm_text = asm_result.artifact_text;
+            auto ir_text = ir_result.artifact_text;
             auto source_text = detail::read_text_file(source_path);
 
             auto defined_symbols = detail::try_collect_defined_symbols(request);
@@ -5391,13 +5407,20 @@ namespace sontag {
             auto payload_json = detail::serialize_json_payload(payload);
             detail::write_text_file(artifact_path, payload_json);
 
-            auto diagnostics_text =
-                    detail::join_text(detail::read_text_file(asm_stderr_path), detail::read_text_file(ir_stderr_path));
+            auto asm_stdout = detail::read_text_file(asm_result.stdout_path);
+            auto ir_stdout = detail::read_text_file(ir_result.stdout_path);
+            auto combined_stdout = detail::join_text(asm_stdout, ir_stdout);
+            if (combined_stdout.empty()) {
+                combined_stdout = detail::join_text(asm_result.artifact_text, ir_result.artifact_text);
+            }
+            detail::write_text_file(stdout_path, combined_stdout);
+
+            auto diagnostics_text = detail::join_text(asm_result.diagnostics_text, ir_result.diagnostics_text);
             detail::write_text_file(stderr_path, diagnostics_text);
 
             result.exit_code = 0;
             result.success = true;
-            result.command = std::move(ir_command);
+            result.command = std::move(ir_result.command);
             result.artifact_text = "symbol: {}\nsource_lines: {}\nir_lines: {}\nasm_lines: {}\njson: {}\n"_format(
                     payload.symbol_display,
                     payload.source.size(),
