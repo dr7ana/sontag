@@ -207,6 +207,28 @@ namespace sontag::test { namespace detail {
         return false;
     }
 
+    static void write_merkle_cache_node(
+            const fs::path& bucket_root,
+            std::string_view node_hash,
+            std::string_view node_kind,
+            std::initializer_list<std::string_view> child_hashes = {}) {
+        auto node_dir = bucket_root / std::string(node_hash);
+        fs::create_directories(node_dir);
+        write_text_file(node_dir / "payload.txt", "payload");
+
+        std::ostringstream manifest{};
+        manifest << "node_kind=" << node_kind << '\n';
+        manifest << "node_hash=" << node_hash << '\n';
+        manifest << "payload_hash=fixture\n";
+        manifest << "payload_file=payload.txt\n";
+        size_t child_index = 0U;
+        for (auto child_hash : child_hashes) {
+            manifest << "child[" << child_index << "]=" << child_hash << '\n';
+            ++child_index;
+        }
+        write_text_file(node_dir / "manifest.txt", manifest.str());
+    }
+
     static void set_tree_last_write_time(const fs::path& path, fs::file_time_type time_point) {
         std::error_code ec{};
         if (fs::is_directory(path, ec) && !ec) {
@@ -507,6 +529,133 @@ namespace sontag::test {
         CHECK_FALSE(detail::fs::exists(stale_peer));
     }
 
+    TEST_CASE("005: startup prunes stale shared cache nodes by cache_ttl_days", "[005][session][cache][shared]") {
+        detail::temp_dir temp{"sontag_shared_cache_prune_stale"};
+
+        auto cache_root = temp.path / "cache" / "cache";
+        auto units_root = cache_root / "units";
+        auto symbols_root = cache_root / "symbols";
+        auto traces_root = cache_root / "traces";
+
+        detail::write_merkle_cache_node(units_root, "unit_stale", "build_unit");
+        detail::write_merkle_cache_node(symbols_root, "symbol_stale", "symbol_view");
+        detail::write_merkle_cache_node(traces_root, "trace_stale", "trace");
+        detail::write_merkle_cache_node(units_root, "unit_fresh", "build_unit");
+        detail::write_merkle_cache_node(symbols_root, "symbol_fresh", "symbol_view");
+        detail::write_merkle_cache_node(traces_root, "trace_fresh", "trace");
+
+        auto stale_time = detail::fs::file_time_type::clock::now() - std::chrono::hours{24 * 10};
+        detail::set_tree_last_write_time(units_root / "unit_stale", stale_time);
+        detail::set_tree_last_write_time(symbols_root / "symbol_stale", stale_time);
+        detail::set_tree_last_write_time(traces_root / "trace_stale", stale_time);
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.cache_ttl_days = 3U;
+
+        detail::run_repl_script(cfg, ":quit\n");
+
+        CHECK_FALSE(detail::fs::exists(units_root / "unit_stale"));
+        CHECK_FALSE(detail::fs::exists(symbols_root / "symbol_stale"));
+        CHECK_FALSE(detail::fs::exists(traces_root / "trace_stale"));
+        CHECK(detail::fs::exists(units_root / "unit_fresh"));
+        CHECK(detail::fs::exists(symbols_root / "symbol_fresh"));
+        CHECK(detail::fs::exists(traces_root / "trace_fresh"));
+    }
+
+    TEST_CASE("005: resume flow also prunes stale shared cache nodes", "[005][session][cache][shared][resume]") {
+        detail::temp_dir temp{"sontag_shared_cache_prune_resume"};
+
+        startup_config seed_cfg{};
+        seed_cfg.cache_dir = temp.path / "cache";
+        seed_cfg.history_enabled = false;
+        seed_cfg.banner_enabled = false;
+        seed_cfg.cache_ttl_days = 3U;
+
+        detail::run_repl_script(seed_cfg, ":quit\n");
+        auto preserved_session = detail::find_single_session_dir(seed_cfg.cache_dir);
+
+        auto units_root = seed_cfg.cache_dir / "cache" / "units";
+        detail::write_merkle_cache_node(units_root, "unit_stale", "build_unit");
+        auto stale_time = detail::fs::file_time_type::clock::now() - std::chrono::hours{24 * 10};
+        detail::set_tree_last_write_time(units_root / "unit_stale", stale_time);
+
+        startup_config resume_cfg{};
+        resume_cfg.cache_dir = seed_cfg.cache_dir;
+        resume_cfg.history_enabled = false;
+        resume_cfg.banner_enabled = false;
+        resume_cfg.cache_ttl_days = 3U;
+        resume_cfg.resume_session = preserved_session.filename().string();
+
+        detail::run_repl_script(resume_cfg, ":quit\n");
+
+        CHECK(detail::fs::exists(preserved_session));
+        CHECK_FALSE(detail::fs::exists(units_root / "unit_stale"));
+    }
+
+    TEST_CASE("005: shared cache GC preserves stale build units referenced by fresh nodes", "[005][session][cache][shared]") {
+        detail::temp_dir temp{"sontag_shared_cache_preserve_referenced_units"};
+
+        auto cache_root = temp.path / "cache" / "cache";
+        auto units_root = cache_root / "units";
+        auto symbols_root = cache_root / "symbols";
+        auto traces_root = cache_root / "traces";
+
+        detail::write_merkle_cache_node(units_root, "unit_from_symbol", "build_unit");
+        detail::write_merkle_cache_node(units_root, "unit_from_trace", "build_unit");
+        detail::write_merkle_cache_node(units_root, "unit_unreferenced", "build_unit");
+
+        detail::write_merkle_cache_node(symbols_root, "symbol_recent", "symbol_view", {"unit_from_symbol"});
+        detail::write_merkle_cache_node(traces_root, "trace_recent", "trace", {"unit_from_trace"});
+
+        auto stale_time = detail::fs::file_time_type::clock::now() - std::chrono::hours{24 * 10};
+        detail::set_tree_last_write_time(units_root / "unit_from_symbol", stale_time);
+        detail::set_tree_last_write_time(units_root / "unit_from_trace", stale_time);
+        detail::set_tree_last_write_time(units_root / "unit_unreferenced", stale_time);
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.cache_ttl_days = 3U;
+
+        detail::run_repl_script(cfg, ":quit\n");
+
+        CHECK(detail::fs::exists(symbols_root / "symbol_recent"));
+        CHECK(detail::fs::exists(traces_root / "trace_recent"));
+        CHECK(detail::fs::exists(units_root / "unit_from_symbol"));
+        CHECK(detail::fs::exists(units_root / "unit_from_trace"));
+        CHECK_FALSE(detail::fs::exists(units_root / "unit_unreferenced"));
+    }
+
+    TEST_CASE("005: shared cache GC is disabled when cache_ttl_days is zero", "[005][session][cache][shared]") {
+        detail::temp_dir temp{"sontag_shared_cache_ttl_disabled"};
+
+        auto cache_root = temp.path / "cache" / "cache";
+        auto units_root = cache_root / "units";
+        auto symbols_root = cache_root / "symbols";
+
+        detail::write_merkle_cache_node(units_root, "unit_stale", "build_unit");
+        detail::write_merkle_cache_node(symbols_root, "symbol_stale", "symbol_view", {"unit_stale"});
+
+        auto stale_time = detail::fs::file_time_type::clock::now() - std::chrono::hours{24 * 10};
+        detail::set_tree_last_write_time(units_root / "unit_stale", stale_time);
+        detail::set_tree_last_write_time(symbols_root / "symbol_stale", stale_time);
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.cache_ttl_days = 0U;
+
+        detail::run_repl_script(cfg, ":quit\n");
+
+        CHECK(detail::fs::exists(units_root / "unit_stale"));
+        CHECK(detail::fs::exists(symbols_root / "symbol_stale"));
+    }
+
     TEST_CASE("005: asm analysis writes merkle cache nodes for units and symbols", "[005][session][cache]") {
         detail::temp_dir temp{"sontag_cache_merkle_asm"};
 
@@ -521,8 +670,7 @@ namespace sontag::test {
                 ":asm\n"
                 ":quit\n");
 
-        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
-        auto cache_root = session_dir / "artifacts" / "cache";
+        auto cache_root = cfg.cache_dir / "cache";
         CHECK(detail::has_merkle_node_artifacts(cache_root / "units"));
         CHECK(detail::has_merkle_node_artifacts(cache_root / "symbols"));
     }
@@ -545,8 +693,7 @@ namespace sontag::test {
                 ":mem square\n"
                 ":quit\n");
 
-        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
-        auto cache_root = session_dir / "artifacts" / "cache";
+        auto cache_root = cfg.cache_dir / "cache";
         CHECK(detail::has_merkle_node_artifacts(cache_root / "units"));
         CHECK(detail::has_merkle_node_artifacts(cache_root / "symbols"));
         CHECK(detail::has_merkle_node_artifacts(cache_root / "traces"));
@@ -892,12 +1039,25 @@ namespace sontag::test {
         cfg.history_enabled = false;
         cfg.banner_enabled = false;
 
-        auto script = std::string{};
-        script.append(":decl volatile int ir_explore_sink = 0;\n");
-        for (int i = 0; i < 96; ++i) {
-            script.append("ir_explore_sink += 1;\n");
+        auto decl_path = temp.path / "ir_explore_chain.hpp";
+        auto decl = std::ostringstream{};
+        decl << "int ir_explore_chain(int x) {\n";
+        decl << "  int v = x;\n";
+        for (int i = 0; i < 140; ++i) {
+            decl << "  if (((v + " << i << ") & 1) == 0) {\n";
+            decl << "    v += " << (i + 1) << ";\n";
+            decl << "  } else {\n";
+            decl << "    v -= " << (i + 1) << ";\n";
+            decl << "  }\n";
         }
-        script.append(":ir explore\n");
+        decl << "  return v;\n";
+        decl << "}\n";
+        detail::write_text_file(decl_path, decl.str());
+
+        auto script = std::string{};
+        script.append(":declfile {}\n"_format(decl_path.string()));
+        script.append("int ir_explore_sink = ir_explore_chain(7);\n");
+        script.append(":ir explore ir_explore_chain\n");
         script.append(":quit\n");
 
         auto output = detail::run_repl_script_capture_output(cfg, script);

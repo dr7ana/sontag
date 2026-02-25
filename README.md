@@ -337,7 +337,7 @@ command = "/path/to/sontag"
 args = ["--mcp", "--std", "c++23"]
 ```
 
-any CLI flags passed alongside `--mcp` become defaults for all tool invocations (`--std`, `--opt`, `--target`, `--cpu`, `--mca`, etc.).
+startup defaults passed alongside `--mcp` are propagated to both tools for `--std`, `--opt`, `--target`, `--cpu`, and `--mca`.
 
 ### tools
 
@@ -382,7 +382,12 @@ send any REPL command or single-line expression to the persistent session. the f
 
 ### multi-instance
 
-each `sontag --mcp` process gets an independent session directory (`.sontag/mcp-1/`, `.sontag/mcp-2/`, ...). orphaned instances from dead processes are cleaned up on startup.
+each `sontag --mcp` process gets an isolated instance root (`.sontag/mcp-1/`, `.sontag/mcp-2/`, ...):
+
+- sessions: `.sontag/mcp-<id>/sessions/...`
+- shared cache graph: `.sontag/mcp-<id>/cache/{units,symbols,traces}`
+
+orphaned instances from dead processes are cleaned up on startup.
 
 ### crash recovery
 

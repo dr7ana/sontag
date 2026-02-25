@@ -43,7 +43,7 @@ namespace sontag::test {
             mcp_process(const mcp_process&) = delete;
             mcp_process& operator=(const mcp_process&) = delete;
 
-            explicit mcp_process(const fs::path& cache_dir) {
+            explicit mcp_process(const fs::path& cache_dir, std::vector<std::string> extra_args = {}) {
                 int in_pipe[2]{};
                 int out_pipe[2]{};
                 int err_pipe[2]{};
@@ -65,15 +65,17 @@ namespace sontag::test {
                     ::close(out_pipe[1]);
                     ::close(err_pipe[1]);
 
-                    auto cache_str = cache_dir.string();
-                    const char* argv[] = {
-                            SONTAG_CLI_PATH,
-                            "--mcp",
-                            "--cache-dir",
-                            cache_str.c_str(),
-                            nullptr,
-                    };
-                    ::execvp(argv[0], const_cast<char* const*>(argv));
+                    auto argv_storage =
+                            std::vector<std::string>{SONTAG_CLI_PATH, "--mcp", "--cache-dir", cache_dir.string()};
+                    argv_storage.insert(argv_storage.end(), extra_args.begin(), extra_args.end());
+                    auto argv = std::vector<char*>{};
+                    argv.reserve(argv_storage.size() + 1U);
+                    for (auto& arg : argv_storage) {
+                        argv.push_back(arg.data());
+                    }
+                    argv.push_back(nullptr);
+
+                    ::execvp(argv[0], argv.data());
                     _exit(127);
                 }
 
@@ -147,6 +149,20 @@ namespace sontag::test {
                 return resp;
             }
         };
+
+        static std::optional<fs::path> find_first_instance_dir(const fs::path& base_dir) {
+            std::error_code ec{};
+            for (const auto& entry : fs::directory_iterator(base_dir, ec)) {
+                if (ec || !entry.is_directory()) {
+                    continue;
+                }
+                auto name = entry.path().filename().string();
+                if (name.starts_with("mcp-")) {
+                    return entry.path();
+                }
+            }
+            return std::nullopt;
+        }
     }  // namespace detail
 
     TEST_CASE("012: mcp initialize returns protocol version and server info", "[012][mcp]") {
@@ -212,6 +228,60 @@ namespace sontag::test {
 
         CHECK(resp.find("\"isError\":false") != std::string::npos);
         CHECK(resp.find("ret") != std::string::npos);
+    }
+
+    TEST_CASE("012: mcp eval and session defaults inherit std/opt startup flags", "[012][mcp][defaults]") {
+        detail::temp_dir temp{"sontag_mcp_defaults"};
+        auto test_file = temp.path / "test.cpp";
+        detail::write_file(
+                test_file,
+                "int square(int x) { return x * x; }\n"
+                "int main() { return square(3); }\n");
+
+        detail::mcp_process mcp{temp.path, {"--std", "c++20", "--opt", "O2"}};
+        mcp.handshake();
+
+        auto eval_request =
+                R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"eval","arguments":{"files":[")" +
+                test_file.string() + R"("],"command":":config build"}}})";
+        mcp.send_line(eval_request);
+        auto eval_resp = mcp.recv_line();
+        CHECK(eval_resp.find("\"isError\":false") != std::string::npos);
+        CHECK(eval_resp.find("std=c++20") != std::string::npos);
+        CHECK(eval_resp.find("opt=O2") != std::string::npos);
+
+        mcp.send_line(
+                R"({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"session_eval","arguments":{"input":":config build"}}})");
+        auto session_resp = mcp.recv_line();
+        CHECK(session_resp.find("\"isError\":false") != std::string::npos);
+        CHECK(session_resp.find("std=c++20") != std::string::npos);
+        CHECK(session_resp.find("opt=O2") != std::string::npos);
+    }
+
+    TEST_CASE("012: mcp instance cache layout exposes units symbols traces", "[012][mcp][cache]") {
+        detail::temp_dir temp{"sontag_mcp_cache_layout"};
+        auto test_file = temp.path / "test.cpp";
+        detail::write_file(
+                test_file,
+                "int square(int x) { return x * x; }\n"
+                "int main() { return square(3); }\n");
+
+        detail::mcp_process mcp{temp.path};
+        mcp.handshake();
+
+        auto eval_request =
+                R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"eval","arguments":{"files":[")" +
+                test_file.string() + R"("],"command":":asm"}}})";
+        mcp.send_line(eval_request);
+        auto eval_resp = mcp.recv_line();
+        CHECK(eval_resp.find("\"isError\":false") != std::string::npos);
+
+        auto instance_dir = detail::find_first_instance_dir(temp.path);
+        REQUIRE(instance_dir.has_value());
+        CHECK(detail::fs::exists(*instance_dir / "sessions"));
+        CHECK(detail::fs::exists(*instance_dir / "cache" / "units"));
+        CHECK(detail::fs::exists(*instance_dir / "cache" / "symbols"));
+        CHECK(detail::fs::exists(*instance_dir / "cache" / "traces"));
     }
 
     TEST_CASE("012: mcp session_eval stateful flow", "[012][mcp][session_eval]") {

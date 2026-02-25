@@ -26,6 +26,14 @@ namespace sontag::test {
             REQUIRE(out.good());
         }
 
+        static std::string read_text_file(const fs::path& path) {
+            std::ifstream in{path};
+            REQUIRE(in.good());
+            std::ostringstream ss{};
+            ss << in.rdbuf();
+            return ss.str();
+        }
+
         static void make_executable_file(const fs::path& path, std::string_view content) {
             auto parent = path.parent_path();
             if (!parent.empty()) {
@@ -58,6 +66,17 @@ namespace sontag::test {
 
         static bool has_prefixed_arg(const std::vector<std::string>& args, std::string_view prefix) {
             return std::ranges::any_of(args, [prefix](std::string_view arg) { return arg.starts_with(prefix); });
+        }
+
+        static void check_symbol_resolution_info_equal(
+                const symbol_resolution_info& lhs, const symbol_resolution_info& rhs) {
+            CHECK(lhs.raw_name == rhs.raw_name);
+            CHECK(lhs.canonical_name == rhs.canonical_name);
+            CHECK(lhs.display_name == rhs.display_name);
+            CHECK(lhs.status == rhs.status);
+            CHECK(lhs.confidence == rhs.confidence);
+            CHECK(lhs.source == rhs.source);
+            CHECK(lhs.addendum == rhs.addendum);
         }
 
         static void check_default_dump_arch_args(const std::vector<std::string>& args) {
@@ -455,6 +474,120 @@ namespace sontag::test {
         REQUIRE(cached_result.success);
         CHECK(cached_result.command.empty());
         CHECK(cached_result.artifact_text == cold_result.artifact_text);
+    }
+
+    TEST_CASE(
+            "003: resolver metadata remains equivalent across cold and cache-hit inspect paths",
+            "[003][analysis][cache][symbols]") {
+        detail::temp_dir temp{"sontag_m3_resolver_cache_equivalence"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int add(int a, int b) { return a + b; }"};
+        request.exec_cells = {"volatile int sink = add(1, 2);", "return sink;"};
+        request.symbol = "add@PLT";
+
+        auto cold_info = resolve_symbol_info(request, *request.symbol);
+        REQUIRE(cold_info.has_value());
+        CHECK(cold_info->status == symbol_resolution_status::resolved_stub);
+        CHECK(cold_info->confidence == symbol_resolution_confidence::exact_relocation);
+
+        auto cold_result = run_analysis(request, analysis_kind::inspect_asm_map);
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+        auto cold_json = detail::read_text_file(cold_result.artifact_path);
+        CHECK(cold_json.find("\"symbol_status\":\"resolved_stub\"") != std::string::npos);
+        CHECK(cold_json.find("\"symbol_confidence\":\"exact_relocation\"") != std::string::npos);
+
+        auto cached_result = run_analysis(request, analysis_kind::inspect_asm_map);
+        REQUIRE(cached_result.success);
+        CHECK(cached_result.command.empty());
+        CHECK(cached_result.artifact_text == cold_result.artifact_text);
+
+        auto cached_json = detail::read_text_file(cached_result.artifact_path);
+        CHECK(cached_json == cold_json);
+
+        auto hot_info = resolve_symbol_info(request, *request.symbol);
+        REQUIRE(hot_info.has_value());
+        detail::check_symbol_resolution_info_equal(*cold_info, *hot_info);
+    }
+
+    TEST_CASE(
+            "003: symbol navigation latency check shows cache-hit ROI with layer B reuse",
+            "[003][analysis][cache][latency]") {
+        detail::temp_dir temp{"sontag_m3_symbol_navigation_latency"};
+
+        auto decl = std::ostringstream{};
+        for (int i = 0; i < 320; ++i) {
+            decl << "__attribute__((used,noinline)) int fn" << i << "(int x) { return x + " << i << "; }\n";
+        }
+        decl << "int entry(int x) { return fn1(x) + fn2(x) + fn3(x); }\n";
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {decl.str()};
+        request.exec_cells = {"volatile int sink = entry(3);", "return sink;"};
+        request.symbol = "entry";
+
+        auto cold_start = std::chrono::steady_clock::now();
+        auto cold_result = run_analysis(request, analysis_kind::asm_text);
+        auto cold_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cold_start)
+                        .count();
+        REQUIRE(cold_result.success);
+        REQUIRE_FALSE(cold_result.command.empty());
+
+        auto hot_start = std::chrono::steady_clock::now();
+        auto hot_result = run_analysis(request, analysis_kind::asm_text);
+        auto hot_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - hot_start)
+                              .count();
+        REQUIRE(hot_result.success);
+        CHECK(hot_result.command.empty());
+        CHECK(hot_result.artifact_text == cold_result.artifact_text);
+        CHECK(hot_ns <= cold_ns);
+
+        request.symbol = "fn157";
+        auto switch_start = std::chrono::steady_clock::now();
+        auto switch_result = run_analysis(request, analysis_kind::asm_text);
+        auto switch_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - switch_start)
+                        .count();
+        REQUIRE(switch_result.success);
+        CHECK(switch_result.command.empty());
+        CHECK(switch_result.artifact_text.find("fn157") != std::string::npos);
+        CHECK(switch_ns <= cold_ns);
+    }
+
+    TEST_CASE("003: dump symbol switch reuses build-unit disassembly cache", "[003][analysis][cache][layer_b]") {
+        detail::temp_dir temp{"sontag_m3_dump_symbol_switch_layer_b"};
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {
+                "__attribute__((used,noinline)) int foo(int x) { return x + 1; }\n"
+                "__attribute__((used,noinline)) int bar(int x) { return x + 2; }\n"};
+        request.exec_cells = {"volatile int sink = foo(1) + bar(2);", "return sink;"};
+        request.symbol = "foo";
+
+        auto cold = run_analysis(request, analysis_kind::dump);
+        REQUIRE(cold.success);
+        REQUIRE_FALSE(cold.command.empty());
+        CHECK(cold.artifact_text.find("foo") != std::string::npos);
+
+        request.symbol = "bar";
+        auto switched = run_analysis(request, analysis_kind::dump);
+        REQUIRE(switched.success);
+        CHECK(switched.command.empty());
+        CHECK(switched.artifact_text.find("bar") != std::string::npos);
     }
 
     TEST_CASE("003: mem_trace command reflects static vs dynamic link policy", "[003][analysis][link]") {

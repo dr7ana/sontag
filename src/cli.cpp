@@ -1762,6 +1762,150 @@ namespace sontag::cli {
             return latest;
         }
 
+        struct merkle_cache_node_entry {
+            fs::path path{};
+            std::string node_hash{};
+            fs::file_time_type newest_write_time{};
+            std::vector<std::string> child_hashes{};
+        };
+
+        static std::vector<std::string> parse_merkle_manifest_child_hashes(const fs::path& manifest_path) {
+            std::vector<std::string> child_hashes{};
+            auto manifest = read_text_file(manifest_path);
+            if (manifest.empty()) {
+                return child_hashes;
+            }
+
+            std::istringstream input{manifest};
+            std::string line{};
+            while (std::getline(input, line)) {
+                auto trimmed = trim_view(line);
+                if (!trimmed.starts_with("child["sv)) {
+                    continue;
+                }
+
+                auto equals_pos = trimmed.find('=');
+                if (equals_pos == std::string_view::npos || equals_pos + 1U >= trimmed.size()) {
+                    continue;
+                }
+
+                auto child_hash = trim_view(trimmed.substr(equals_pos + 1U));
+                if (!child_hash.empty()) {
+                    child_hashes.emplace_back(child_hash);
+                }
+            }
+
+            return child_hashes;
+        }
+
+        static std::vector<merkle_cache_node_entry> collect_merkle_cache_nodes(const fs::path& root) {
+            std::vector<merkle_cache_node_entry> nodes{};
+            std::error_code ec{};
+            if (!fs::exists(root, ec) || ec) {
+                return nodes;
+            }
+
+            for (fs::directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end; it != end;
+                 it.increment(ec)) {
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
+
+                std::error_code is_dir_ec{};
+                if (!it->is_directory(is_dir_ec) || is_dir_ec) {
+                    continue;
+                }
+
+                auto node_path = it->path();
+                auto newest_write_time = newest_write_time_recursive(node_path);
+                if (!newest_write_time) {
+                    continue;
+                }
+
+                auto manifest_path = node_path / "manifest.txt";
+                auto child_hashes = parse_merkle_manifest_child_hashes(manifest_path);
+                nodes.push_back(merkle_cache_node_entry{
+                        .path = std::move(node_path),
+                        .node_hash = it->path().filename().string(),
+                        .newest_write_time = *newest_write_time,
+                        .child_hashes = std::move(child_hashes)});
+            }
+
+            return nodes;
+        }
+
+        static void remove_stale_merkle_cache_nodes(
+                std::span<const merkle_cache_node_entry> nodes,
+                fs::file_time_type cutoff,
+                const std::unordered_set<std::string>& keep_hashes) {
+            for (const auto& node : nodes) {
+                if (node.newest_write_time >= cutoff || keep_hashes.contains(node.node_hash)) {
+                    continue;
+                }
+
+                std::error_code remove_ec{};
+                fs::remove_all(node.path, remove_ec);
+            }
+        }
+
+        static void prune_stale_shared_cache_entries(const startup_config& cfg) {
+            if (cfg.cache_ttl_days == 0U) {
+                return;
+            }
+
+            auto cache_root = cfg.cache_dir / "cache";
+            std::error_code ec{};
+            if (!fs::exists(cache_root, ec) || ec) {
+                return;
+            }
+
+            auto retention_window = std::chrono::hours{24} * static_cast<int64_t>(cfg.cache_ttl_days);
+            auto cutoff = fs::file_time_type::clock::now() -
+                          std::chrono::duration_cast<fs::file_time_type::duration>(retention_window);
+
+            auto unit_nodes = collect_merkle_cache_nodes(cache_root / "units");
+            auto symbol_nodes = collect_merkle_cache_nodes(cache_root / "symbols");
+            auto trace_nodes = collect_merkle_cache_nodes(cache_root / "traces");
+
+            std::unordered_set<std::string> keep_units{};
+            std::unordered_set<std::string> keep_symbols{};
+            std::unordered_set<std::string> keep_traces{};
+
+            auto mark_recent_nodes = [cutoff](std::span<const merkle_cache_node_entry> nodes,
+                                              std::unordered_set<std::string>& keep_set) {
+                for (const auto& node : nodes) {
+                    if (node.newest_write_time >= cutoff) {
+                        keep_set.insert(node.node_hash);
+                    }
+                }
+            };
+
+            mark_recent_nodes(unit_nodes, keep_units);
+            mark_recent_nodes(symbol_nodes, keep_symbols);
+            mark_recent_nodes(trace_nodes, keep_traces);
+
+            auto preserve_children_of_kept_nodes = [](std::span<const merkle_cache_node_entry> nodes,
+                                                      const std::unordered_set<std::string>& keep_set,
+                                                      std::unordered_set<std::string>& keep_units_ref) {
+                for (const auto& node : nodes) {
+                    if (!keep_set.contains(node.node_hash)) {
+                        continue;
+                    }
+                    for (const auto& child_hash : node.child_hashes) {
+                        keep_units_ref.insert(child_hash);
+                    }
+                }
+            };
+
+            preserve_children_of_kept_nodes(symbol_nodes, keep_symbols, keep_units);
+            preserve_children_of_kept_nodes(trace_nodes, keep_traces, keep_units);
+
+            remove_stale_merkle_cache_nodes(symbol_nodes, cutoff, keep_symbols);
+            remove_stale_merkle_cache_nodes(trace_nodes, cutoff, keep_traces);
+            remove_stale_merkle_cache_nodes(unit_nodes, cutoff, keep_units);
+        }
+
         static void prune_stale_session_entries(
                 const startup_config& cfg, const std::optional<fs::path>& preserved_session_dir) {
             if (cfg.cache_ttl_days == 0U) {
@@ -1901,6 +2045,7 @@ namespace sontag::cli {
         }
 
         static repl_state start_session(startup_config& cfg) {
+            prune_stale_shared_cache_entries(cfg);
             if (cfg.resume_session) {
                 auto session_dir = require_resume_session_directory(cfg, *cfg.resume_session);
                 auto preserved_session_dir = std::optional<fs::path>{session_dir};

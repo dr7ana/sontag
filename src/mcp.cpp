@@ -325,31 +325,37 @@ namespace sontag::mcp {
         // ── Eval tool command builder ───────────────────────────────────
 
         static std::vector<std::string> build_eval_command(
-                const fs::path& self_exe, const eval_args& args, const startup_config& cfg) {
+                const fs::path& self_exe, const fs::path& cache_dir, const eval_args& args, const startup_config& cfg) {
             std::vector<std::string> cmd{};
             cmd.push_back(self_exe.string());
             cmd.push_back("--banner");
             cmd.push_back("false");
+            cmd.push_back("--cache-dir");
+            cmd.push_back(cache_dir.string());
 
             bool use_color = args.color.value_or(false);
             cmd.push_back("--color");
             cmd.push_back(use_color ? "always" : "never");
 
-            if (args.opt_level) {
+            auto opt_level = args.opt_level.value_or("{}"_format(cfg.opt_level));
+            if (!opt_level.empty()) {
                 cmd.push_back("--opt");
-                cmd.push_back(*args.opt_level);
+                cmd.push_back(opt_level);
             }
-            if (args.standard) {
+            auto standard = args.standard.value_or("{}"_format(cfg.language_standard));
+            if (!standard.empty()) {
                 cmd.push_back("--std");
-                cmd.push_back(*args.standard);
+                cmd.push_back(standard);
             }
-            if (args.target) {
+            auto target = args.target.has_value() ? args.target : cfg.target_triple;
+            if (target && !target->empty()) {
                 cmd.push_back("--target");
-                cmd.push_back(*args.target);
+                cmd.push_back(*target);
             }
-            if (args.cpu) {
+            auto cpu = args.cpu.has_value() ? args.cpu : cfg.cpu;
+            if (cpu && !cpu->empty()) {
                 cmd.push_back("--cpu");
-                cmd.push_back(*args.cpu);
+                cmd.push_back(*cpu);
             }
 
             // pass through mca if parent has it enabled
@@ -568,10 +574,22 @@ namespace sontag::mcp {
                         "--quiet",
                         "--color",
                         "never",
+                        "--std",
+                        "{}"_format(cfg.language_standard),
+                        "--opt",
+                        "{}"_format(cfg.opt_level),
                         "--frame-delimiter",
                         "--cache-dir",
                         instance.cache_dir.string(),
                 };
+                if (cfg.target_triple && !cfg.target_triple->empty()) {
+                    args.emplace_back("--target");
+                    args.push_back(*cfg.target_triple);
+                }
+                if (cfg.cpu && !cfg.cpu->empty()) {
+                    args.emplace_back("--cpu");
+                    args.push_back(*cfg.cpu);
+                }
                 if (cfg.mca_enabled) {
                     args.emplace_back("--mca");
                 }
@@ -729,7 +747,8 @@ namespace sontag::mcp {
                 const glz::rpc::id_t& id,
                 const glz::raw_json& raw_arguments,
                 const fs::path& self_exe,
-                const startup_config& cfg) {
+                const startup_config& cfg,
+                const instance_handle& instance) {
             eval_args args{};
             auto ec = glz::read<glz::opts{.error_on_unknown_keys = false}>(args, raw_arguments.str);
             if (ec) {
@@ -744,7 +763,7 @@ namespace sontag::mcp {
                 return make_error_response(id, glz::rpc::error_e::invalid_params, "eval requires a command");
             }
 
-            auto cmd = build_eval_command(self_exe, args, cfg);
+            auto cmd = build_eval_command(self_exe, instance.cache_dir, args, cfg);
             auto proc = run_subprocess(cmd, cfg.mcp_timeout_ms);
 
             tool_call_result result{};
@@ -860,7 +879,7 @@ namespace sontag::mcp {
             }
 
             if (params.name == "eval") {
-                return handle_eval(id, params.arguments, self_exe, cfg);
+                return handle_eval(id, params.arguments, self_exe, cfg, instance);
             }
             if (params.name == "session_eval") {
                 return handle_session_eval(id, params.arguments, child, self_exe, instance, cfg);

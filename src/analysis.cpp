@@ -129,6 +129,22 @@ namespace glz {
     };
 
     template <>
+    struct meta<sontag::analysis_symbol> {
+        using T = sontag::analysis_symbol;
+        static constexpr auto value = object(
+                "kind",
+                &T::kind,
+                "mangled",
+                &T::mangled,
+                "demangled",
+                &T::demangled,
+                "present_in_object",
+                &T::present_in_object,
+                "present_in_binary",
+                &T::present_in_binary);
+    };
+
+    template <>
     struct meta<sontag::detail::inspect_line_record> {
         using T = sontag::detail::inspect_line_record;
         static constexpr auto value = object("line", &T::line, "text", &T::text);
@@ -732,6 +748,20 @@ namespace sontag {
             return make_symbol_view_hash(build_unit_hash, request, kind);
         }
 
+        static fs::path resolve_shared_cache_root(const fs::path& session_dir) {
+            // Session directories created by the REPL live under <cache_dir>/sessions/<session_id>.
+            // Reuse a sibling shared cache root so cache nodes survive session pruning.
+            auto sessions_root = session_dir.parent_path();
+            if (!sessions_root.empty() && sessions_root.filename() == "sessions") {
+                auto cache_dir = sessions_root.parent_path();
+                if (!cache_dir.empty()) {
+                    return cache_dir / "cache";
+                }
+            }
+            // Fallback for direct/unit-test session paths that do not follow <cache_dir>/sessions.
+            return session_dir / "artifacts" / "cache";
+        }
+
         static void persist_merkle_node(
                 const fs::path& root_dir,
                 std::string_view node_kind,
@@ -769,7 +799,7 @@ namespace sontag {
                 const fs::path& source_path,
                 const fs::path& artifact_path) {
             try {
-                auto cache_root = request.session_dir / "artifacts" / "cache";
+                auto cache_root = resolve_shared_cache_root(request.session_dir);
                 auto units_root = cache_root / "units";
                 auto symbols_root = cache_root / "symbols";
                 auto traces_root = cache_root / "traces";
@@ -1593,6 +1623,7 @@ namespace sontag {
             auto build_unit_hash = make_build_unit_hash(request, source_text);
             auto inputs_dir = request.session_dir / "artifacts" / "inputs" / build_unit_hash;
             auto source_path = inputs_dir / "source.cpp";
+            auto symbols_cache_path = inputs_dir / "symbol_index.symbols.json";
             auto object_path = inputs_dir / "symbol_index.o";
             auto clang_stdout_path = inputs_dir / "symbol_index.clang.stdout.txt";
             auto clang_stderr_path = inputs_dir / "symbol_index.clang.stderr.txt";
@@ -1601,6 +1632,14 @@ namespace sontag {
 
             ensure_dir(inputs_dir);
             write_text_file(source_path, source_text);
+
+            if (auto cached_text = read_text_file(symbols_cache_path); !trim_ascii(cached_text).empty()) {
+                auto cached_symbols = std::vector<analysis_symbol>{};
+                auto ec = glz::read<glz::opts{.error_on_unknown_keys = false}>(cached_symbols, cached_text);
+                if (!ec) {
+                    return cached_symbols;
+                }
+            }
 
             auto collect_symbols_from_target = [&](const fs::path& target_path,
                                                    bool from_object) -> std::optional<std::vector<analysis_symbol>> {
@@ -1715,6 +1754,12 @@ namespace sontag {
                 }
                 return lhs.kind < rhs.kind;
             });
+
+            std::string symbols_json{};
+            auto write_ec = glz::write_json(out_symbols, symbols_json);
+            if (!write_ec) {
+                (void)write_text_file(symbols_cache_path, symbols_json);
+            }
             return out_symbols;
         }
 
@@ -4669,36 +4714,184 @@ namespace sontag {
         }
 
         if (kind == analysis_kind::dump) {
-            auto object_path = kind_dir / (id + ".input.o");
-            auto binary_path = kind_dir / (id + ".bin");
-            auto compile_stdout_path = kind_dir / (id + ".compile.stdout.txt");
-            auto compile_stderr_path = kind_dir / (id + ".compile.stderr.txt");
+            auto shared_stem = build_unit_hash + ".full";
+            auto shared_artifact_path = kind_dir / (shared_stem + ".txt");
+            auto shared_stdout_path = kind_dir / (shared_stem + ".stdout.txt");
+            auto shared_stderr_path = kind_dir / (shared_stem + ".stderr.txt");
+            auto shared_object_path = kind_dir / (shared_stem + ".input.o");
+            auto shared_binary_path = kind_dir / (shared_stem + ".bin");
+            auto shared_compile_stdout_path = kind_dir / (shared_stem + ".compile.stdout.txt");
+            auto shared_compile_stderr_path = kind_dir / (shared_stem + ".compile.stderr.txt");
 
-            bool linked = false;
-            std::vector<std::string> compile_command{};
+            auto shared_command = std::vector<std::string>{};
+            auto built_shared = false;
 
-            if (!request.no_link) {
-                compile_command = detail::base_clang_args(request);
-                compile_command.push_back(source_path.string());
-                compile_command.emplace_back("-o");
-                compile_command.push_back(binary_path.string());
-                detail::append_link_flags(compile_command, request);
-                auto link_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
-                linked = (link_exit == 0);
-                if (!linked && request.verbose) {
-                    auto link_stderr = detail::read_text_file(compile_stderr_path);
-                    if (!link_stderr.empty()) {
-                        debug_log("dump link failed (exit {}): {}", link_exit, link_stderr);
+            std::error_code shared_dump_ec{};
+            auto has_shared_dump = fs::exists(shared_artifact_path, shared_dump_ec) && !shared_dump_ec;
+            if (!has_shared_dump) {
+                bool linked = false;
+                std::vector<std::string> compile_command{};
+
+                if (!request.no_link) {
+                    compile_command = detail::base_clang_args(request);
+                    compile_command.push_back(source_path.string());
+                    compile_command.emplace_back("-o");
+                    compile_command.push_back(shared_binary_path.string());
+                    detail::append_link_flags(compile_command, request);
+                    auto link_exit = detail::run_process(
+                            compile_command, shared_compile_stdout_path, shared_compile_stderr_path);
+                    linked = (link_exit == 0);
+                    if (!linked && request.verbose) {
+                        auto link_stderr = detail::read_text_file(shared_compile_stderr_path);
+                        if (!link_stderr.empty()) {
+                            debug_log("dump link failed (exit {}): {}", link_exit, link_stderr);
+                        }
                     }
+                }
+
+                if (!linked) {
+                    compile_command =
+                            detail::build_command(request, analysis_kind::dump, source_path, shared_object_path);
+                    auto compile_exit = detail::run_process(
+                            compile_command, shared_compile_stdout_path, shared_compile_stderr_path);
+                    if (compile_exit != 0) {
+                        auto compile_stdout = detail::read_text_file(shared_compile_stdout_path);
+                        auto compile_stderr = detail::read_text_file(shared_compile_stderr_path);
+
+                        detail::write_text_file(stdout_path, compile_stdout);
+                        detail::write_text_file(stderr_path, compile_stderr);
+                        detail::write_text_file(artifact_path, compile_stdout);
+
+                        result.exit_code = compile_exit;
+                        result.success = false;
+                        result.command = std::move(compile_command);
+                        result.artifact_text = std::move(compile_stdout);
+                        result.diagnostics_text = std::move(compile_stderr);
+                        return result;
+                    }
+                }
+
+                auto objdump_input = linked ? shared_binary_path : shared_object_path;
+                auto objdump_exit = 127;
+                std::string shared_stdout_text{};
+                std::string shared_stderr_text{};
+                std::vector<std::string> objdump_command{};
+                std::vector<std::string> attempted{};
+                auto objdump_candidates = detail::build_objdump_executable_candidates(request, kind_dir, id);
+
+                for (const auto& candidate : objdump_candidates) {
+                    objdump_command = detail::build_objdump_command(request, objdump_input, candidate, std::nullopt);
+                    objdump_exit = detail::run_process(objdump_command, shared_stdout_path, shared_stderr_path);
+                    shared_stdout_text = detail::read_text_file(shared_stdout_path);
+                    shared_stderr_text = detail::read_text_file(shared_stderr_path);
+                    attempted.push_back(candidate);
+                    auto tool_missing = objdump_exit == 127 && shared_stdout_text.empty() && shared_stderr_text.empty();
+                    if (!tool_missing) {
+                        break;
+                    }
+                }
+
+                if (objdump_exit == 127 && shared_stdout_text.empty() && shared_stderr_text.empty()) {
+                    if (attempted.empty()) {
+                        shared_stderr_text =
+                                "failed to execute llvm-objdump tool: {}\n"_format(request.objdump_path.string());
+                    }
+                    else {
+                        shared_stderr_text = "failed to execute llvm-objdump tool: {}\ntried: {}\n"_format(
+                                request.objdump_path.string(), detail::join_with_separator(attempted, ", "sv));
+                    }
+                    detail::write_text_file(shared_stderr_path, shared_stderr_text);
+                }
+
+                if (linked) {
+                    std::error_code ec{};
+                    fs::remove(shared_binary_path, ec);
+                }
+
+                if (objdump_exit != 0) {
+                    detail::write_text_file(stdout_path, shared_stdout_text);
+                    detail::write_text_file(stderr_path, shared_stderr_text);
+                    detail::write_text_file(artifact_path, shared_stdout_text);
+
+                    result.exit_code = objdump_exit;
+                    result.success = false;
+                    result.command = std::move(objdump_command);
+                    result.artifact_text = std::move(shared_stdout_text);
+                    result.diagnostics_text = std::move(shared_stderr_text);
+                    return result;
+                }
+
+                detail::write_text_file(shared_artifact_path, shared_stdout_text);
+                detail::write_text_file(shared_stdout_path, shared_stdout_text);
+                detail::write_text_file(shared_stderr_path, shared_stderr_text);
+
+                shared_command = std::move(objdump_command);
+                built_shared = true;
+            }
+
+            auto full_dump_text = detail::read_text_file(shared_artifact_path);
+            auto full_stdout_text = detail::read_text_file(shared_stdout_path);
+            auto diagnostics_text = detail::read_text_file(shared_stderr_path);
+            if (full_stdout_text.empty()) {
+                full_stdout_text = full_dump_text;
+            }
+
+            auto output_text = full_dump_text;
+            auto exit_code = 0;
+
+            if (request.symbol) {
+                auto resolved_symbol = detail::resolve_symbol_name(request, *request.symbol);
+                if (!resolved_symbol) {
+                    throw std::runtime_error("unable to resolve symbol: {}"_format(*request.symbol));
+                }
+
+                auto display_symbol = detail::demangle_symbol_name(*resolved_symbol);
+                auto extracted = detail::extract_objdump_for_symbol(output_text, *resolved_symbol, display_symbol);
+                if (!extracted.empty()) {
+                    output_text = std::move(extracted);
+                }
+                else {
+                    output_text.clear();
+                    diagnostics_text =
+                            detail::join_text(diagnostics_text, "symbol not found in artifact: {}"_format(*resolved_symbol));
+                    exit_code = 1;
                 }
             }
 
-            if (!linked) {
-                compile_command = detail::build_command(request, analysis_kind::dump, source_path, object_path);
-                auto compile_exit = detail::run_process(compile_command, compile_stdout_path, compile_stderr_path);
+            detail::write_text_file(artifact_path, output_text);
+            detail::write_text_file(stdout_path, full_stdout_text);
+            detail::write_text_file(stderr_path, diagnostics_text);
+
+            result.exit_code = exit_code;
+            result.success = (exit_code == 0);
+            result.command = built_shared ? std::move(shared_command) : std::vector<std::string>{};
+            result.artifact_text = std::move(output_text);
+            result.diagnostics_text = std::move(diagnostics_text);
+            if (result.success) {
+                auto dump_streams =
+                        std::array{opcode::operation_stream_input{.name = "asm", .disassembly = result.artifact_text}};
+                detail::attach_opcode_mapping(result, dump_streams);
+            }
+            return result;
+        }
+
+        if (kind == analysis_kind::asm_text || kind == analysis_kind::ir) {
+            auto shared_stem = build_unit_hash + ".full";
+            auto shared_artifact_path = kind_dir / (shared_stem + extension);
+            auto shared_stdout_path = kind_dir / (shared_stem + ".stdout.txt");
+            auto shared_stderr_path = kind_dir / (shared_stem + ".stderr.txt");
+
+            auto built_shared = false;
+            auto shared_command = std::vector<std::string>{};
+
+            std::error_code shared_text_ec{};
+            auto has_shared_text = fs::exists(shared_artifact_path, shared_text_ec) && !shared_text_ec;
+            if (!has_shared_text) {
+                shared_command = detail::build_command(request, kind, source_path, shared_artifact_path);
+                auto compile_exit = detail::run_process(shared_command, shared_stdout_path, shared_stderr_path);
                 if (compile_exit != 0) {
-                    auto compile_stdout = detail::read_text_file(compile_stdout_path);
-                    auto compile_stderr = detail::read_text_file(compile_stderr_path);
+                    auto compile_stdout = detail::read_text_file(shared_stdout_path);
+                    auto compile_stderr = detail::read_text_file(shared_stderr_path);
 
                     detail::write_text_file(stdout_path, compile_stdout);
                     detail::write_text_file(stderr_path, compile_stderr);
@@ -4706,86 +4899,68 @@ namespace sontag {
 
                     result.exit_code = compile_exit;
                     result.success = false;
-                    result.command = std::move(compile_command);
+                    result.command = std::move(shared_command);
                     result.artifact_text = std::move(compile_stdout);
                     result.diagnostics_text = std::move(compile_stderr);
                     return result;
                 }
+                built_shared = true;
             }
 
-            auto objdump_input = linked ? binary_path : object_path;
+            auto full_artifact_text = detail::read_text_file(shared_artifact_path);
+            auto stdout_text = detail::read_text_file(shared_stdout_path);
+            auto diagnostics_text = detail::read_text_file(shared_stderr_path);
 
-            std::optional<std::string> resolved_symbol{};
+            if (stdout_text.empty()) {
+                stdout_text = full_artifact_text;
+            }
+
+            auto output_text = full_artifact_text;
             if (request.symbol) {
-                resolved_symbol = detail::resolve_symbol_name(request, *request.symbol);
-                if (!resolved_symbol) {
+                auto resolved = detail::resolve_symbol_name(request, *request.symbol);
+                if (!resolved) {
                     throw std::runtime_error("unable to resolve symbol: {}"_format(*request.symbol));
                 }
-            }
 
-            auto objdump_exit = 127;
-            std::string stdout_text{};
-            std::string stderr_text{};
-            std::vector<std::string> objdump_command{};
-            std::vector<std::string> attempted{};
-            auto objdump_candidates = detail::build_objdump_executable_candidates(request, kind_dir, id);
-
-            for (const auto& candidate : objdump_candidates) {
-                objdump_command = detail::build_objdump_command(request, objdump_input, candidate, std::nullopt);
-                objdump_exit = detail::run_process(objdump_command, stdout_path, stderr_path);
-                stdout_text = detail::read_text_file(stdout_path);
-                stderr_text = detail::read_text_file(stderr_path);
-                attempted.push_back(candidate);
-                auto tool_missing = objdump_exit == 127 && stdout_text.empty() && stderr_text.empty();
-                if (!tool_missing) {
-                    break;
-                }
-            }
-
-            if (objdump_exit == 127 && stdout_text.empty() && stderr_text.empty()) {
-                if (attempted.empty()) {
-                    stderr_text = "failed to execute llvm-objdump tool: {}\n"_format(request.objdump_path.string());
+                std::string extracted{};
+                if (kind == analysis_kind::asm_text) {
+                    extracted = detail::extract_asm_for_symbol(output_text, *resolved);
                 }
                 else {
-                    stderr_text = "failed to execute llvm-objdump tool: {}\ntried: {}\n"_format(
-                            request.objdump_path.string(), detail::join_with_separator(attempted, ", "sv));
+                    extracted = detail::extract_ir_for_symbol(output_text, *resolved);
                 }
-                detail::write_text_file(stderr_path, stderr_text);
-            }
 
-            if (resolved_symbol) {
-                auto display_symbol = detail::demangle_symbol_name(*resolved_symbol);
-                auto extracted = detail::extract_objdump_for_symbol(stdout_text, *resolved_symbol, display_symbol);
-                if (!extracted.empty()) {
-                    stdout_text = std::move(extracted);
+                if (extracted.empty() && kind == analysis_kind::asm_text) {
+                    auto dump_result = run_analysis(request, analysis_kind::dump);
+                    if (dump_result.success && !detail::trim_ascii(dump_result.artifact_text).empty()) {
+                        extracted = std::move(dump_result.artifact_text);
+                    }
+                    else {
+                        auto details = dump_result.diagnostics_text.empty()
+                                             ? "symbol not found in artifact: {}"_format(*resolved)
+                                             : detail::join_text(
+                                                       dump_result.diagnostics_text,
+                                                       "symbol not found in artifact: {}"_format(*resolved));
+                        throw std::runtime_error(details);
+                    }
                 }
-                else if (objdump_exit == 0) {
-                    stdout_text.clear();
-                    stderr_text =
-                            detail::join_text(stderr_text, "symbol not found in artifact: {}"_format(*resolved_symbol));
-                    objdump_exit = 1;
-                    detail::write_text_file(stderr_path, stderr_text);
+
+                if (extracted.empty()) {
+                    throw std::runtime_error("symbol not found in artifact: {}"_format(*resolved));
                 }
+
+                output_text = std::move(extracted);
             }
 
-            if (linked) {
-                std::error_code ec{};
-                fs::remove(binary_path, ec);
-            }
+            detail::write_text_file(artifact_path, output_text);
+            detail::write_text_file(stdout_path, stdout_text);
+            detail::write_text_file(stderr_path, diagnostics_text);
 
-            detail::write_text_file(artifact_path, stdout_text);
-
-            result.exit_code = objdump_exit;
-            result.success = (objdump_exit == 0);
-            result.binary_path = linked ? std::optional<fs::path>{binary_path} : std::nullopt;
-            result.command = std::move(objdump_command);
-            result.artifact_text = std::move(stdout_text);
-            result.diagnostics_text = std::move(stderr_text);
-            if (result.success) {
-                auto dump_streams =
-                        std::array{opcode::operation_stream_input{.name = "asm", .disassembly = result.artifact_text}};
-                detail::attach_opcode_mapping(result, dump_streams);
-            }
+            result.exit_code = 0;
+            result.success = true;
+            result.command = built_shared ? std::move(shared_command) : std::vector<std::string>{};
+            result.artifact_text = std::move(output_text);
+            result.diagnostics_text = std::move(diagnostics_text);
             return result;
         }
 
