@@ -98,6 +98,34 @@ namespace sontag::test { namespace detail {
         return lines;
     }
 
+    static size_t visible_width_without_ansi(std::string_view line) {
+        auto width = size_t{0U};
+        auto i = size_t{0U};
+        while (i < line.size()) {
+            auto c = line[i];
+            if (c == '\x1b' && i + 1U < line.size() && line[i + 1U] == '[') {
+                auto j = i + 2U;
+                while (j < line.size()) {
+                    auto terminator = static_cast<unsigned char>(line[j]);
+                    if (terminator >= 0x40U && terminator <= 0x7eU) {
+                        ++j;
+                        break;
+                    }
+                    ++j;
+                }
+                i = j;
+                continue;
+            }
+            ++width;
+            ++i;
+        }
+        return width;
+    }
+
+    static size_t line_count(std::string_view text) {
+        return static_cast<size_t>(std::count(text.begin(), text.end(), '\n'));
+    }
+
     struct scoped_env_var {
         std::string key{};
         std::optional<std::string> previous{};
@@ -1019,6 +1047,29 @@ namespace sontag::test {
         CHECK(output.out.find("symbols:") != std::string::npos);
         CHECK(output.out.find("main") != std::string::npos);
         CHECK(output.out.find("foo(") != std::string::npos);
+        CHECK(output.out.find("global text/function") != std::string::npos);
+        CHECK(output.out.find("legend:") != std::string::npos);
+    }
+
+    TEST_CASE("005: symbols highlights user-origin symbols with new-line palette color", "[005][session][symbols]") {
+        detail::temp_dir temp{"sontag_symbols_user_highlight"};
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.color = color_mode::always;
+        cfg.delta_color_scheme = color_scheme::classic;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":decl int ready = 0;\n"
+                ":decl int foo(int x) { return x + ready; }\n"
+                ":symbols\n"
+                ":quit\n");
+
+        CHECK(output.out.find("\x1b[38;5;117m    ready") != std::string::npos);
+        CHECK(output.out.find("\x1b[38;5;117m    foo(") != std::string::npos);
+        CHECK(output.err.empty());
     }
 
     TEST_CASE("005: asm command defaults to main when no symbol is provided", "[005][session][asm]") {
@@ -1049,7 +1100,7 @@ namespace sontag::test {
         CHECK(output.err.empty());
     }
 
-    TEST_CASE("005: asm output omits trailing linker int3 padding rows", "[005][session][asm]") {
+    TEST_CASE("005: asm output aggregates trailing linker padding rows", "[005][session][asm]") {
         detail::temp_dir temp{"sontag_asm_trim_int3_padding"};
 
         startup_config cfg{};
@@ -1070,6 +1121,7 @@ namespace sontag::test {
 
         CHECK(output.out.find("asm:") != std::string::npos);
         CHECK(output.out.find("symbol: main") != std::string::npos);
+        CHECK(output.out.find("padding ops: rows=") != std::string::npos);
         CHECK(output.out.find("| int3") == std::string::npos);
         CHECK(output.err.empty());
     }
@@ -1129,6 +1181,114 @@ namespace sontag::test {
         CHECK(output.out.find("note: node table truncated (showing first ") != std::string::npos);
         CHECK(output.out.find("note: layout truncated (showing first ") != std::string::npos);
         CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: ir graph frame clips all rows to terminal width in interactive mode", "[005][explorer][ir]") {
+        auto model = internal::explorer::graph_model{};
+        model.kind_label = "ir";
+        model.title = "main()";
+        model.nodes = {
+                internal::explorer::graph_node{
+                        .id = "n0",
+                        .short_label = "invoke void @std::__1::condition_variable::wait[abi:ne210108]<bool (*)()>(ptr "
+                                       "%cv, ptr %lk, ptr @is_not_ready())",
+                        .full_label = "n0 full",
+                        .outgoing_count = 0U,
+                        .incoming_count = 0U},
+                internal::explorer::graph_node{
+                        .id = "n1",
+                        .short_label = "call void @std::__1::thread::thread[abi:ne210108]<void (&)(), 0>(void "
+                                       "(&)())(ptr %3, ptr @waiter())",
+                        .full_label = "n1 full",
+                        .outgoing_count = 0U,
+                        .incoming_count = 0U}};
+        model.edges = {};
+        model.outgoing_edges.assign(model.nodes.size(), {});
+        model.incoming_edges.assign(model.nodes.size(), {});
+        model.selected_line_color = "\x1b[38;5;22m";
+        model.selected_detail_color = "\x1b[33m";
+        model.unchanged_line_color = "\x1b[38;5;117m";
+        model.removed_line_color = "\x1b[31m";
+
+        constexpr auto terminal_cols = size_t{72U};
+        auto frame = internal::explorer::detail::render_graph_frame(
+                model, 0U, 0U, model.nodes.size(), terminal_cols, true, false, true, false);
+
+        auto begin = size_t{0U};
+        while (begin < frame.size()) {
+            auto end = frame.find('\n', begin);
+            if (end == std::string::npos) {
+                end = frame.size();
+            }
+            auto line = std::string_view{frame}.substr(begin, end - begin);
+            CHECK(detail::visible_width_without_ansi(line) <= terminal_cols);
+            if (end == frame.size()) {
+                break;
+            }
+            begin = end + 1U;
+        }
+    }
+
+    TEST_CASE("005: ir sugiyama layout clips to terminal width in interactive mode", "[005][explorer][ir]") {
+        auto model = internal::explorer::graph_model{};
+        model.kind_label = "ir";
+        model.title = "main()";
+        model.nodes = {
+                internal::explorer::graph_node{
+                        .id = "n0",
+                        .short_label = "%0 = call void "
+                                       "@very_long_symbol_name_with_many_segments_and_template_args<aaaa,bbbb,cccc>()",
+                        .full_label = {},
+                        .outgoing_count = 1U,
+                        .incoming_count = 0U},
+                internal::explorer::graph_node{
+                        .id = "n1",
+                        .short_label = "%1 = call void "
+                                       "@another_symbol_name_with_many_segments_and_template_args<dddd,eeee,ffff>()",
+                        .full_label = {},
+                        .outgoing_count = 0U,
+                        .incoming_count = 1U}};
+        model.edges = {internal::explorer::graph_edge{.from = 0U, .to = 1U, .label = "edge"}};
+        model.outgoing_edges = {{0U}, {}};
+        model.incoming_edges = {{}, {0U}};
+
+        constexpr auto terminal_cols = size_t{48U};
+        auto ss = std::ostringstream{};
+        internal::explorer::detail::render_graph_sugiyama(model, ss, false, nullptr, 8U, terminal_cols);
+
+        auto text = ss.str();
+        auto begin = size_t{0U};
+        while (begin < text.size()) {
+            auto end = text.find('\n', begin);
+            if (end == std::string::npos) {
+                end = text.size();
+            }
+            auto line = std::string_view{text}.substr(begin, end - begin);
+            CHECK(detail::visible_width_without_ansi(line) <= terminal_cols);
+            if (end == text.size()) {
+                break;
+            }
+            begin = end + 1U;
+        }
+    }
+
+    TEST_CASE("005: mem frame height stays stable across rows with varying detail lines", "[005][explorer][mem]") {
+        auto model = internal::explorer::model{};
+        model.mode_label = "mem";
+        model.symbol_display = "main()";
+        model.operations_total = 2U;
+        model.opcode_counts = {{"mov", 2U}};
+        model.rows = {
+                internal::explorer::asm_row{.offset = "10", .encodings = "aa", .instruction = "mov eax, ebx"},
+                internal::explorer::asm_row{.offset = "11", .encodings = "bb", .instruction = "mov ecx, edx"}};
+        model.row_info = {internal::explorer::instruction_info{}, internal::explorer::instruction_info{}};
+        model.row_detail_lines = {
+                {}, {"address:", "  class=stack", "alias:", "  group=A0", "extra:", "  item1", "  item2", "  item3"}};
+
+        auto frame_row0 = internal::explorer::detail::render_frame(model, 0U, 0U, 2U);
+        auto frame_row1 = internal::explorer::detail::render_frame(model, 1U, 0U, 2U);
+
+        CHECK(detail::line_count(frame_row0) == detail::line_count(frame_row1));
     }
 
     TEST_CASE("005: asm explore falls back on non-interactive terminals", "[005][session][asm][explore]") {
@@ -2005,7 +2165,7 @@ namespace sontag::test {
         CHECK(output.out.find("imported directories") != std::string::npos);
         CHECK(output.out.find("mode=app") != std::string::npos);
         CHECK(output.out.find("entry={}"_format(main_path.string())) != std::string::npos);
-        CHECK(output.out.find("int bias = 3;") != std::string::npos);
+        CHECK(output.out.find("#include \"{}\""_format(util_path.string())) != std::string::npos);
         CHECK(output.out.find("int value = helper();") != std::string::npos);
         CHECK(output.err.empty());
 
@@ -2051,6 +2211,46 @@ namespace sontag::test {
         CHECK(output.out.find("mode=app") != std::string::npos);
         CHECK(output.out.find("#include \"template.hpp\"") != std::string::npos);
         CHECK(output.out.find("return square(3);") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE(
+            "005: import mem retains global bool trace value and avoids abi tag symbols",
+            "[005][session][import][mem]") {
+        detail::temp_dir temp{"sontag_import_mem_ready_value"};
+        auto project_dir = temp.path / "project";
+        detail::fs::create_directories(project_dir);
+
+        detail::write_text_file(
+                project_dir / "sync.hpp",
+                "#pragma once\n"
+                "#include <mutex>\n"
+                "inline std::mutex m;\n"
+                "inline bool ready = false;\n");
+        detail::write_text_file(
+                project_dir / "main.cpp",
+                "#include \"sync.hpp\"\n"
+                "int main() {\n"
+                "    std::lock_guard lock{m};\n"
+                "    ready = true;\n"
+                "    return 0;\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+        cfg.banner_enabled = false;
+        cfg.color = color_mode::never;
+        cfg.link = link_mode::staticlink;
+
+        auto script = ":import {}\n:mem\n:quit\n"_format(project_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("trace: enabled") != std::string::npos);
+        CHECK(output.out.find("ready") != std::string::npos);
+        CHECK(output.out.find("0x01") != std::string::npos);
+        CHECK(output.out.find("abi:ne210108") == std::string::npos);
         CHECK(output.err.empty());
     }
 
@@ -2106,7 +2306,7 @@ namespace sontag::test {
         CHECK(output.out.find("imported directories") != std::string::npos);
         CHECK(output.out.find("mode=app") != std::string::npos);
         CHECK(output.out.find("entry={}"_format(app_b_path.string())) != std::string::npos);
-        CHECK(output.out.find("inline int imported_bias = 6;") != std::string::npos);
+        CHECK(output.out.find("#include \"{}\""_format(lib_path.string())) != std::string::npos);
         CHECK(output.out.find("int seed = 8;") != std::string::npos);
         CHECK(output.out.find("return seed;") != std::string::npos);
         CHECK(output.out.find("return 1;") == std::string::npos);
@@ -2138,7 +2338,7 @@ namespace sontag::test {
 
         CHECK(output.out.find("imported directories") != std::string::npos);
         CHECK(output.out.find("mode=library") != std::string::npos);
-        CHECK(output.out.find("inline int library_seed = 17;") != std::string::npos);
+        CHECK(output.out.find("#include \"{}\""_format((project_dir / "library.hpp").string())) != std::string::npos);
         CHECK(output.out.find("return 1;") == std::string::npos);
         CHECK(output.out.find("return 2;") == std::string::npos);
         CHECK(output.err.empty());
@@ -2147,7 +2347,8 @@ namespace sontag::test {
         auto persisted_cells = detail::read_json_file<detail::persisted_cells>(session_dir / "cells.json");
         REQUIRE(persisted_cells.exec_cells.empty());
         REQUIRE(persisted_cells.decl_cells.size() == 1U);
-        CHECK(persisted_cells.decl_cells[0].find("inline int library_seed = 17;") != std::string::npos);
+        CHECK(persisted_cells.decl_cells[0].find("#include \"{}\""_format((project_dir / "library.hpp").string())) !=
+              std::string::npos);
         REQUIRE(persisted_cells.transactions.size() == 1U);
         CHECK(persisted_cells.transactions[0].kind == detail::transaction_kind::import);
         REQUIRE(persisted_cells.transactions[0].import_record.has_value());
@@ -2285,6 +2486,162 @@ namespace sontag::test {
         CHECK(output.out.find("imported directories") != std::string::npos);
         CHECK(output.out.find("mode=library") != std::string::npos);
         CHECK(output.out.find("command_db_only_symbol()") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: import symbols emit multi-tu compile_commands snapshot entries", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_compile_db_multi_tu_snapshot"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        detail::write_text_file(src_dir / "a.cpp", "int snapshot_symbol_a() { return 1; }\n");
+        detail::write_text_file(src_dir / "b.cpp", "int snapshot_symbol_b() { return 2; }\n");
+
+        auto compile_db = std::string{};
+        compile_db.append("[\n");
+        compile_db.append("  {\n");
+        compile_db.append("    \"directory\": \"");
+        compile_db.append(project_dir.string());
+        compile_db.append("\",\n");
+        compile_db.append("    \"file\": \"src/a.cpp\",\n");
+        compile_db.append(
+                "    \"arguments\": [\"clang++\", \"-std=c++23\", \"-c\", \"src/a.cpp\", \"-o\", \"build/a.o\"]\n");
+        compile_db.append("  },\n");
+        compile_db.append("  {\n");
+        compile_db.append("    \"directory\": \"");
+        compile_db.append(project_dir.string());
+        compile_db.append("\",\n");
+        compile_db.append("    \"file\": \"src/b.cpp\",\n");
+        compile_db.append(
+                "    \"arguments\": [\"clang++\", \"-std=c++23\", \"-c\", \"src/b.cpp\", \"-o\", \"build/b.o\"]\n");
+        compile_db.append("  }\n");
+        compile_db.append("]\n");
+        detail::write_text_file(project_dir / "compile_commands.json", compile_db);
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {} library\n:symbols\n:quit\n"_format(src_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("snapshot_symbol_a()") != std::string::npos);
+        CHECK(output.out.find("snapshot_symbol_b()") != std::string::npos);
+        CHECK(output.err.empty());
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto snapshots =
+                detail::find_files_named_recursive(session_dir / "artifacts", "compile_commands.snapshot.json");
+        REQUIRE_FALSE(snapshots.empty());
+
+        auto found_multi_tu_snapshot = false;
+        for (const auto& snapshot_path : snapshots) {
+            auto text = detail::read_text_file(snapshot_path);
+            if (text.find("src/a.cpp") != std::string::npos && text.find("src/b.cpp") != std::string::npos) {
+                found_multi_tu_snapshot = true;
+                break;
+            }
+        }
+        CHECK(found_multi_tu_snapshot);
+    }
+
+    TEST_CASE("005: import symbols prefer existing compile_commands over cmake fallback", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_compile_db_precedence"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        detail::write_text_file(
+                src_dir / "core.cpp",
+                "#ifdef ENABLE_DB_ONLY\n"
+                "int from_compile_db_symbol() {\n"
+                "    return 21;\n"
+                "}\n"
+                "#endif\n"
+                "#ifdef ENABLE_CMAKE_ONLY\n"
+                "int from_cmake_symbol() {\n"
+                "    return 34;\n"
+                "}\n"
+                "#endif\n");
+
+        auto compile_db = std::string{};
+        compile_db.append("[\n");
+        compile_db.append("  {\n");
+        compile_db.append("    \"directory\": \"");
+        compile_db.append(project_dir.string());
+        compile_db.append("\",\n");
+        compile_db.append("    \"file\": \"src/core.cpp\",\n");
+        compile_db.append(
+                "    \"arguments\": [\"clang++\", \"-std=c++23\", \"-DENABLE_DB_ONLY\", \"-c\", \"src/core.cpp\", "
+                "\"-o\", \"build/core.o\"]\n");
+        compile_db.append("  }\n");
+        compile_db.append("]\n");
+        detail::write_text_file(project_dir / "compile_commands.json", compile_db);
+
+        detail::write_text_file(
+                project_dir / "CMakeLists.txt",
+                "cmake_minimum_required(VERSION 3.16)\n"
+                "project(sontag_import_precedence LANGUAGES CXX)\n"
+                "add_library(import_core src/core.cpp)\n"
+                "target_compile_definitions(import_core PRIVATE ENABLE_CMAKE_ONLY=1)\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {} library\n:symbols\n:quit\n"_format(src_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("mode=library") != std::string::npos);
+        CHECK(output.out.find("from_compile_db_symbol()") != std::string::npos);
+        CHECK(output.out.find("from_cmake_symbol()") == std::string::npos);
+        CHECK(output.err.empty());
+
+        auto session_dir = detail::find_single_session_dir(cfg.cache_dir);
+        auto generated_compile_dbs =
+                detail::find_files_named_recursive(session_dir / "artifacts", "compile_commands.json");
+        auto has_cmake_generated_db = false;
+        for (const auto& path : generated_compile_dbs) {
+            if (path.string().find("cmake_compdb") != std::string::npos) {
+                has_cmake_generated_db = true;
+                break;
+            }
+        }
+        CHECK_FALSE(has_cmake_generated_db);
+    }
+
+    TEST_CASE("005: import symbols fallback to root include paths without compile database", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_symbols_root_include_fallback"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        auto include_dir = project_dir / "include";
+        detail::fs::create_directories(src_dir);
+        detail::fs::create_directories(include_dir);
+
+        detail::write_text_file(
+                include_dir / "helper.hpp",
+                "inline int helper_value(int x) {\n"
+                "    return x + 7;\n"
+                "}\n");
+        detail::write_text_file(
+                src_dir / "library.cpp",
+                "#include \"helper.hpp\"\n"
+                "int fallback_include_symbol(int x) {\n"
+                "    return helper_value(x);\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {} {} library\n:symbols\n:quit\n"_format(src_dir.string(), include_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("mode=library") != std::string::npos);
+        CHECK(output.out.find("fallback_include_symbol(int)") != std::string::npos);
         CHECK(output.err.empty());
     }
 
@@ -2484,8 +2841,8 @@ namespace sontag::test {
 
         CHECK(output.out.find("imported directories") != std::string::npos);
         CHECK(output.out.find("mode=library") != std::string::npos);
-        CHECK(output.out.find("int library_value = 21;") != std::string::npos);
-        CHECK(output.out.find("inline int include_value = 5;") != std::string::npos);
+        CHECK(output.out.find("#include \"{}\""_format((src_dir / "library.cpp").string())) != std::string::npos);
+        CHECK(output.out.find("#include \"{}\""_format((include_dir / "library.hpp").string())) != std::string::npos);
         CHECK(output.out.find("return 100;") == std::string::npos);
         CHECK(output.out.find("return 200;") == std::string::npos);
         CHECK(output.err.empty());

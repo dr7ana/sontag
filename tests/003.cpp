@@ -293,6 +293,110 @@ namespace sontag::test {
         CHECK(first_result.source_path.parent_path() != second_result.source_path.parent_path());
     }
 
+    TEST_CASE(
+            "003: import fingerprint invalidates build hash when imported file changes",
+            "[003][analysis][cache][import]") {
+        detail::temp_dir temp{"sontag_m1_import_fingerprint_hash"};
+        auto project_dir = temp.path / "project";
+        detail::fs::create_directories(project_dir);
+        auto library_header = project_dir / "library.hpp";
+        detail::write_text_file(
+                library_header,
+                "inline int import_value() {\n"
+                "    return 1;\n"
+                "}\n");
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {std::string{"#include \""} + library_header.string() + "\"\n"};
+        request.exec_cells = {"volatile int sink = import_value();", "return sink;"};
+        request.import_context = analysis_import_context{
+                .mode = "library",
+                .roots = {project_dir},
+                .files = {library_header},
+                .main_files = {},
+                .entry = std::nullopt};
+
+        auto first_result = run_analysis(request, analysis_kind::asm_text);
+        REQUIRE(first_result.success);
+        REQUIRE(first_result.source_path.filename() == "exec.cpp");
+        REQUIRE_FALSE(first_result.command.empty());
+
+        detail::write_text_file(
+                library_header,
+                "inline int import_value() {\n"
+                "    return 2;\n"
+                "}\n");
+
+        auto second_result = run_analysis(request, analysis_kind::asm_text);
+        REQUIRE(second_result.success);
+        REQUIRE(second_result.source_path.filename() == "exec.cpp");
+        REQUIRE_FALSE(second_result.command.empty());
+        CHECK(first_result.source_path.parent_path().parent_path() !=
+              second_result.source_path.parent_path().parent_path());
+    }
+
+    TEST_CASE(
+            "003: import fingerprint invalidates build hash when symlinked root target changes",
+            "[003][analysis][cache][import]") {
+        detail::temp_dir temp{"sontag_m1_import_fingerprint_symlink"};
+        auto project_a = temp.path / "project_a";
+        auto project_b = temp.path / "project_b";
+        detail::fs::create_directories(project_a);
+        detail::fs::create_directories(project_b);
+
+        auto shared_source =
+                "inline int import_value() {\n"
+                "    return 3;\n"
+                "}\n";
+        detail::write_text_file(project_a / "library.hpp", shared_source);
+        detail::write_text_file(project_b / "library.hpp", shared_source);
+
+        auto link_root = temp.path / "active_root";
+        auto retarget_root = [&](const detail::fs::path& target) {
+            std::error_code ec{};
+            detail::fs::remove(link_root, ec);
+            ec.clear();
+            detail::fs::create_directory_symlink(target, link_root, ec);
+            if (!ec) {
+                return;
+            }
+            ec.clear();
+            detail::fs::create_symlink(target, link_root, ec);
+            REQUIRE_FALSE(ec);
+        };
+
+        retarget_root(project_a);
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o2;
+        request.decl_cells = {std::string{"#include \""} + (link_root / "library.hpp").string() + "\"\n"};
+        request.exec_cells = {"volatile int sink = import_value();", "return sink;"};
+        request.import_context = analysis_import_context{
+                .mode = "library",
+                .roots = {link_root},
+                .files = {link_root / "library.hpp"},
+                .main_files = {},
+                .entry = std::nullopt};
+
+        auto first_result = run_analysis(request, analysis_kind::asm_text);
+        REQUIRE(first_result.success);
+        REQUIRE(first_result.source_path.filename() == "exec.cpp");
+
+        retarget_root(project_b);
+        auto second_result = run_analysis(request, analysis_kind::asm_text);
+        REQUIRE(second_result.success);
+        REQUIRE(second_result.source_path.filename() == "exec.cpp");
+        CHECK(first_result.source_path.parent_path().parent_path() !=
+              second_result.source_path.parent_path().parent_path());
+    }
+
     TEST_CASE("003: mem_trace cache hit preserves trace payload exit code", "[003][analysis][cache][mem]") {
         detail::temp_dir temp{"sontag_m1_mem_trace_cache_hit"};
 
@@ -1338,6 +1442,108 @@ namespace sontag::test {
         CHECK(payload_json.find("\"symbol_display\":\"square(int)\"") != std::string::npos);
         CHECK(payload_json.find("\"ir\"") != std::string::npos);
         CHECK(payload_json.find("\"asm\"") != std::string::npos);
+    }
+
+    TEST_CASE("003: import-backed graph cfg consumes compile_commands flags", "[003][analysis][import][graph]") {
+        detail::temp_dir temp{"sontag_m1_import_graph_cfg_compile_db"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        auto graph_path = src_dir / "graph.cpp";
+        detail::write_text_file(
+                graph_path,
+                "#ifdef ENABLE_GRAPH_DB\n"
+                "extern \"C\" int graph_db_symbol(int x) {\n"
+                "    if (x > 0) {\n"
+                "        return x + 1;\n"
+                "    }\n"
+                "    return x - 1;\n"
+                "}\n"
+                "#endif\n");
+
+        auto compile_db = std::string{};
+        compile_db.append("[\n");
+        compile_db.append("  {\n");
+        compile_db.append("    \"directory\": \"");
+        compile_db.append(project_dir.string());
+        compile_db.append("\",\n");
+        compile_db.append("    \"file\": \"src/graph.cpp\",\n");
+        compile_db.append(
+                "    \"arguments\": [\"clang++\", \"-std=c++23\", \"-DENABLE_GRAPH_DB\", \"-c\", \"src/graph.cpp\", "
+                "\"-o\", \"build/graph.o\"]\n");
+        compile_db.append("  }\n");
+        compile_db.append("]\n");
+        detail::write_text_file(project_dir / "compile_commands.json", compile_db);
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int __import_graph_compile_db_anchor = 0;"};
+        request.symbol = "graph_db_symbol";
+        request.import_context = analysis_import_context{
+                .mode = "library", .roots = {src_dir}, .files = {graph_path}, .main_files = {}, .entry = std::nullopt};
+
+        auto graph_result = run_analysis(request, analysis_kind::graph_cfg);
+        REQUIRE(graph_result.success);
+        CHECK(graph_result.exit_code == 0);
+        CHECK(graph_result.artifact_text.find("graph_db_symbol") != std::string::npos);
+        auto dot_text = detail::read_text_file(graph_result.artifact_path);
+        CHECK(dot_text.find("graph_db_symbol") != std::string::npos);
+    }
+
+    TEST_CASE("003: import-backed inspect asm consumes compile_commands flags", "[003][analysis][import][inspect]") {
+        detail::temp_dir temp{"sontag_m1_import_inspect_compile_db"};
+        auto project_dir = temp.path / "project";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(src_dir);
+
+        auto inspect_path = src_dir / "inspect.cpp";
+        detail::write_text_file(
+                inspect_path,
+                "#ifdef ENABLE_INSPECT_DB\n"
+                "extern \"C\" int inspect_db_symbol(int x) {\n"
+                "    return x * 4;\n"
+                "}\n"
+                "#endif\n");
+
+        auto compile_db = std::string{};
+        compile_db.append("[\n");
+        compile_db.append("  {\n");
+        compile_db.append("    \"directory\": \"");
+        compile_db.append(project_dir.string());
+        compile_db.append("\",\n");
+        compile_db.append("    \"file\": \"src/inspect.cpp\",\n");
+        compile_db.append(
+                "    \"arguments\": [\"clang++\", \"-std=c++23\", \"-DENABLE_INSPECT_DB\", \"-c\", "
+                "\"src/inspect.cpp\", "
+                "\"-o\", \"build/inspect.o\"]\n");
+        compile_db.append("  }\n");
+        compile_db.append("]\n");
+        detail::write_text_file(project_dir / "compile_commands.json", compile_db);
+
+        analysis_request request{};
+        request.clang_path = "/usr/bin/clang++";
+        request.session_dir = temp.path / "session";
+        request.language_standard = cxx_standard::cxx23;
+        request.opt_level = optimization_level::o0;
+        request.decl_cells = {"int __import_inspect_compile_db_anchor = 0;"};
+        request.symbol = "inspect_db_symbol";
+        request.import_context = analysis_import_context{
+                .mode = "library",
+                .roots = {src_dir},
+                .files = {inspect_path},
+                .main_files = {},
+                .entry = std::nullopt};
+
+        auto inspect_result = run_analysis(request, analysis_kind::inspect_asm_map);
+        REQUIRE(inspect_result.success);
+        CHECK(inspect_result.exit_code == 0);
+        CHECK(inspect_result.artifact_text.find("inspect_db_symbol") != std::string::npos);
+        auto payload_json = detail::read_text_file(inspect_result.artifact_path);
+        CHECK(payload_json.find("inspect_db_symbol") != std::string::npos);
     }
 
 }  // namespace sontag::test

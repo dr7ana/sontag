@@ -1793,10 +1793,15 @@ namespace sontag::cli {
                     continue;
                 }
 
-                auto content = read_text_file(file_path);
-                if (!trim_view(content).empty()) {
-                    plan.decl_cells.push_back(std::move(content));
+                auto escaped_include_path = std::string{};
+                escaped_include_path.reserve(file_path.string().size());
+                for (char c : file_path.string()) {
+                    if (c == '\\' || c == '"') {
+                        escaped_include_path.push_back('\\');
+                    }
+                    escaped_include_path.push_back(c);
                 }
+                plan.decl_cells.push_back("#include \"{}\"\n"_format(escaped_include_path));
             }
 
             if (plan.decl_cells.empty() && plan.exec_cells.empty()) {
@@ -2733,19 +2738,204 @@ namespace sontag::cli {
             os << synthesize_source(request);
         }
 
-        static void print_symbols(const std::vector<analysis_symbol>& symbols, bool verbose, std::ostream& os) {
+        static std::string_view describe_symbol_kind(char kind) {
+            switch (kind) {
+                case 'T':
+                    return "global text/function";
+                case 't':
+                    return "local text/function";
+                case 'W':
+                    return "weak symbol";
+                case 'w':
+                    return "local weak symbol";
+                case 'V':
+                    return "weak object/data";
+                case 'v':
+                    return "local weak object/data";
+                case 'D':
+                    return "global initialized data";
+                case 'd':
+                    return "local initialized data";
+                case 'B':
+                    return "global bss";
+                case 'b':
+                    return "local bss";
+                case 'R':
+                    return "global read-only data";
+                case 'r':
+                    return "local read-only data";
+                case 'A':
+                    return "global absolute symbol";
+                case 'a':
+                    return "local absolute symbol";
+                case 'U':
+                    return "undefined reference";
+                case 'i':
+                case 'I':
+                    return "indirect function (ifunc)";
+                case 'N':
+                case 'n':
+                    return "debug/metadata symbol";
+                case 'f':
+                    return "source file symbol";
+                default:
+                    return "other symbol";
+            }
+        }
+
+        static int symbol_kind_order(char kind) {
+            switch (kind) {
+                case 'T':
+                    return 0;
+                case 't':
+                    return 1;
+                case 'W':
+                    return 2;
+                case 'w':
+                    return 3;
+                case 'V':
+                    return 4;
+                case 'v':
+                    return 5;
+                case 'D':
+                    return 6;
+                case 'd':
+                    return 7;
+                case 'B':
+                    return 8;
+                case 'b':
+                    return 9;
+                case 'R':
+                    return 10;
+                case 'r':
+                    return 11;
+                case 'A':
+                    return 12;
+                case 'a':
+                    return 13;
+                case 'U':
+                    return 14;
+                case 'I':
+                    return 15;
+                case 'i':
+                    return 16;
+                case 'N':
+                    return 17;
+                case 'n':
+                    return 18;
+                case 'f':
+                    return 19;
+                default:
+                    return 100 + static_cast<unsigned char>(kind);
+            }
+        }
+
+        static bool is_symbol_identifier_start(char c) {
+            return std::isalpha(static_cast<unsigned char>(c)) != 0 || c == '_';
+        }
+
+        static bool is_symbol_identifier_continue(char c) {
+            return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+        }
+
+        static bool is_user_origin_symbol(const analysis_symbol& symbol) {
+            auto name = trim_view(symbol.demangled);
+            if (name.empty()) {
+                return false;
+            }
+            if (name.starts_with('.') || name.starts_with("__"sv) || name.starts_with("_GLOBAL__sub_I_"sv) ||
+                name.starts_with("DW.ref."sv) || name.starts_with("GCC_except_table"sv) ||
+                name.starts_with("guard variable for "sv)) {
+                return false;
+            }
+            if (name.find("::"sv) != std::string_view::npos || name.find("[abi:"sv) != std::string_view::npos) {
+                return false;
+            }
+
+            auto head = name;
+            if (auto paren = head.find('('); paren != std::string_view::npos) {
+                head = head.substr(0U, paren);
+            }
+            head = trim_view(head);
+            if (head.empty() || !is_symbol_identifier_start(head.front())) {
+                return false;
+            }
+            if (!std::ranges::all_of(head, is_symbol_identifier_continue)) {
+                return false;
+            }
+
+            static constexpr auto builtin_type_tokens = std::array{
+                    "auto"sv,
+                    "bool"sv,
+                    "char"sv,
+                    "double"sv,
+                    "float"sv,
+                    "int"sv,
+                    "long"sv,
+                    "short"sv,
+                    "signed"sv,
+                    "unsigned"sv,
+                    "void"sv,
+                    "wchar_t"sv};
+            return std::ranges::find(builtin_type_tokens, head) == builtin_type_tokens.end();
+        }
+
+        static void print_symbols(
+                const std::vector<analysis_symbol>& symbols,
+                bool verbose,
+                std::string_view user_symbol_color,
+                std::ostream& os) {
             if (symbols.empty()) {
                 os << "no symbols found\n";
                 return;
             }
 
             os << "symbols:\n";
+            auto grouped = std::unordered_map<char, std::vector<const analysis_symbol*>>{};
+            grouped.reserve(symbols.size());
             for (const auto& symbol : symbols) {
-                os << "  [" << symbol.kind << "] " << symbol.demangled;
-                if (verbose && symbol.demangled != symbol.mangled) {
-                    os << " <" << symbol.mangled << '>';
+                grouped[symbol.kind].push_back(&symbol);
+            }
+
+            auto kinds = std::vector<char>{};
+            kinds.reserve(grouped.size());
+            for (const auto& [kind, _] : grouped) {
+                kinds.push_back(kind);
+            }
+            std::ranges::sort(kinds, [](char lhs, char rhs) {
+                auto lhs_order = symbol_kind_order(lhs);
+                auto rhs_order = symbol_kind_order(rhs);
+                if (lhs_order != rhs_order) {
+                    return lhs_order < rhs_order;
                 }
-                os << '\n';
+                return lhs < rhs;
+            });
+
+            for (char kind : kinds) {
+                auto it = grouped.find(kind);
+                if (it == grouped.end()) {
+                    continue;
+                }
+                os << "  [" << kind << "] " << describe_symbol_kind(kind) << " (" << it->second.size() << "):\n";
+                for (const auto* symbol : it->second) {
+                    auto colorize = !user_symbol_color.empty() && is_user_origin_symbol(*symbol);
+                    if (colorize) {
+                        os << user_symbol_color;
+                    }
+                    os << "    " << symbol->demangled;
+                    if (colorize) {
+                        os << "\x1b[0m";
+                    }
+                    if (verbose && symbol->demangled != symbol->mangled) {
+                        os << " <" << symbol->mangled << '>';
+                    }
+                    os << '\n';
+                }
+            }
+
+            os << "legend:\n";
+            for (char kind : kinds) {
+                os << "  [" << kind << "] " << describe_symbol_kind(kind) << '\n';
             }
         }
 
@@ -4150,6 +4340,9 @@ examples:
             size_t operations{};
             std::vector<std::pair<std::string, size_t>> opcode_counts{};
             std::vector<internal::explorer::asm_row> rows{};
+            size_t padding_rows{};
+            size_t padding_bytes{};
+            std::vector<std::pair<std::string, size_t>> padding_opcode_counts{};
         };
 
         struct mem_summary {
@@ -5116,6 +5309,143 @@ examples:
             return to_upper_ascii(token);
         }
 
+        static std::string to_lower_ascii(std::string_view value) {
+            std::string out{};
+            out.reserve(value.size());
+            for (char c : value) {
+                if (c >= 'A' && c <= 'Z') {
+                    out.push_back(static_cast<char>(c + ('a' - 'A')));
+                }
+                else {
+                    out.push_back(c);
+                }
+            }
+            return out;
+        }
+
+        static bool is_padding_instruction_prefix(std::string_view token) {
+            static const auto prefixes =
+                    std::array{"data16"sv, "data32"sv, "data64"sv, "addr16"sv,   "addr32"sv,   "addr64"sv,
+                               "cs"sv,     "ds"sv,     "es"sv,     "fs"sv,       "gs"sv,       "ss"sv,
+                               "lock"sv,   "rep"sv,    "repe"sv,   "repz"sv,     "repne"sv,    "repnz"sv,
+                               "rex64"sv,  "rex.w"sv,  "bnd"sv,    "xacquire"sv, "xrelease"sv, "notrack"sv};
+            return std::ranges::contains(prefixes, token);
+        }
+
+        static bool is_padding_opcode(std::string_view opcode) {
+            if (opcode.empty()) {
+                return false;
+            }
+            auto upper = to_upper_ascii(opcode);
+            if (upper == "INT3"sv || upper == "NOP"sv || upper == "FNOP"sv || upper == "BRK"sv || upper == "UDF"sv ||
+                upper == "UD2"sv || upper == "HLT"sv || upper == "HINT"sv) {
+                return true;
+            }
+            return upper.size() > 3U && upper.starts_with("NOP"sv);
+        }
+
+        static std::optional<std::string> extract_primary_instruction_token(std::string_view instruction) {
+            auto remaining = trim_view(instruction);
+            while (!remaining.empty()) {
+                auto end = remaining.find_first_of(" \t\r\n");
+                auto token = end == std::string_view::npos ? remaining : remaining.substr(0U, end);
+                remaining = end == std::string_view::npos ? std::string_view{} : trim_view(remaining.substr(end));
+                while (!token.empty() && (token.back() == ',' || token.back() == ':')) {
+                    token.remove_suffix(1U);
+                }
+                if (token.empty()) {
+                    continue;
+                }
+                auto lower = to_lower_ascii(token);
+                if (is_padding_instruction_prefix(lower)) {
+                    continue;
+                }
+                return to_upper_ascii(token);
+            }
+            return std::nullopt;
+        }
+
+        static size_t count_encoding_bytes(std::string_view encodings) {
+            auto bytes = size_t{0U};
+            auto cursor = size_t{0U};
+            while (cursor < encodings.size()) {
+                while (cursor < encodings.size() && std::isspace(static_cast<unsigned char>(encodings[cursor])) != 0) {
+                    ++cursor;
+                }
+                if (cursor >= encodings.size()) {
+                    break;
+                }
+                auto end = cursor;
+                while (end < encodings.size() && std::isspace(static_cast<unsigned char>(encodings[end])) == 0) {
+                    ++end;
+                }
+                auto token = encodings.substr(cursor, end - cursor);
+                if (opcode::is_hex_blob_token(token)) {
+                    bytes += token.size() / 2U;
+                }
+                cursor = end;
+            }
+            return bytes;
+        }
+
+        static void finalize_padding_summary(asm_summary& summary) {
+            auto padding_rows_from_opcodes = size_t{0U};
+            for (const auto& [opcode_name, count] : summary.opcode_counts) {
+                if (is_padding_opcode(opcode_name)) {
+                    padding_rows_from_opcodes += count;
+                    append_opcode_count(summary.padding_opcode_counts, opcode_name);
+                }
+            }
+
+            if (!summary.rows.empty()) {
+                summary.padding_rows = 0U;
+                summary.padding_bytes = 0U;
+                summary.padding_opcode_counts.clear();
+                for (const auto& row : summary.rows) {
+                    auto token = extract_primary_instruction_token(row.instruction);
+                    if (!token.has_value() || !is_padding_opcode(*token)) {
+                        continue;
+                    }
+                    ++summary.padding_rows;
+                    summary.padding_bytes += count_encoding_bytes(row.encodings);
+                    append_opcode_count(summary.padding_opcode_counts, *token);
+                }
+            }
+
+            if (summary.padding_rows == 0U) {
+                summary.padding_rows = padding_rows_from_opcodes;
+            }
+
+            if (summary.padding_opcode_counts.empty()) {
+                for (const auto& [opcode_name, count] : summary.opcode_counts) {
+                    if (!is_padding_opcode(opcode_name)) {
+                        continue;
+                    }
+                    summary.padding_opcode_counts.push_back({opcode_name, count});
+                }
+            }
+
+            if (summary.padding_rows == 0U) {
+                return;
+            }
+
+            auto collapsed = std::vector<std::pair<std::string, size_t>>{};
+            collapsed.reserve(summary.opcode_counts.size());
+            auto padding_total = size_t{0U};
+            for (const auto& [opcode_name, count] : summary.opcode_counts) {
+                if (is_padding_opcode(opcode_name)) {
+                    padding_total += count;
+                    continue;
+                }
+                collapsed.push_back({opcode_name, count});
+            }
+            if (padding_total == 0U) {
+                padding_total = summary.padding_rows;
+            }
+            collapsed.push_back({"padding ops", padding_total});
+            summary.opcode_counts = std::move(collapsed);
+        }
+
         static std::optional<std::string_view> find_instruction_definition_exact(
                 std::string_view mnemonic, const std::flat_map<std::string, std::string>& table) {
             if (mnemonic.empty()) {
@@ -5231,6 +5561,7 @@ examples:
                                     .instruction = format_asm_instruction_text(operation)});
                 }
             }
+            finalize_padding_summary(summary);
             return summary;
         }
 
@@ -6386,10 +6717,12 @@ examples:
             if (asm_summary.rows.empty() && !dump_text.empty()) {
                 asm_summary.rows = parse_dump_rows(dump_text);
                 asm_summary.operations = asm_summary.rows.size();
+                asm_summary.opcode_counts.clear();
                 for (const auto& row : asm_summary.rows) {
                     auto [mnemonic, _] = split_asm_instruction_parts(row.instruction);
                     append_opcode_count(asm_summary.opcode_counts, mnemonic);
                 }
+                finalize_padding_summary(asm_summary);
             }
             auto mca_result = run_analysis(request, analysis_kind::mca);
             if (mca_result.success) {
@@ -6443,6 +6776,27 @@ examples:
                     opcode_cell = colorize_asm_text_span(opcode_cell, 2U, 2U + opcode.size(), modified_color);
                 }
                 os << diff_indent << opcode_cell << " | " << pad_asm_cell("{}"_format(count), count_width) << '\n';
+            }
+
+            if (summary.padding_rows > 0U) {
+                os << diff_indent
+                   << "  note: padding ops aggregate assembler/linker fill instructions (alignment/trap bytes)";
+                if (!summary.padding_opcode_counts.empty()) {
+                    os << " [";
+                    auto preview_count = std::min<size_t>(summary.padding_opcode_counts.size(), 8U);
+                    for (size_t i = 0U; i < preview_count; ++i) {
+                        if (i != 0U) {
+                            os << ", ";
+                        }
+                        os << "{}({})"_format(
+                                summary.padding_opcode_counts[i].first, summary.padding_opcode_counts[i].second);
+                    }
+                    if (summary.padding_opcode_counts.size() > preview_count) {
+                        os << ", ...";
+                    }
+                    os << ']';
+                }
+                os << '\n';
             }
         }
 
@@ -6507,6 +6861,13 @@ examples:
                 os << "symbol: {}\n"_format(*symbol);
             }
             os << "operations: {}\n"_format(summary.operations);
+            if (summary.padding_rows == 0U) {
+                os << "padding ops: rows=0 | bytes=0\n";
+            }
+            else {
+                os << "padding ops: rows={} | bytes={} (alignment/trap-fill emitted by assembler/linker)\n"_format(
+                        summary.padding_rows, summary.padding_bytes);
+            }
             render_asm_opcode_table(summary, os, modified_color);
             render_asm_instruction_rows(summary, os, modified_color);
         }
@@ -8591,10 +8952,12 @@ examples:
                     if (summary.rows.empty() && !dump_text.empty()) {
                         summary.rows = parse_dump_rows(dump_text);
                         summary.operations = summary.rows.size();
+                        summary.opcode_counts.clear();
                         for (const auto& row : summary.rows) {
                             auto [mnemonic, _] = split_asm_instruction_parts(row.instruction);
                             append_opcode_count(summary.opcode_counts, mnemonic);
                         }
+                        finalize_padding_summary(summary);
                     }
                     std::vector<internal::explorer::instruction_info> row_info{};
                     auto resource_pressure = internal::explorer::resource_pressure_table{};
@@ -9151,7 +9514,11 @@ examples:
                 try {
                     auto request = make_analysis_request(cfg, state);
                     auto symbols = list_symbols(request);
-                    print_symbols(symbols, cfg.verbose, std::cout);
+                    auto user_symbol_color = std::string_view{};
+                    if (should_use_color(cfg.color)) {
+                        user_symbol_color = resolve_delta_color_palette(cfg.delta_color_scheme).inserted;
+                    }
+                    print_symbols(symbols, cfg.verbose, user_symbol_color, std::cout);
                 } catch (const std::exception& e) {
                     std::cerr << "symbol listing error: {}\n"_format(e.what());
                 }

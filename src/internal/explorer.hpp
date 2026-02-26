@@ -908,8 +908,9 @@ namespace sontag::internal::explorer {
             // layout_rows_reserved (optional layout viewport budget) +
             // 1 (blank before layout) +
             // 1 (layout heading) +
-            // 1 (controls)
-            auto fixed_rows = 11U + layout_rows_reserved;
+            // 1 (controls) +
+            // 1 (possible "layout truncated" note line)
+            auto fixed_rows = 12U + layout_rows_reserved;
             if (total_rows <= fixed_rows) {
                 return 1U;
             }
@@ -954,7 +955,12 @@ namespace sontag::internal::explorer {
             auto safe_cursor = data.nodes.empty() ? 0U : std::min(cursor, data.nodes.size() - 1U);
 
             auto append_line = [&](std::string_view line) {
-                frame.append(line);
+                if (clear_screen) {
+                    frame.append(clip_to_width(line, terminal_cols));
+                }
+                else {
+                    frame.append(line);
+                }
                 frame.push_back('\n');
             };
 
@@ -1189,7 +1195,12 @@ namespace sontag::internal::explorer {
                         else {
                             frame.append(data.selected_line_color);
                         }
-                        frame.append(clip_to_width(row, terminal_cols));
+                        if (clear_screen) {
+                            frame.append(clip_to_width(row, terminal_cols));
+                        }
+                        else {
+                            frame.append(row);
+                        }
                         frame.append("\x1b[0m\n");
                     }
                     else {
@@ -1679,10 +1690,22 @@ namespace sontag::internal::explorer {
                                     has_info && !info.encoding_size.empty() ? std::string_view{info.encoding_size}
                                                                             : "na",
                                     value_width)));
-            if (cursor < data.row_detail_lines.size() && !data.row_detail_lines[cursor].empty()) {
+            auto detail_lines_budget = detail_lines_reserve;
+            if (detail_lines_budget > 0U) {
                 append_line("");
-                for (const auto& detail_line : data.row_detail_lines[cursor]) {
-                    append_line(detail_line);
+                --detail_lines_budget;
+
+                auto detail_lines = std::span<const std::string>{};
+                if (cursor < data.row_detail_lines.size()) {
+                    detail_lines = data.row_detail_lines[cursor];
+                }
+                auto detail_count = std::min(detail_lines_budget, detail_lines.size());
+                for (size_t i = 0U; i < detail_count; ++i) {
+                    append_line(detail_lines[i]);
+                }
+                detail_lines_budget -= detail_count;
+                for (size_t i = 0U; i < detail_lines_budget; ++i) {
+                    append_line("");
                 }
             }
             return frame;
@@ -2004,7 +2027,8 @@ namespace sontag::internal::explorer {
                 std::ostream& out,
                 bool include_header = true,
                 const std::unordered_map<std::string, std::string_view>* node_id_colors = nullptr,
-                size_t max_lines = std::numeric_limits<size_t>::max()) {
+                size_t max_lines = std::numeric_limits<size_t>::max(),
+                size_t max_cols = std::numeric_limits<size_t>::max()) {
             auto emitted_lines = size_t{0U};
             auto truncated_lines = false;
             auto append_line = [&](std::string_view line) {
@@ -2012,7 +2036,12 @@ namespace sontag::internal::explorer {
                     truncated_lines = true;
                     return;
                 }
-                out << line << '\n';
+                if (max_cols != std::numeric_limits<size_t>::max()) {
+                    out << clip_to_width(line, max_cols) << '\n';
+                }
+                else {
+                    out << line << '\n';
+                }
                 ++emitted_lines;
             };
 
@@ -2376,7 +2405,7 @@ namespace sontag::internal::explorer {
                         data, cursor, top_row, rows_visible, dims.cols, true, false, true, false);
                 out << '\n';
                 out << "layout:\n";
-                detail::render_graph_sugiyama(data, out, false, &node_colors, layout_rows_visible);
+                detail::render_graph_sugiyama(data, out, false, &node_colors, layout_rows_visible, dims.cols);
                 out << "controls: up/down j/k q | {}/{}\n"_format(safe_cursor + 1U, data.nodes.size());
                 out.flush();
 

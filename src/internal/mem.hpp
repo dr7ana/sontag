@@ -20,6 +20,7 @@
 namespace sontag::internal::mem {
 
     using namespace std::string_view_literals;
+    using namespace sontag::literals;
 
     enum class access_kind : uint8_t {
         none,
@@ -370,100 +371,161 @@ namespace sontag::internal::mem {
         return instruction.substr(open, close - open + 1U);
     }
 
-    inline std::optional<address_parse> parse_address_x86(std::string_view instruction) {
-        auto bracket = extract_bracket_expression(instruction);
-        if (!bracket.has_value()) {
-            auto mnemonic = extract_mnemonic(instruction);
-            if (mnemonic == "push"sv || mnemonic == "pop"sv || mnemonic == "call"sv || mnemonic == "ret"sv) {
-                return address_parse{
-                        .expression = "[rsp]",
-                        .klass = address_class::stack,
-                        .base = std::string{"rsp"},
-                        .index = std::nullopt,
-                        .scale = 1,
-                        .displacement = 0,
-                        .symbol = std::nullopt};
+    inline bool operand_contains_pointer_keyword_x86(std::string_view operand) {
+        auto lower = to_lower_ascii(operand);
+        return lower.find(" ptr"sv) != std::string::npos || lower.starts_with("ptr "sv) || lower.ends_with(" ptr"sv);
+    }
+
+    inline bool is_memory_operand_x86(std::string_view operand) {
+        if (extract_bracket_expression(operand).has_value()) {
+            return true;
+        }
+        return operand_contains_pointer_keyword_x86(operand);
+    }
+
+    inline std::optional<std::string> detect_angle_symbol_token(std::string_view instruction) {
+        auto scan_pos = instruction.size();
+        while (scan_pos > 0U) {
+            auto open = instruction.rfind('<', scan_pos - 1U);
+            if (open == std::string_view::npos || open + 1U >= instruction.size()) {
+                break;
             }
+            auto close = instruction.find('>', open + 1U);
+            if (close == std::string_view::npos || close <= open + 1U) {
+                scan_pos = open;
+                continue;
+            }
+            auto token = instruction.substr(open + 1U, close - open - 1U);
+            if (auto parsed = detect_symbol_token(token); parsed.has_value()) {
+                return parsed;
+            }
+            scan_pos = open;
+        }
+        return std::nullopt;
+    }
+
+    inline std::optional<address_parse> parse_address_x86(std::string_view instruction) {
+        auto mnemonic = extract_mnemonic(instruction);
+        if (mnemonic == "push"sv || mnemonic == "pop"sv || mnemonic == "call"sv || mnemonic == "ret"sv) {
+            return address_parse{
+                    .expression = "[rsp]",
+                    .klass = address_class::stack,
+                    .base = std::string{"rsp"},
+                    .index = std::nullopt,
+                    .scale = 1,
+                    .displacement = 0,
+                    .symbol = std::nullopt};
+        }
+
+        auto operands = split_operands(instruction);
+        auto bracket = std::optional<std::string_view>{};
+        auto pointer_operand = std::optional<std::string_view>{};
+        for (auto operand : operands) {
+            if (!bracket.has_value()) {
+                bracket = extract_bracket_expression(operand);
+            }
+            if (!pointer_operand.has_value() && operand_contains_pointer_keyword_x86(operand)) {
+                pointer_operand = operand;
+            }
+        }
+
+        if (!bracket.has_value() && !pointer_operand.has_value()) {
             return std::nullopt;
         }
 
         auto parsed = address_parse{};
-        parsed.expression = std::string{trim_ascii(*bracket)};
+        if (bracket.has_value()) {
+            parsed.expression = std::string{trim_ascii(*bracket)};
+        }
+        else {
+            parsed.expression = std::string{trim_ascii(*pointer_operand)};
+        }
         parsed.klass = address_class::register_indirect;
 
-        auto inside = trim_ascii(bracket->substr(1U, bracket->size() - 2U));
-        auto cursor = size_t{0U};
-        auto sign = int64_t{1};
-        while (cursor < inside.size()) {
-            while (cursor < inside.size() && std::isspace(static_cast<unsigned char>(inside[cursor])) != 0) {
-                ++cursor;
-            }
-            if (cursor >= inside.size()) {
-                break;
-            }
-
-            if (inside[cursor] == '+') {
-                sign = 1;
-                ++cursor;
-                continue;
-            }
-            if (inside[cursor] == '-') {
-                sign = -1;
-                ++cursor;
-                continue;
-            }
-
-            auto end = cursor;
-            while (end < inside.size() && inside[end] != '+' && inside[end] != '-') {
-                ++end;
-            }
-            auto term = trim_ascii(inside.substr(cursor, end - cursor));
-            cursor = end;
-            if (term.empty()) {
-                continue;
-            }
-
-            if (auto star = term.find('*'); star != std::string_view::npos) {
-                auto lhs = trim_ascii(term.substr(0U, star));
-                auto rhs = trim_ascii(term.substr(star + 1U));
-                auto reg = std::string_view{};
-                auto factor = int64_t{1};
-                if (is_register_token_x86(lhs)) {
-                    reg = lhs;
-                    (void)parse_signed_integer(rhs, factor);
+        if (bracket.has_value()) {
+            auto inside = trim_ascii(bracket->substr(1U, bracket->size() - 2U));
+            auto cursor = size_t{0U};
+            auto sign = int64_t{1};
+            while (cursor < inside.size()) {
+                while (cursor < inside.size() && std::isspace(static_cast<unsigned char>(inside[cursor])) != 0) {
+                    ++cursor;
                 }
-                else if (is_register_token_x86(rhs)) {
-                    reg = rhs;
-                    (void)parse_signed_integer(lhs, factor);
+                if (cursor >= inside.size()) {
+                    break;
                 }
-                if (!reg.empty()) {
-                    parsed.index = std::string{reg};
-                    parsed.scale = static_cast<int>(std::max<int64_t>(1, std::abs(factor)));
+
+                if (inside[cursor] == '+') {
+                    sign = 1;
+                    ++cursor;
                     continue;
                 }
-            }
-
-            if (is_register_token_x86(term)) {
-                if (!parsed.base.has_value()) {
-                    parsed.base = std::string{term};
+                if (inside[cursor] == '-') {
+                    sign = -1;
+                    ++cursor;
+                    continue;
                 }
-                else if (!parsed.index.has_value()) {
-                    parsed.index = std::string{term};
-                    parsed.scale = 1;
+
+                auto end = cursor;
+                while (end < inside.size() && inside[end] != '+' && inside[end] != '-') {
+                    ++end;
                 }
-                continue;
-            }
+                auto term = trim_ascii(inside.substr(cursor, end - cursor));
+                cursor = end;
+                if (term.empty()) {
+                    continue;
+                }
 
-            auto immediate = int64_t{};
-            if (parse_signed_integer(term, immediate)) {
-                auto combined = sign * immediate;
-                parsed.displacement = parsed.displacement.value_or(0) + combined;
-                continue;
-            }
+                if (auto star = term.find('*'); star != std::string_view::npos) {
+                    auto lhs = trim_ascii(term.substr(0U, star));
+                    auto rhs = trim_ascii(term.substr(star + 1U));
+                    auto reg = std::string_view{};
+                    auto factor = int64_t{1};
+                    if (is_register_token_x86(lhs)) {
+                        reg = lhs;
+                        (void)parse_signed_integer(rhs, factor);
+                    }
+                    else if (is_register_token_x86(rhs)) {
+                        reg = rhs;
+                        (void)parse_signed_integer(lhs, factor);
+                    }
+                    if (!reg.empty()) {
+                        parsed.index = std::string{reg};
+                        parsed.scale = static_cast<int>(std::max<int64_t>(1, std::abs(factor)));
+                        continue;
+                    }
+                }
 
-            if (auto symbol = detect_symbol_token(term); symbol.has_value()) {
+                if (is_register_token_x86(term)) {
+                    if (!parsed.base.has_value()) {
+                        parsed.base = std::string{term};
+                    }
+                    else if (!parsed.index.has_value()) {
+                        parsed.index = std::string{term};
+                        parsed.scale = 1;
+                    }
+                    continue;
+                }
+
+                auto immediate = int64_t{};
+                if (parse_signed_integer(term, immediate)) {
+                    auto combined = sign * immediate;
+                    parsed.displacement = parsed.displacement.value_or(0) + combined;
+                    continue;
+                }
+
+                if (auto symbol = detect_symbol_token(term); symbol.has_value()) {
+                    parsed.symbol = *symbol;
+                }
+            }
+        }
+        else if (pointer_operand.has_value()) {
+            if (auto symbol = detect_symbol_token(*pointer_operand); symbol.has_value()) {
                 parsed.symbol = *symbol;
             }
+        }
+
+        if (!parsed.symbol.has_value()) {
+            parsed.symbol = detect_angle_symbol_token(instruction);
         }
 
         auto lower_expr = to_lower_ascii(parsed.expression);
@@ -476,6 +538,9 @@ namespace sontag::internal::mem {
         }
         else if (parsed.symbol.has_value()) {
             parsed.klass = address_class::global;
+            if (!bracket.has_value()) {
+                parsed.expression = "[{}]"_format(*parsed.symbol);
+            }
         }
 
         return parsed;
@@ -775,12 +840,8 @@ namespace sontag::internal::mem {
         if (operands.empty()) {
             return access_kind::none;
         }
-        auto is_mem = [](std::string_view operand) {
-            return operand.find('[') != std::string_view::npos && operand.find(']') != std::string_view::npos;
-        };
-
-        auto dst_mem = !operands.empty() && is_mem(operands[0]);
-        auto src_mem = operands.size() >= 2U && is_mem(operands[1]);
+        auto dst_mem = !operands.empty() && is_memory_operand_x86(operands[0]);
+        auto src_mem = operands.size() >= 2U && is_memory_operand_x86(operands[1]);
         if (dst_mem && src_mem) {
             return access_kind::rmw;
         }
