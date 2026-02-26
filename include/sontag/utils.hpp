@@ -13,7 +13,7 @@ namespace sontag {
 
 // Debug logger; no-op on release builds
 #ifndef NDEBUG
-    inline constexpr std::string_view sloc_fname(const std::source_location& loc) {
+    constexpr std::string_view sloc_fname(const std::source_location& loc) {
         std::string_view sv{loc.file_name()};
         if (auto p = sv.rfind('/'); p != sv.npos)
             sv.remove_prefix(p + 1);
@@ -44,14 +44,14 @@ namespace sontag {
     debug_log(Args&&...) -> debug_log<Args...>;
 
     namespace utils {
-        inline constexpr char char_tolower(char c) {
+        constexpr char char_tolower(char c) {
             if (c >= 'A' && c <= 'Z') {
                 return c + ('a' - 'A');
             }
             return c;
         }
 
-        inline constexpr bool str_case_eq(std::string_view lhs, std::string_view rhs) {
+        constexpr bool str_case_eq(std::string_view lhs, std::string_view rhs) {
             return std::ranges::equal(
                     lhs | std::views::transform(char_tolower), rhs | std::views::transform(char_tolower));
         }
@@ -62,7 +62,7 @@ namespace sontag {
         }
 
         template <detail::arithmetic_type T>
-        inline constexpr std::optional<T> parse_arithmetic(std::string_view input, [[maybe_unused]] int base = 10) {
+        constexpr std::optional<T> parse_arithmetic(std::string_view input, [[maybe_unused]] int base = 10) {
             T value{};
             std::from_chars_result result;
 

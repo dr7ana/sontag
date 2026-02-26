@@ -40,6 +40,7 @@ extern "C" {
 #include <iostream>
 #include <iterator>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <span>
 #include <sstream>
@@ -935,7 +936,7 @@ namespace sontag::cli {
         }
 
         static std::optional<std::vector<fs::path>> normalize_import_roots(
-                std::string_view command_name, std::vector<fs::path> roots, std::ostream& err) {
+                std::string_view command_name, const std::vector<fs::path>& roots, std::ostream& err) {
             if (roots.empty()) {
                 err << "invalid {}, expected at least one directory\n"_format(command_name);
                 return std::nullopt;
@@ -1595,7 +1596,7 @@ namespace sontag::cli {
 
         static std::optional<import_load_plan> build_import_load_plan(
                 const startup_config& cfg, import_command_options options, std::ostream& err) {
-            auto normalized_roots = normalize_import_roots(":import"sv, std::move(options.roots), err);
+            auto normalized_roots = normalize_import_roots(":import"sv, options.roots, err);
             if (!normalized_roots) {
                 return std::nullopt;
             }
@@ -1655,10 +1656,7 @@ namespace sontag::cli {
                 plan.mode = import_mode::app;
                 plan.entry = std::move(entry_path);
             }
-            else if (options.force_library) {
-                plan.mode = import_mode::library;
-            }
-            else if (main_files.empty()) {
+            else if (options.force_library || main_files.empty()) {
                 plan.mode = import_mode::library;
             }
             else if (main_files.size() == 1U) {
@@ -3710,7 +3708,7 @@ examples:
                 roots.push_back(*root);
             }
 
-            auto normalized_roots = normalize_import_roots(":reset import"sv, std::move(roots), err);
+            auto normalized_roots = normalize_import_roots(":reset import"sv, roots, err);
             if (!normalized_roots) {
                 return true;
             }
@@ -5573,7 +5571,7 @@ examples:
                     }
                     else if (state == parse_state::events) {
                         if (auto parsed = parse_mem_trace_event_record(line); parsed.has_value()) {
-                            artifact.events.push_back(std::move(*parsed));
+                            artifact.events.push_back(*parsed);
                         }
                     }
                 }
@@ -6415,60 +6413,100 @@ examples:
         static void render_mem_rows_table(
                 const mem_summary& summary, std::ostream& os, std::string_view modified_color) {
             constexpr auto diff_indent = "\t"sv;
-            auto line_width = std::string_view{"  line"}.size();
-            auto offset_width = std::string_view{"offset"}.size();
-            auto encoding_width = std::string_view{"encodings"}.size();
-            auto op_width = std::string_view{"op"}.size();
-            auto access_width = std::string_view{"access"}.size();
-            auto width_width = std::string_view{"width"}.size();
-            auto address_width = std::string_view{"address"}.size();
-            auto symbol_width = std::string_view{"symbol"}.size();
-            auto alias_width = std::string_view{"alias"}.size();
-            auto value_width = std::string_view{"value"}.size();
-            auto class_width = std::string_view{"class"}.size();
-            auto may_load_width = std::string_view{"may_load"}.size();
-            auto may_store_width = std::string_view{"may_store"}.size();
-            auto ir_source_width = std::string_view{"ir source"}.size();
+            static constexpr auto line_label = "  line"sv;
+            static constexpr auto offset_label = "offset"sv;
+            static constexpr auto encodings_label = "encodings"sv;
+            static constexpr auto op_label = "op"sv;
+            static constexpr auto access_label = "access"sv;
+            static constexpr auto width_label = "width"sv;
+            static constexpr auto address_label = "address"sv;
+            static constexpr auto symbol_label = "symbol"sv;
+            static constexpr auto alias_label = "alias"sv;
+            static constexpr auto value_label = "value"sv;
+            static constexpr auto class_label = "class"sv;
+            static constexpr auto may_load_label = "may_load"sv;
+            static constexpr auto may_store_label = "may_store"sv;
+            static constexpr auto ir_source_label = "ir source"sv;
+            static constexpr auto none_label = "  <none>"sv;
+            static constexpr auto known_marker = "*"sv;
+            static constexpr auto unknown_marker = "-"sv;
 
-            for (const auto& row : summary.rows) {
-                auto offset_value = format_mem_offset_cell(row.offset);
-                auto width_value = format_mem_width_cell(row);
-                auto address_value = format_mem_address_cell(row);
-                auto symbol_value = format_mem_symbol_cell(row);
-                auto alias_value = format_mem_alias_cell(row);
-                auto value_value = format_mem_value_cell(row);
-                auto access_value = format_mem_access_cell(row);
-                auto class_value = format_mem_class_cell(row);
-                auto may_load_value = row.may_load ? "*"sv : "-"sv;
-                auto may_store_value = row.may_store ? "*"sv : "-"sv;
-                auto ir_source_value = build_mem_ir_source_text(row);
+            struct mem_row_display_values {
+                std::string offset{};
+                std::string width{};
+                std::string address{};
+                std::string symbol{};
+                std::string alias{};
+                std::string value{};
+                std::string access{};
+                std::string klass{};
+                std::string ir_source{};
+                std::string_view may_load{};
+                std::string_view may_store{};
+            };
 
+            const std::vector<mem_row_display_values> display_rows =
+                    summary.rows | std::views::transform([](const auto& row) {
+                        return mem_row_display_values{
+                                .offset = format_mem_offset_cell(row.offset),
+                                .width = format_mem_width_cell(row),
+                                .address = format_mem_address_cell(row),
+                                .symbol = format_mem_symbol_cell(row),
+                                .alias = format_mem_alias_cell(row),
+                                .value = format_mem_value_cell(row),
+                                .access = format_mem_access_cell(row),
+                                .klass = format_mem_class_cell(row),
+                                .ir_source = build_mem_ir_source_text(row),
+                                .may_load = row.may_load ? known_marker : unknown_marker,
+                                .may_store = row.may_store ? known_marker : unknown_marker};
+                    }) |
+                    std::ranges::to<std::vector<mem_row_display_values>>();
+
+            auto line_width = line_label.size();
+            auto offset_width = offset_label.size();
+            auto encoding_width = encodings_label.size();
+            auto op_width = op_label.size();
+            auto access_width = access_label.size();
+            auto width_width = width_label.size();
+            auto address_width = address_label.size();
+            auto symbol_width = symbol_label.size();
+            auto alias_width = alias_label.size();
+            auto value_width = value_label.size();
+            auto class_width = class_label.size();
+            auto may_load_width = may_load_label.size();
+            auto may_store_width = may_store_label.size();
+            auto ir_source_width = ir_source_label.size();
+
+            for (const auto index : std::views::iota(size_t{0U}, summary.rows.size())) {
+                const auto& row = summary.rows[index];
+                const auto& display = display_rows[index];
                 line_width = std::max(line_width, "  [{}]"_format(row.line).size());
-                offset_width = std::max(offset_width, offset_value.size());
+                offset_width = std::max(offset_width, display.offset.size());
                 encoding_width = std::max(encoding_width, row.encodings.size());
                 op_width = std::max(op_width, row.mnemonic.size());
-                access_width = std::max(access_width, access_value.size());
-                width_width = std::max(width_width, width_value.size());
-                address_width = std::max(address_width, address_value.size());
-                symbol_width = std::max(symbol_width, symbol_value.size());
-                alias_width = std::max(alias_width, alias_value.size());
-                value_width = std::max(value_width, value_value.size());
-                class_width = std::max(class_width, class_value.size());
-                may_load_width = std::max(may_load_width, may_load_value.size());
-                may_store_width = std::max(may_store_width, may_store_value.size());
-                ir_source_width = std::max(ir_source_width, ir_source_value.size());
+                access_width = std::max(access_width, display.access.size());
+                width_width = std::max(width_width, display.width.size());
+                address_width = std::max(address_width, display.address.size());
+                symbol_width = std::max(symbol_width, display.symbol.size());
+                alias_width = std::max(alias_width, display.alias.size());
+                value_width = std::max(value_width, display.value.size());
+                class_width = std::max(class_width, display.klass.size());
+                may_load_width = std::max(may_load_width, display.may_load.size());
+                may_store_width = std::max(may_store_width, display.may_store.size());
+                ir_source_width = std::max(ir_source_width, display.ir_source.size());
             }
 
             os << '\n';
             os << "rows:\n";
-            os << diff_indent << pad_asm_cell("  line", line_width) << " | " << pad_asm_cell("offset", offset_width)
-               << " | " << pad_asm_cell("encodings", encoding_width) << " | " << pad_asm_cell("op", op_width) << " | "
-               << pad_asm_cell("access", access_width) << " | " << pad_asm_cell("width", width_width) << " | "
-               << pad_asm_cell("address", address_width) << " | " << pad_asm_cell("symbol", symbol_width) << " | "
-               << pad_asm_cell("alias", alias_width) << " | " << pad_asm_cell("value", value_width) << " | "
-               << pad_asm_cell("class", class_width) << " | " << pad_asm_cell("may_load", may_load_width) << " | "
-               << pad_asm_cell("may_store", may_store_width) << " | " << pad_asm_cell("ir source", ir_source_width)
-               << '\n';
+            os << diff_indent << pad_asm_cell(line_label, line_width) << " | "
+               << pad_asm_cell(offset_label, offset_width) << " | " << pad_asm_cell(encodings_label, encoding_width)
+               << " | " << pad_asm_cell(op_label, op_width) << " | " << pad_asm_cell(access_label, access_width)
+               << " | " << pad_asm_cell(width_label, width_width) << " | " << pad_asm_cell(address_label, address_width)
+               << " | " << pad_asm_cell(symbol_label, symbol_width) << " | " << pad_asm_cell(alias_label, alias_width)
+               << " | " << pad_asm_cell(value_label, value_width) << " | " << pad_asm_cell(class_label, class_width)
+               << " | " << pad_asm_cell(may_load_label, may_load_width) << " | "
+               << pad_asm_cell(may_store_label, may_store_width) << " | "
+               << pad_asm_cell(ir_source_label, ir_source_width) << '\n';
             os << diff_indent << std::string(line_width, '-') << "-+-" << std::string(offset_width, '-') << "-+-"
                << std::string(encoding_width, '-') << "-+-" << std::string(op_width, '-') << "-+-"
                << std::string(access_width, '-') << "-+-" << std::string(width_width, '-') << "-+-"
@@ -6478,7 +6516,7 @@ examples:
                << std::string(may_store_width, '-') << "-+-" << std::string(ir_source_width, '-') << '\n';
 
             if (summary.rows.empty()) {
-                os << diff_indent << pad_asm_cell("  <none>", line_width) << " | " << pad_asm_cell("", offset_width)
+                os << diff_indent << pad_asm_cell(none_label, line_width) << " | " << pad_asm_cell("", offset_width)
                    << " | " << pad_asm_cell("", encoding_width) << " | " << pad_asm_cell("", op_width) << " | "
                    << pad_asm_cell("", access_width) << " | " << pad_asm_cell("", width_width) << " | "
                    << pad_asm_cell("", address_width) << " | " << pad_asm_cell("", symbol_width) << " | "
@@ -6488,38 +6526,29 @@ examples:
                 return;
             }
 
-            for (const auto& row : summary.rows) {
-                auto offset_value = format_mem_offset_cell(row.offset);
-                auto width_value = format_mem_width_cell(row);
-                auto address_value = format_mem_address_cell(row);
-                auto symbol_value = format_mem_symbol_cell(row);
-                auto alias_value = format_mem_alias_cell(row);
-                auto value_value = format_mem_value_cell(row);
-                auto access_value = format_mem_access_cell(row);
-                auto class_value = format_mem_class_cell(row);
-                auto may_load_value = row.may_load ? "*"sv : "-"sv;
-                auto may_store_value = row.may_store ? "*"sv : "-"sv;
-                auto ir_source_value = build_mem_ir_source_text(row);
+            for (const auto index : std::views::iota(size_t{0U}, summary.rows.size())) {
+                const auto& row = summary.rows[index];
+                const auto& display = display_rows[index];
 
                 auto op_cell = pad_asm_cell(row.mnemonic, op_width);
                 if (!modified_color.empty() && !row.mnemonic.empty()) {
                     op_cell = colorize_asm_text_span(op_cell, 0U, row.mnemonic.size(), modified_color);
                 }
 
-                auto symbol_cell = pad_asm_cell(symbol_value, symbol_width);
-                if (!modified_color.empty() && symbol_value != "-") {
-                    symbol_cell = colorize_asm_text_span(symbol_cell, 0U, symbol_value.size(), modified_color);
+                auto symbol_cell = pad_asm_cell(display.symbol, symbol_width);
+                if (!modified_color.empty() && display.symbol != unknown_marker) {
+                    symbol_cell = colorize_asm_text_span(symbol_cell, 0U, display.symbol.size(), modified_color);
                 }
 
                 os << diff_indent << pad_asm_cell("  [{}]"_format(row.line), line_width) << " | "
-                   << pad_asm_cell(offset_value, offset_width) << " | " << pad_asm_cell(row.encodings, encoding_width)
-                   << " | " << op_cell << " | " << pad_asm_cell(access_value, access_width) << " | "
-                   << pad_asm_cell(width_value, width_width) << " | " << pad_asm_cell(address_value, address_width)
-                   << " | " << symbol_cell << " | " << pad_asm_cell(alias_value, alias_width) << " | "
-                   << pad_asm_cell(value_value, value_width) << " | " << pad_asm_cell(class_value, class_width) << " | "
-                   << pad_asm_cell(may_load_value, may_load_width) << " | "
-                   << pad_asm_cell(may_store_value, may_store_width) << " | "
-                   << pad_asm_cell(ir_source_value, ir_source_width) << '\n';
+                   << pad_asm_cell(display.offset, offset_width) << " | " << pad_asm_cell(row.encodings, encoding_width)
+                   << " | " << op_cell << " | " << pad_asm_cell(display.access, access_width) << " | "
+                   << pad_asm_cell(display.width, width_width) << " | " << pad_asm_cell(display.address, address_width)
+                   << " | " << symbol_cell << " | " << pad_asm_cell(display.alias, alias_width) << " | "
+                   << pad_asm_cell(display.value, value_width) << " | " << pad_asm_cell(display.klass, class_width)
+                   << " | " << pad_asm_cell(display.may_load, may_load_width) << " | "
+                   << pad_asm_cell(display.may_store, may_store_width) << " | "
+                   << pad_asm_cell(display.ir_source, ir_source_width) << '\n';
             }
         }
 
@@ -9108,7 +9137,7 @@ examples:
             return false;
         }
 
-        static std::optional<std::string> normalize_optional(std::string value) {
+        static std::optional<std::string> normalize_optional(std::string_view value) {
             auto trimmed = trim_view(value);
             if (trimmed.empty()) {
                 return std::nullopt;

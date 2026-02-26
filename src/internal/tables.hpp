@@ -3,6 +3,8 @@
 #include <flat_map>
 #include <string>
 
+// NOLINTBEGIN
+
 namespace sontag::tables {
     inline const std::flat_map<std::string, std::string> ARM{
             {"ABS", "Absolute value"},
@@ -2101,3 +2103,5 @@ namespace sontag::tables {
             {"XSAVE", "Save Processor Extended States"},
             {"XSETBV", "Set Extended Control Register"}};
 }  // namespace sontag::tables
+
+// NOLINTEND

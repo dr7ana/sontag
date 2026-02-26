@@ -96,10 +96,10 @@ namespace sontag {
                 return "resolved_stub"sv;
             case symbol_resolution_status::unresolved_indirect:
                 return "unresolved_indirect"sv;
+            default:
+            [[unlikely]]
             case symbol_resolution_status::missing:
                 return "missing"sv;
-            default:
-                [[unlikely]] return "missing"sv;
         }
     }
 
@@ -118,10 +118,10 @@ namespace sontag {
                 return "exact_relocation"sv;
             case symbol_resolution_confidence::exact_label_match:
                 return "exact_label_match"sv;
+            default:
+            [[unlikely]]
             case symbol_resolution_confidence::heuristic_match:
                 return "heuristic_match"sv;
-            default:
-                [[unlikely]] return "heuristic_match"sv;
         }
     }
 

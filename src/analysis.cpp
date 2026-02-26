@@ -639,11 +639,11 @@ namespace sontag {
             std::ostringstream source{};
             auto render_exec_cells = prepare_exec_cells_for_render(exec_cells);
             auto append_canonical_return = true;
-            for (auto it = render_exec_cells.rbegin(); it != render_exec_cells.rend(); ++it) {
-                if (!has_effective_code(*it)) {
+            for (auto& render_exec_cell : std::ranges::reverse_view(render_exec_cells)) {
+                if (!has_effective_code(render_exec_cell)) {
                     continue;
                 }
-                append_canonical_return = !has_terminal_return_expression(*it);
+                append_canonical_return = !has_terminal_return_expression(render_exec_cell);
                 break;
             }
 
@@ -1323,7 +1323,6 @@ namespace sontag {
                     base_args.push_back(artifact_path.string());
                     break;
                 case analysis_kind::mem_trace:
-                    break;
                 case analysis_kind::inspect_asm_map:
                 case analysis_kind::inspect_mca_summary:
                 case analysis_kind::inspect_mca_heatmap:
@@ -2180,7 +2179,7 @@ namespace sontag {
             return symbols;
         }
 
-        static std::vector<analysis_symbol> merge_symbol_views(std::vector<analysis_symbol> symbols) {
+        static std::vector<analysis_symbol> merge_symbol_views(const std::vector<analysis_symbol>& symbols) {
             auto merged_by_mangled = std::unordered_map<std::string, analysis_symbol>{};
             merged_by_mangled.reserve(symbols.size());
 
@@ -2410,7 +2409,7 @@ namespace sontag {
                 fs::remove(binary_path, ec);
             }
 
-            return merge_symbol_views(std::move(merged_symbols));
+            return merge_symbol_views(merged_symbols);
         }
 
         static std::optional<std::vector<analysis_symbol>> try_collect_defined_symbols(
@@ -2519,7 +2518,7 @@ namespace sontag {
                 fs::remove(binary_path, ec);
             }
 
-            auto out_symbols = merge_symbol_views(std::move(merged_symbols));
+            auto out_symbols = merge_symbol_views(merged_symbols);
             write_symbols_cache(out_symbols);
             return out_symbols;
         }
@@ -3407,12 +3406,10 @@ namespace sontag {
                     declarations_inserted = true;
                 }
 
-                auto entered_target = false;
                 if (!in_target) {
                     auto function_symbol = parse_ir_function_name_from_define_line(trimmed);
                     if (function_symbol && symbol_names_equivalent(*function_symbol, target_symbol)) {
                         in_target = true;
-                        entered_target = true;
                         function_line = 1U;
                     }
                 }
@@ -4437,17 +4434,19 @@ namespace sontag {
             std::vector<delta_metric_entry> metrics{};
             metrics.reserve(internal::platform::mca_supported ? 14U : 9U);
 
-            auto has_disassembly = !symbol_disassembly.empty();
-
-            if (!has_disassembly) {
+            if (symbol_disassembly.empty()) {
                 metrics.push_back(make_na_metric("size.symbol_text_bytes"sv, "bytes"sv));
-            }
-            else if (auto span = ::sontag::metrics::parse_objdump_symbol_span(symbol_disassembly)) {
-                metrics.push_back(make_ok_metric(
-                        "size.symbol_text_bytes"sv, static_cast<double>(span->end - span->start), "bytes"sv));
             }
             else {
-                metrics.push_back(make_na_metric("size.symbol_text_bytes"sv, "bytes"sv));
+                //
+                auto span = sontag::metrics::parse_objdump_symbol_span(symbol_disassembly);
+                if (span.has_value()) {
+                    metrics.push_back(make_ok_metric(
+                            "size.symbol_text_bytes"sv, static_cast<double>(span->end - span->start), "bytes"sv));
+                }
+                else {
+                    metrics.push_back(make_na_metric("size.symbol_text_bytes"sv, "bytes"sv));
+                }
             }
 
             auto profile = ::sontag::metrics::build_asm_operation_profile(level_record.operations, symbol_disassembly);
@@ -5061,7 +5060,7 @@ namespace sontag {
                 auto event_lines = detail::split_lines(detail::read_text_file(trace_events_path));
                 for (const auto& line : event_lines) {
                     if (auto parsed = detail::parse_mem_trace_event_line(line); parsed.has_value()) {
-                        events.push_back(std::move(*parsed));
+                        events.push_back(*parsed);
                     }
                 }
                 std::ranges::sort(events, [](const auto& lhs, const auto& rhs) { return lhs.sequence < rhs.sequence; });
@@ -5735,7 +5734,7 @@ namespace sontag {
                         }
 
                         for (size_t input_index = 0U; input_index < objdump_inputs.size(); ++input_index) {
-                            auto input_path = objdump_inputs[input_index];
+                            const auto& input_path = objdump_inputs[input_index];
                             auto input_stdout_path =
                                     kind_dir / (shared_stem + ".objdump.{}.stdout.txt"_format(input_index));
                             auto input_stderr_path =
@@ -6328,7 +6327,7 @@ namespace sontag {
 
     delta_report collect_delta_report(
             const analysis_request& request, std::optional<std::string> symbol, optimization_level target) {
-        auto delta = delta_request{.mode = delta_mode::pairwise, .symbol = symbol, .target = target};
+        auto delta = delta_request{.mode = delta_mode::pairwise, .symbol = std::move(symbol), .target = target};
         return collect_delta_report(request, delta);
     }
 

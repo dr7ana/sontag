@@ -1,0 +1,78 @@
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-branch-clone,
+  bugprone-infinite-loop,
+  bugprone-integer-division,
+  bugprone-macro-parentheses,
+  bugprone-sizeof-expression,
+  bugprone-string-constructor,
+  bugprone-suspicious-include,
+  bugprone-suspicious-missing-comma,
+  bugprone-use-after-move,
+  bugprone-virtual-near-miss,
+  modernize-loop-convert,
+  modernize-use-nullptr,
+  modernize-use-override,
+  performance-*,
+  readability-identifier-naming
+HeaderFilterRegex: '^.*/sontag/(app|include|src)/.*'
+ExcludeHeaderFilterRegex: '^.*/sontag/(external|tests/Catch2)/.*'
+FormatStyle: file
+UseColor: true
+SystemHeaders: false
+WarningsAsErrors: ''
+CheckOptions:
+  # Naming policy
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case
+  - key: readability-identifier-naming.ClassCase
+    value: lower_case
+  - key: readability-identifier-naming.StructCase
+    value: lower_case
+  - key: readability-identifier-naming.UnionCase
+    value: lower_case
+  - key: readability-identifier-naming.EnumCase
+    value: lower_case
+  - key: readability-identifier-naming.EnumConstantCase
+    value: lower_case
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.MethodCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.GlobalVariableCase
+    value: lower_case
+  - key: readability-identifier-naming.LocalVariableCase
+    value: lower_case
+  - key: readability-identifier-naming.StaticVariableCase
+    value: lower_case
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case
+  - key: readability-identifier-naming.MemberCase
+    value: lower_case
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: lower_case
+  - key: readability-identifier-naming.LocalConstantCase
+    value: lower_case
+  - key: readability-identifier-naming.StaticConstantCase
+    value: lower_case
+  - key: readability-identifier-naming.TypeAliasCase
+    value: lower_case
+  - key: readability-identifier-naming.TypedefCase
+    value: lower_case
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE
+  - key: readability-identifier-naming.TemplateParameterCase
+    value: CamelCase
+  - key: readability-identifier-naming.TypeAliasCase
+    value: lower_case
+  - key: readability-identifier-naming.TypedefCase
+    value: lower_case
+  - key: readability-identifier-naming.TypeTemplateParameterCase
+    value: CamelCase
+  - key: performance-for-range-copy.WarnOnAllAutoCopies
+    value: 'true'
+  - key: modernize-loop-convert.MinConfidence
+    value: reasonable
