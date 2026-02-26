@@ -3615,37 +3615,86 @@ examples:
             return false;
         }
 
-        static analysis_import_context build_analysis_import_context(const import_transaction_record& import_record) {
+        static fs::path normalize_import_record_path(std::string_view raw_path) {
+            auto normalized = normalize_source_key(fs::path{raw_path});
+            if (normalized) {
+                return fs::path{*normalized};
+            }
+            return fs::path{std::string{raw_path}}.lexically_normal();
+        }
+
+        static void append_unique_import_path(
+                std::vector<fs::path>& out, std::unordered_set<std::string>& seen, const fs::path& path) {
+            auto key = normalize_source_key(path).value_or(path.lexically_normal().string());
+            if (seen.insert(key).second) {
+                out.emplace_back(key);
+            }
+        }
+
+        static analysis_import_context build_merged_analysis_import_context(
+                std::span<const import_transaction_record* const> records) {
             auto context = analysis_import_context{};
-            context.mode = import_record.mode;
-            context.roots.reserve(import_record.roots.size());
-            context.files.reserve(import_record.files.size());
-            context.main_files.reserve(import_record.main_files.size());
-            for (const auto& root : import_record.roots) {
-                context.roots.emplace_back(root);
+            context.mode = "library";
+
+            auto seen_roots = std::unordered_set<std::string>{};
+            auto seen_files = std::unordered_set<std::string>{};
+            auto seen_main_files = std::unordered_set<std::string>{};
+
+            for (const auto* record : records) {
+                if (record == nullptr) {
+                    continue;
+                }
+
+                if (!record->mode.empty()) {
+                    context.mode = record->mode;
+                }
+                if (record->entry) {
+                    context.entry = normalize_import_record_path(*record->entry);
+                }
+                else if (record->mode == "library"sv) {
+                    context.entry = std::nullopt;
+                }
+
+                for (const auto& root : record->roots) {
+                    append_unique_import_path(context.roots, seen_roots, normalize_import_record_path(root));
+                }
+                for (const auto& file : record->files) {
+                    append_unique_import_path(context.files, seen_files, normalize_import_record_path(file));
+                }
+                for (const auto& main_file : record->main_files) {
+                    append_unique_import_path(
+                            context.main_files, seen_main_files, normalize_import_record_path(main_file));
+                }
             }
-            for (const auto& file : import_record.files) {
-                context.files.emplace_back(file);
+
+            std::ranges::sort(context.roots);
+            std::ranges::sort(context.files);
+            std::ranges::sort(context.main_files);
+            if (context.mode == "library"sv) {
+                context.entry = std::nullopt;
             }
-            for (const auto& main_file : import_record.main_files) {
-                context.main_files.emplace_back(main_file);
-            }
-            if (import_record.entry) {
-                context.entry = fs::path{*import_record.entry};
-            }
-            return std::move(context);
+            return context;
         }
 
         static std::optional<analysis_import_context> make_analysis_import_context(
                 const repl_state& state,
                 const std::optional<import_transaction_record>& pending_import = std::nullopt) {
-            if (pending_import) {
-                return build_analysis_import_context(*pending_import);
+            auto records = std::vector<const import_transaction_record*>{};
+            records.reserve(state.transactions.size() + (pending_import ? 1U : 0U));
+            for (const auto& tx : state.transactions) {
+                if (tx.kind != transaction_kind::import || !tx.import_record) {
+                    continue;
+                }
+                records.push_back(&*tx.import_record);
             }
-            if (!state.active_import) {
+            if (pending_import) {
+                records.push_back(&*pending_import);
+            }
+
+            if (records.empty()) {
                 return std::nullopt;
             }
-            return build_analysis_import_context(*state.active_import);
+            return build_merged_analysis_import_context(records);
         }
 
         static analysis_request make_analysis_request(
@@ -3717,11 +3766,6 @@ examples:
             request.symbol = std::nullopt;
             request.decl_cells = decl_cells;
             request.exec_cells = exec_cells;
-            if (pending_import) {
-                for (const auto& root : pending_import->roots) {
-                    request.include_dirs.emplace_back(root);
-                }
-            }
 
             auto diag = run_analysis(request, analysis_kind::diag);
             return validation_result{.success = diag.success, .diagnostics = std::move(diag.artifact_text)};

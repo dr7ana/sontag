@@ -1970,7 +1970,7 @@ namespace sontag::test {
         CHECK(persisted_cells.exec_cells[0].find("int value = seed + 2;") != std::string::npos);
     }
 
-    TEST_CASE("005: multiple file imports keep explicit returns from imported mains", "[005][session][file][return]") {
+    TEST_CASE("005: multiple file imports keep one canonical return from latest main", "[005][session][file][return]") {
         detail::temp_dir temp{"sontag_file_multi_return"};
         auto first_path = temp.path / "first.cpp";
         auto second_path = temp.path / "second.cpp";
@@ -1998,9 +1998,10 @@ namespace sontag::test {
 
         CHECK(output.out.find("int lhs = seed + 1;") != std::string::npos);
         CHECK(output.out.find("int rhs = value * 2;") != std::string::npos);
-        CHECK(output.out.find("return lhs;") != std::string::npos);
+        CHECK(output.out.find("return lhs;") == std::string::npos);
         CHECK(output.out.find("return rhs;") != std::string::npos);
         CHECK(detail::count_occurrences(output.out, "return 0;") == 0U);
+        CHECK(detail::count_occurrences(output.out, "return rhs;") == 1U);
         CHECK(output.out.find("\n\n\n    // exec cell 2") == std::string::npos);
         CHECK(output.out.find("\n\n\n    return 0;") == std::string::npos);
     }
@@ -2212,6 +2213,98 @@ namespace sontag::test {
         CHECK(output.out.find("#include \"template.hpp\"") != std::string::npos);
         CHECK(output.out.find("return square(3);") != std::string::npos);
         CHECK(output.err.empty());
+    }
+
+    TEST_CASE("005: sequential imports preserve include roots like combined import", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_sequential_equivalent"};
+        auto project_dir = temp.path / "project";
+        auto include_dir = project_dir / "include";
+        auto src_dir = project_dir / "src";
+        detail::fs::create_directories(include_dir / "mylib");
+        detail::fs::create_directories(src_dir);
+
+        detail::write_text_file(
+                include_dir / "mylib" / "math.hpp",
+                "#pragma once\n"
+                "inline int helper_add(int a, int b) {\n"
+                "    return a + b;\n"
+                "}\n");
+        detail::write_text_file(
+                src_dir / "math.cpp",
+                "#include \"mylib/math.hpp\"\n"
+                "int imported_answer() {\n"
+                "    return helper_add(2, 3);\n"
+                "}\n");
+
+        startup_config cfg_a{};
+        cfg_a.cache_dir = temp.path / "cache_a";
+        cfg_a.history_enabled = false;
+
+        auto output_a = detail::run_repl_script_capture_output(
+                cfg_a,
+                ":import {}\n"
+                ":import {}\n"
+                ":symbols\n"
+                ":quit\n"_format(include_dir.string(), src_dir.string()));
+
+        startup_config cfg_b{};
+        cfg_b.cache_dir = temp.path / "cache_b";
+        cfg_b.history_enabled = false;
+
+        auto output_b = detail::run_repl_script_capture_output(
+                cfg_b,
+                ":import {} {}\n"
+                ":symbols\n"
+                ":quit\n"_format(include_dir.string(), src_dir.string()));
+
+        CHECK(output_a.err.empty());
+        CHECK(output_a.out.find("state unchanged") == std::string::npos);
+        CHECK(output_a.out.find("imported_answer()") != std::string::npos);
+
+        CHECK(output_b.err.empty());
+        CHECK(output_b.out.find("state unchanged") == std::string::npos);
+        CHECK(output_b.out.find("imported_answer()") != std::string::npos);
+    }
+
+    TEST_CASE("005: sequential app imports synthesize one canonical main return", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_single_return"};
+        auto project_dir = temp.path / "project";
+        auto first_dir = project_dir / "first";
+        auto second_dir = project_dir / "second";
+        detail::fs::create_directories(first_dir);
+        detail::fs::create_directories(second_dir);
+
+        detail::write_text_file(
+                first_dir / "main.cpp",
+                "int main() {\n"
+                "    int lhs = 5;\n"
+                "    return lhs;\n"
+                "}\n");
+        detail::write_text_file(
+                second_dir / "main.cpp",
+                "int main() {\n"
+                "    int rhs = 9;\n"
+                "    return rhs;\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto output = detail::run_repl_script_capture_output(
+                cfg,
+                ":import {}\n"
+                ":import {}\n"
+                ":show all\n"
+                ":quit\n"_format(first_dir.string(), second_dir.string()));
+
+        CHECK(output.err.empty());
+        CHECK(output.out.find("state unchanged") == std::string::npos);
+        CHECK(output.out.find("int lhs = 5;") != std::string::npos);
+        CHECK(output.out.find("int rhs = 9;") != std::string::npos);
+        CHECK(output.out.find("return lhs;") == std::string::npos);
+        CHECK(detail::count_occurrences(output.out, "return rhs;") == 1U);
+        CHECK(output.out.find("return 0;") == std::string::npos);
     }
 
     TEST_CASE(
