@@ -740,6 +740,9 @@ namespace sontag {
             for (size_t i = 0U; i < request.library_dirs.size(); ++i) {
                 payload << "library_dir[" << i << "]=" << request.library_dirs[i].string() << '\n';
             }
+            for (size_t i = 0U; i < request.include_dirs.size(); ++i) {
+                payload << "include_dir[" << i << "]=" << request.include_dirs[i].string() << '\n';
+            }
             for (size_t i = 0U; i < request.libraries.size(); ++i) {
                 payload << "library[" << i << "]=" << request.libraries[i] << '\n';
             }
@@ -1129,6 +1132,7 @@ namespace sontag {
             static constexpr auto stdlib_libcpp = "-stdlib=libc++"sv;
             static constexpr auto target_prefix = "--target="sv;
             static constexpr auto cpu_prefix = "-mcpu="sv;
+            static constexpr auto include_prefix = "-I"sv;
             static constexpr auto mtriple_prefix = "-mtriple="sv;
             static constexpr auto llvm_mca_version_prefix = "llvm-mca-"sv;
             static constexpr auto llvm_objdump_version_prefix = "llvm-objdump-"sv;
@@ -1278,6 +1282,14 @@ namespace sontag {
             base_args.emplace_back(arg_tokens::no_unused_variable);
             base_args.emplace_back(arg_tokens::no_unused_parameter);
             base_args.emplace_back(arg_tokens::no_unused_function);
+            for (const auto& include_dir : request.include_dirs) {
+                append_prefixed_arg(base_args, arg_tokens::include_prefix, include_dir.string());
+            }
+            if (request.import_context) {
+                for (const auto& root : request.import_context->roots) {
+                    append_prefixed_arg(base_args, arg_tokens::include_prefix, root.string());
+                }
+            }
             if (request.verbose) {
                 base_args.emplace_back(arg_tokens::clang_verbose);
             }

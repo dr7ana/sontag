@@ -162,6 +162,7 @@ namespace sontag {
         std::optional<std::filesystem::path> dot_path{};
         bool verbose{false};
         link_mode link{link_mode::staticlink};
+        std::vector<std::filesystem::path> include_dirs{};
         std::vector<std::filesystem::path> library_dirs{};
         std::vector<std::string> libraries{};
         std::vector<std::string> linker_args{};

@@ -2021,6 +2021,39 @@ namespace sontag::test {
         CHECK(persisted_cells.transactions[0].import_record->entry == main_path.string());
     }
 
+    TEST_CASE("005: import app validates with root include paths for local headers", "[005][session][import]") {
+        detail::temp_dir temp{"sontag_import_local_header"};
+        auto project_dir = temp.path / "project";
+        detail::fs::create_directories(project_dir);
+
+        auto main_path = project_dir / "main.cpp";
+        auto template_path = project_dir / "template.hpp";
+        detail::write_text_file(
+                template_path,
+                "inline int square(int x) {\n"
+                "    return x * x;\n"
+                "}\n");
+        detail::write_text_file(
+                main_path,
+                "#include \"template.hpp\"\n"
+                "int main() {\n"
+                "    return square(3);\n"
+                "}\n");
+
+        startup_config cfg{};
+        cfg.cache_dir = temp.path / "cache";
+        cfg.history_enabled = false;
+
+        auto script = ":import {}\n:show all\n:quit\n"_format(project_dir.string());
+        auto output = detail::run_repl_script_capture_output(cfg, script);
+
+        CHECK(output.out.find("imported directories") != std::string::npos);
+        CHECK(output.out.find("mode=app") != std::string::npos);
+        CHECK(output.out.find("#include \"template.hpp\"") != std::string::npos);
+        CHECK(output.out.find("return square(3);") != std::string::npos);
+        CHECK(output.err.empty());
+    }
+
     TEST_CASE("005: import reports ambiguity when multiple mains are in scope", "[005][session][import]") {
         detail::temp_dir temp{"sontag_import_ambiguous_main"};
         auto project_dir = temp.path / "project";

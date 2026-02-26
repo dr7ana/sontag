@@ -1035,6 +1035,78 @@ namespace sontag::cli {
             return files;
         }
 
+        static std::optional<std::string> parse_local_include_target(std::string_view line) {
+            auto trimmed = trim_view(line);
+            if (!trimmed.starts_with("#include"sv)) {
+                return std::nullopt;
+            }
+            trimmed = trim_view(trimmed.substr(std::string_view{"#include"}.size()));
+            if (trimmed.empty() || trimmed.front() != '"') {
+                return std::nullopt;
+            }
+            auto closing = trimmed.find('"', 1U);
+            if (closing == std::string_view::npos || closing <= 1U) {
+                return std::nullopt;
+            }
+            return std::string{trimmed.substr(1U, closing - 1U)};
+        }
+
+        static std::unordered_set<std::string> collect_imported_local_include_keys(
+                std::span<const fs::path> files, std::span<const fs::path> roots) {
+            auto files_by_key = std::unordered_set<std::string>{};
+            files_by_key.reserve(files.size());
+            for (const auto& file_path : files) {
+                if (auto key = normalize_source_key(file_path)) {
+                    files_by_key.insert(*key);
+                }
+            }
+
+            auto included_keys = std::unordered_set<std::string>{};
+            for (const auto& file_path : files) {
+                auto current_key = normalize_source_key(file_path);
+                if (!current_key) {
+                    continue;
+                }
+
+                auto content = read_text_file(file_path);
+                if (content.empty()) {
+                    continue;
+                }
+
+                auto input = std::istringstream{content};
+                auto line = std::string{};
+                while (std::getline(input, line)) {
+                    auto include_target = parse_local_include_target(line);
+                    if (!include_target) {
+                        continue;
+                    }
+
+                    auto candidates = std::vector<fs::path>{};
+                    candidates.reserve(roots.size() + 1U);
+                    candidates.push_back(file_path.parent_path() / *include_target);
+                    for (const auto& root : roots) {
+                        candidates.push_back(root / *include_target);
+                    }
+
+                    for (const auto& candidate : candidates) {
+                        auto candidate_key = normalize_source_key(candidate);
+                        if (!candidate_key) {
+                            continue;
+                        }
+                        if (!files_by_key.contains(*candidate_key)) {
+                            continue;
+                        }
+                        if (*candidate_key != *current_key) {
+                            included_keys.insert(*candidate_key);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            return included_keys;
+        }
+
         static bool file_contains_main_definition(const startup_config& cfg, const fs::path& source_path) {
             auto main_probe = probe_driver_ast(cfg, source_path, "main"sv);
             if (main_probe.success) {
@@ -1626,6 +1698,7 @@ namespace sontag::cli {
             plan.roots = *normalized_roots;
             plan.files = *files;
             plan.main_files = main_files;
+            auto included_import_file_keys = collect_imported_local_include_keys(plan.files, plan.roots);
 
             if (options.entry) {
                 std::error_code ec{};
@@ -1713,6 +1786,10 @@ namespace sontag::cli {
                 }
 
                 if (plan.mode == import_mode::app && is_main_file) {
+                    continue;
+                }
+
+                if (included_import_file_keys.contains(*file_key)) {
                     continue;
                 }
 
@@ -3348,32 +3425,43 @@ examples:
             return false;
         }
 
-        static std::optional<analysis_import_context> make_analysis_import_context(const repl_state& state) {
+        static analysis_import_context build_analysis_import_context(const import_transaction_record& import_record) {
+            auto context = analysis_import_context{};
+            context.mode = import_record.mode;
+            context.roots.reserve(import_record.roots.size());
+            context.files.reserve(import_record.files.size());
+            context.main_files.reserve(import_record.main_files.size());
+            for (const auto& root : import_record.roots) {
+                context.roots.emplace_back(root);
+            }
+            for (const auto& file : import_record.files) {
+                context.files.emplace_back(file);
+            }
+            for (const auto& main_file : import_record.main_files) {
+                context.main_files.emplace_back(main_file);
+            }
+            if (import_record.entry) {
+                context.entry = fs::path{*import_record.entry};
+            }
+            return std::move(context);
+        }
+
+        static std::optional<analysis_import_context> make_analysis_import_context(
+                const repl_state& state,
+                const std::optional<import_transaction_record>& pending_import = std::nullopt) {
+            if (pending_import) {
+                return build_analysis_import_context(*pending_import);
+            }
             if (!state.active_import) {
                 return std::nullopt;
             }
-
-            auto context = analysis_import_context{};
-            context.mode = state.active_import->mode;
-            context.roots.reserve(state.active_import->roots.size());
-            context.files.reserve(state.active_import->files.size());
-            context.main_files.reserve(state.active_import->main_files.size());
-            for (const auto& root : state.active_import->roots) {
-                context.roots.emplace_back(root);
-            }
-            for (const auto& file : state.active_import->files) {
-                context.files.emplace_back(file);
-            }
-            for (const auto& main_file : state.active_import->main_files) {
-                context.main_files.emplace_back(main_file);
-            }
-            if (state.active_import->entry) {
-                context.entry = fs::path{*state.active_import->entry};
-            }
-            return context;
+            return build_analysis_import_context(*state.active_import);
         }
 
-        static analysis_request make_analysis_request(const startup_config& cfg, const repl_state& state) {
+        static analysis_request make_analysis_request(
+                const startup_config& cfg,
+                const repl_state& state,
+                const std::optional<import_transaction_record>& pending_import = std::nullopt) {
             analysis_request request{};
             request.clang_path = cfg.clang_path;
             request.session_dir = state.session_dir;
@@ -3392,10 +3480,11 @@ examples:
             request.dot_path = cfg.dot_path;
             request.verbose = cfg.verbose;
             request.link = cfg.link;
+            request.include_dirs = cfg.include_dirs;
             request.library_dirs = cfg.library_dirs;
             request.libraries = cfg.libraries;
             request.linker_args = cfg.linker_args;
-            request.import_context = make_analysis_import_context(state);
+            request.import_context = make_analysis_import_context(state, pending_import);
             if (source_needs_pthread(request.decl_cells) || source_needs_pthread(request.exec_cells)) {
                 if (std::ranges::find(request.libraries, "pthread") == request.libraries.end()) {
                     request.libraries.emplace_back("pthread");
@@ -3428,15 +3517,21 @@ examples:
                 const startup_config& cfg,
                 const repl_state& state,
                 const std::vector<std::string>& decl_cells,
-                const std::vector<std::string>& exec_cells) {
+                const std::vector<std::string>& exec_cells,
+                const std::optional<import_transaction_record>& pending_import = std::nullopt) {
             if (decl_cells.empty() && exec_cells.empty()) {
                 return validation_result{.success = true, .diagnostics = {}};
             }
 
-            auto request = make_analysis_request(cfg, state);
+            auto request = make_analysis_request(cfg, state, pending_import);
             request.symbol = std::nullopt;
             request.decl_cells = decl_cells;
             request.exec_cells = exec_cells;
+            if (pending_import) {
+                for (const auto& root : pending_import->roots) {
+                    request.include_dirs.emplace_back(root);
+                }
+            }
 
             auto diag = run_analysis(request, analysis_kind::diag);
             return validation_result{.success = diag.success, .diagnostics = std::move(diag.artifact_text)};
@@ -3477,7 +3572,13 @@ examples:
                     candidate_exec_cells.push_back(cell);
                 }
 
-                auto validation = validate_state_cells(cfg, state, candidate_decl_cells, candidate_exec_cells);
+                auto pending_import = std::optional<import_transaction_record>{};
+                if (transaction_kind_value == transaction_kind::import && import_record) {
+                    pending_import = *import_record;
+                }
+
+                auto validation =
+                        validate_state_cells(cfg, state, candidate_decl_cells, candidate_exec_cells, pending_import);
                 if (emit_validation_failure(validation, err)) {
                     return false;
                 }
