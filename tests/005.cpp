@@ -1291,6 +1291,45 @@ namespace sontag::test {
         CHECK(detail::line_count(frame_row0) == detail::line_count(frame_row1));
     }
 
+    TEST_CASE("005: mem frame truncates long row fields with ellipsis", "[005][explorer][mem]") {
+        auto model = internal::explorer::model{};
+        model.mode_label = "mem";
+        model.symbol_display = "main";
+        model.operations_total = 1U;
+        model.opcode_counts = {{"call", 1U}};
+        auto long_instruction =
+                "call std::__1::basic_ostream<char, std::__1::char_traits<char>>::operator<<[abi:ne210108]"
+                "(std::__1::basic_ostream<char, std::__1::char_traits<char>>& (*)(std::__1::basic_ostream<char, "
+                "std::__1::char_traits<char>>&))";
+        model.rows = {internal::explorer::asm_row{
+                .offset = "37c370", .encodings = "e8 0b 00 00 00", .instruction = long_instruction}};
+        model.table_extra_headers = {"address", "symbol"};
+        model.table_extra_values = {
+                {"[rip + std::__1::basic_ostream<char, std::__1::char_traits<char>>& std::__1::endl[abi:ne210108]]",
+                 "std::__1::basic_ostream<char, std::__1::char_traits<char>>& std::__1::endl[abi:ne210108]"}};
+        model.row_info = {internal::explorer::instruction_info{}};
+
+        constexpr auto terminal_cols = size_t{96U};
+        auto frame = internal::explorer::detail::render_frame(model, 0U, 0U, 1U, terminal_cols);
+
+        CHECK(frame.find(long_instruction) == std::string::npos);
+        CHECK(frame.find("...") != std::string::npos);
+
+        auto begin = size_t{0U};
+        while (begin < frame.size()) {
+            auto end = frame.find('\n', begin);
+            if (end == std::string::npos) {
+                end = frame.size();
+            }
+            auto line = std::string_view{frame}.substr(begin, end - begin);
+            CHECK(detail::visible_width_without_ansi(line) <= terminal_cols);
+            if (end == frame.size()) {
+                break;
+            }
+            begin = end + 1U;
+        }
+    }
+
     TEST_CASE("005: asm explore falls back on non-interactive terminals", "[005][session][asm][explore]") {
         detail::temp_dir temp{"sontag_asm_explore_fallback"};
 
