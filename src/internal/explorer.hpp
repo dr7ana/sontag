@@ -175,8 +175,32 @@ namespace sontag::internal::explorer {
             return out;
         }
 
+        static std::string truncate_ellipsis(std::string_view text, size_t max_width) {
+            if (max_width == 0U) {
+                return {};
+            }
+            if (text.size() <= max_width) {
+                return std::string{text};
+            }
+            if (max_width <= 3U) {
+                return std::string{text.substr(0U, max_width)};
+            }
+
+            auto out = std::string{text.substr(0U, max_width - 3U)};
+            out.append("...");
+            return out;
+        }
+
         static std::string pad_cell(std::string_view text, size_t width) {
             auto value = std::string{text};
+            if (value.size() < width) {
+                value.append(width - value.size(), ' ');
+            }
+            return value;
+        }
+
+        static std::string pad_cell_truncated(std::string_view text, size_t width) {
+            auto value = truncate_ellipsis(text, width);
             if (value.size() < width) {
                 value.append(width - value.size(), ' ');
             }
@@ -1366,7 +1390,12 @@ namespace sontag::internal::explorer {
             return frame;
         }
 
-        static std::string render_frame(const model& data, size_t cursor, size_t top_row, size_t rows_visible) {
+        static std::string render_frame(
+                const model& data,
+                size_t cursor,
+                size_t top_row,
+                size_t rows_visible,
+                size_t terminal_cols = default_cols) {
             std::string frame{};
             frame.reserve(4096U);
 
@@ -1487,13 +1516,90 @@ namespace sontag::internal::explorer {
                 }
             }
 
+            // Keep very long symbolic rows readable by capping high-variance text columns.
+            encoding_width = std::min(encoding_width, size_t{24U});
+            instruction_width = std::min(instruction_width, size_t{72U});
+            if (has_definitions) {
+                definition_width = std::min(definition_width, size_t{56U});
+            }
+            if (has_ir_source) {
+                ir_source_width = std::min(ir_source_width, size_t{28U});
+            }
+            for (size_t i = 0U; i < data.table_extra_headers.size(); ++i) {
+                if (data.table_extra_headers[i] == "address"sv) {
+                    extra_column_widths[i] = std::min(extra_column_widths[i], size_t{48U});
+                }
+                else if (data.table_extra_headers[i] == "symbol"sv) {
+                    extra_column_widths[i] = std::min(extra_column_widths[i], size_t{36U});
+                }
+            }
+
+            auto table_width = [&]() {
+                auto width = line_width + offset_width + encoding_width + instruction_width;
+                for (auto extra_width : extra_column_widths) {
+                    width += extra_width;
+                }
+                if (has_definitions) {
+                    width += definition_width;
+                }
+                if (has_ir_source) {
+                    width += ir_source_width;
+                }
+                auto columns = size_t{4U} + data.table_extra_headers.size() + (has_definitions ? 1U : 0U) +
+                               (has_ir_source ? 1U : 0U);
+                if (columns > 1U) {
+                    width += (columns - 1U) * 3U;
+                }
+                return width;
+            };
+
+            auto shrink_to_fit = [&](size_t& width, size_t min_width) {
+                if (terminal_cols == 0U || width <= min_width) {
+                    return;
+                }
+                auto total = table_width();
+                if (total <= terminal_cols) {
+                    return;
+                }
+                auto reducible = width - min_width;
+                auto required = total - terminal_cols;
+                auto delta = std::min(reducible, required);
+                width -= delta;
+            };
+
+            if (terminal_cols > 0U && table_width() > terminal_cols) {
+                shrink_to_fit(instruction_width, std::max(std::string_view{"instruction"}.size(), size_t{24U}));
+                for (size_t i = 0U; i < data.table_extra_headers.size(); ++i) {
+                    if (data.table_extra_headers[i] == "address"sv) {
+                        shrink_to_fit(
+                                extra_column_widths[i], std::max(data.table_extra_headers[i].size(), size_t{24U}));
+                    }
+                }
+                for (size_t i = 0U; i < data.table_extra_headers.size(); ++i) {
+                    if (data.table_extra_headers[i] == "symbol"sv) {
+                        shrink_to_fit(
+                                extra_column_widths[i], std::max(data.table_extra_headers[i].size(), size_t{16U}));
+                    }
+                }
+                if (has_definitions) {
+                    shrink_to_fit(definition_width, std::max(std::string_view{"definition"}.size(), size_t{20U}));
+                }
+                if (has_ir_source) {
+                    shrink_to_fit(ir_source_width, std::max(std::string_view{"ir source"}.size(), size_t{14U}));
+                }
+                for (size_t i = 0U; i < data.table_extra_headers.size(); ++i) {
+                    shrink_to_fit(extra_column_widths[i], data.table_extra_headers[i].size());
+                }
+                shrink_to_fit(encoding_width, std::max(std::string_view{"encodings"}.size(), size_t{12U}));
+            }
+
             append_line("");
             append_line("assembly:");
             auto header_row = "{} | {} | {} | {}"_format(
                     pad_cell("  line", line_width),
                     pad_cell("offset", offset_width),
-                    pad_cell("encodings", encoding_width),
-                    pad_cell("instruction", instruction_width));
+                    pad_cell_truncated("encodings", encoding_width),
+                    pad_cell_truncated("instruction", instruction_width));
             auto separator_row = "{}-+-{}-+-{}-+-{}"_format(
                     std::string(line_width, '-'),
                     std::string(offset_width, '-'),
@@ -1501,19 +1607,19 @@ namespace sontag::internal::explorer {
                     std::string(instruction_width, '-'));
             for (size_t i = 0U; i < data.table_extra_headers.size(); ++i) {
                 header_row.append(" | ");
-                header_row.append(pad_cell(data.table_extra_headers[i], extra_column_widths[i]));
+                header_row.append(pad_cell_truncated(data.table_extra_headers[i], extra_column_widths[i]));
                 separator_row.append("-+-");
                 separator_row.append(std::string(extra_column_widths[i], '-'));
             }
             if (has_definitions) {
                 header_row.append(" | ");
-                header_row.append(pad_cell("definition", definition_width));
+                header_row.append(pad_cell_truncated("definition", definition_width));
                 separator_row.append("-+-");
                 separator_row.append(std::string(definition_width, '-'));
             }
             if (has_ir_source) {
                 header_row.append(" | ");
-                header_row.append(pad_cell("ir source", ir_source_width));
+                header_row.append(pad_cell_truncated("ir source", ir_source_width));
                 separator_row.append("-+-");
                 separator_row.append(std::string(ir_source_width, '-'));
             }
@@ -1525,19 +1631,19 @@ namespace sontag::internal::explorer {
                 auto empty_row = "{} | {} | {} | {}"_format(
                         pad_cell("  <none>", line_width),
                         pad_cell("", offset_width),
-                        pad_cell("", encoding_width),
-                        pad_cell("", instruction_width));
+                        pad_cell_truncated("", encoding_width),
+                        pad_cell_truncated("", instruction_width));
                 for (size_t i = 0U; i < data.table_extra_headers.size(); ++i) {
                     empty_row.append(" | ");
-                    empty_row.append(pad_cell("", extra_column_widths[i]));
+                    empty_row.append(pad_cell_truncated("", extra_column_widths[i]));
                 }
                 if (has_definitions) {
                     empty_row.append(" | ");
-                    empty_row.append(pad_cell("", definition_width));
+                    empty_row.append(pad_cell_truncated("", definition_width));
                 }
                 if (has_ir_source) {
                     empty_row.append(" | ");
-                    empty_row.append(pad_cell("", ir_source_width));
+                    empty_row.append(pad_cell_truncated("", ir_source_width));
                 }
                 append_line(empty_row);
             }
@@ -1547,17 +1653,18 @@ namespace sontag::internal::explorer {
                 for (size_t i = start; i < end; ++i) {
                     auto offset = format_offset(data.rows[i].offset);
                     auto aligned_instruction = format_aligned_instruction(data.rows[i].instruction, mnemonic_width);
-                    auto [mnemonic, _] = split_instruction_parts(aligned_instruction);
+                    auto display_instruction = truncate_ellipsis(aligned_instruction, instruction_width);
+                    auto [mnemonic, _] = split_instruction_parts(display_instruction);
                     auto call_target_span = std::optional<std::pair<size_t, size_t>>{};
-                    if (auto call_target = extract_call_target_symbol(aligned_instruction); call_target.has_value()) {
-                        if (auto position = aligned_instruction.find(*call_target);
+                    if (auto call_target = extract_call_target_symbol(display_instruction); call_target.has_value()) {
+                        if (auto position = display_instruction.find(*call_target);
                             position != std::string_view::npos) {
                             call_target_span = std::pair<size_t, size_t>{position, call_target->size()};
                         }
                     }
                     auto active_call_target_color = i == cursor ? data.call_target_color : std::string_view{};
                     auto instruction_cell = colorize_instruction_mnemonic(
-                            aligned_instruction,
+                            display_instruction,
                             mnemonic.size(),
                             instruction_width,
                             data.selected_definition_color,
@@ -1567,20 +1674,20 @@ namespace sontag::internal::explorer {
                     auto row_prefix = "{} | {} | {} | {}"_format(
                             pad_cell("  [{}]"_format(i), line_width),
                             pad_cell(offset, offset_width),
-                            pad_cell(data.rows[i].encodings, encoding_width),
+                            pad_cell_truncated(data.rows[i].encodings, encoding_width),
                             instruction_cell);
                     if (i < data.table_extra_values.size()) {
                         const auto& row_values = data.table_extra_values[i];
                         for (size_t j = 0U; j < data.table_extra_headers.size(); ++j) {
                             auto value = j < row_values.size() ? std::string_view{row_values[j]} : std::string_view{};
                             row_prefix.append(" | ");
-                            row_prefix.append(pad_cell(value, extra_column_widths[j]));
+                            row_prefix.append(pad_cell_truncated(value, extra_column_widths[j]));
                         }
                     }
                     else {
                         for (size_t j = 0U; j < data.table_extra_headers.size(); ++j) {
                             row_prefix.append(" | ");
-                            row_prefix.append(pad_cell("", extra_column_widths[j]));
+                            row_prefix.append(pad_cell_truncated("", extra_column_widths[j]));
                         }
                     }
                     auto trailing_columns = std::string{};
@@ -1590,17 +1697,19 @@ namespace sontag::internal::explorer {
                                          ? std::string_view{data.instruction_definitions[i]}
                                          : std::string_view{};
                         trailing_columns.append(" | ");
-                        trailing_columns.append(pad_cell(i == cursor ? def : std::string_view{}, definition_width));
+                        trailing_columns.append(
+                                pad_cell_truncated(i == cursor ? def : std::string_view{}, definition_width));
                         trailing_empty.append(" | ");
-                        trailing_empty.append(pad_cell("", definition_width));
+                        trailing_empty.append(pad_cell_truncated("", definition_width));
                     }
                     if (has_ir_source) {
                         auto ir = (i < data.ir_source_lines.size()) ? std::string_view{data.ir_source_lines[i]}
                                                                     : std::string_view{};
                         trailing_columns.append(" | ");
-                        trailing_columns.append(pad_cell(i == cursor ? ir : std::string_view{}, ir_source_width));
+                        trailing_columns.append(
+                                pad_cell_truncated(i == cursor ? ir : std::string_view{}, ir_source_width));
                         trailing_empty.append(" | ");
-                        trailing_empty.append(pad_cell("", ir_source_width));
+                        trailing_empty.append(pad_cell_truncated("", ir_source_width));
                     }
                     if (i == cursor) {
                         if (data.selected_line_color.empty()) {
@@ -2294,7 +2403,7 @@ namespace sontag::internal::explorer {
                     !data.resource_pressure.resources.empty());
             detail::clamp_viewport(data.rows.size(), rows_visible, cursor, top_row);
 
-            out << detail::render_frame(data, cursor, top_row, rows_visible);
+            out << detail::render_frame(data, cursor, top_row, rows_visible, dims.cols);
             out.flush();
 
             auto event = detail::read_key_event(STDIN_FILENO);

@@ -250,7 +250,7 @@ resolution behavior:
 ### `:ir [symbol|@last]`
 
 - default symbol: `main`
-- prints IR node table plus Sugiyama layout keyed by `n*` ids
+- print the IR node table plus Sugiyama layout keyed by `n*` ids
 
 ### `:diag [symbol|@last]`
 
