@@ -100,50 +100,62 @@ function(configure_build_opts)
         endif()
     endif()
 
-    set(sontag_clang_candidate "${sontag_toolchain_bin_dir_resolved}/clang++")
-    if(NOT EXISTS "${sontag_clang_candidate}")
-        set(sontag_clang_candidate "${sontag_toolchain_bin_dir_resolved}/clang++-${sontag_clang_version_major}")
-    endif()
-    if(NOT EXISTS "${sontag_clang_candidate}")
-        message(FATAL_ERROR
-            "required clang++ executable not found in toolchain bin dir: ${sontag_toolchain_bin_dir_resolved}")
+    set(sontag_tool_search_hints "${sontag_toolchain_bin_dir_resolved}")
+    if(SONTAG_PLATFORM_MACOS)
+        list(APPEND sontag_tool_search_hints "/opt/homebrew/bin" "/usr/local/bin")
     endif()
 
-    set(sontag_llvm_mca_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-mca-${sontag_clang_version_major}")
-    if(NOT EXISTS "${sontag_llvm_mca_candidate}")
-        set(sontag_llvm_mca_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-mca")
-    endif()
-    if(NOT EXISTS "${sontag_llvm_mca_candidate}")
-        message(FATAL_ERROR
-            "required llvm-mca executable not found in toolchain bin dir: ${sontag_toolchain_bin_dir_resolved}")
-    endif()
+    macro(sontag_require_tool out_var friendly_name)
+        set(_sontag_tool_names ${ARGN})
+        set(${out_var} "")
 
-    set(sontag_llvm_objdump_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-objdump-${sontag_clang_version_major}")
-    if(NOT EXISTS "${sontag_llvm_objdump_candidate}")
-        set(sontag_llvm_objdump_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-objdump")
-    endif()
-    if(NOT EXISTS "${sontag_llvm_objdump_candidate}")
-        message(FATAL_ERROR
-            "required llvm-objdump executable not found in toolchain bin dir: ${sontag_toolchain_bin_dir_resolved}")
-    endif()
+        foreach(_sontag_tool_name IN LISTS _sontag_tool_names)
+            if(EXISTS "${sontag_toolchain_bin_dir_resolved}/${_sontag_tool_name}")
+                set(${out_var} "${sontag_toolchain_bin_dir_resolved}/${_sontag_tool_name}")
+                break()
+            endif()
+        endforeach()
 
-    set(sontag_llvm_nm_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-nm-${sontag_clang_version_major}")
-    if(NOT EXISTS "${sontag_llvm_nm_candidate}")
-        set(sontag_llvm_nm_candidate "${sontag_toolchain_bin_dir_resolved}/llvm-nm")
-    endif()
-    if(NOT EXISTS "${sontag_llvm_nm_candidate}")
-        message(FATAL_ERROR
-            "required llvm-nm executable not found in toolchain bin dir: ${sontag_toolchain_bin_dir_resolved}")
-    endif()
+        if(NOT ${out_var})
+            find_program(${out_var}
+                NAMES ${_sontag_tool_names}
+                HINTS ${sontag_tool_search_hints})
+        endif()
 
-    set(sontag_lld_candidate "${sontag_toolchain_bin_dir_resolved}/ld.lld-${sontag_clang_version_major}")
-    if(NOT EXISTS "${sontag_lld_candidate}")
-        set(sontag_lld_candidate "${sontag_toolchain_bin_dir_resolved}/ld.lld")
-    endif()
-    if(NOT EXISTS "${sontag_lld_candidate}")
-        message(FATAL_ERROR
-            "required ld.lld executable not found in toolchain bin dir: ${sontag_toolchain_bin_dir_resolved}")
-    endif()
+        if(NOT ${out_var})
+            string(REPLACE ";" "/" _sontag_tool_names_display "${_sontag_tool_names}")
+            message(FATAL_ERROR
+                "required ${friendly_name} executable not found (checked names: ${_sontag_tool_names_display})")
+        endif()
+    endmacro()
+
+    sontag_require_tool(
+        sontag_clang_candidate
+        "clang++"
+        "clang++"
+        "clang++-${sontag_clang_version_major}")
+    sontag_require_tool(
+        sontag_llvm_mca_candidate
+        "llvm-mca"
+        "llvm-mca-${sontag_clang_version_major}"
+        "llvm-mca")
+    sontag_require_tool(
+        sontag_llvm_objdump_candidate
+        "llvm-objdump"
+        "llvm-objdump-${sontag_clang_version_major}"
+        "llvm-objdump")
+    sontag_require_tool(
+        sontag_llvm_nm_candidate
+        "llvm-nm"
+        "llvm-nm-${sontag_clang_version_major}"
+        "llvm-nm")
+    sontag_require_tool(
+        sontag_lld_candidate
+        "lld"
+        "ld.lld-${sontag_clang_version_major}"
+        "ld.lld"
+        "lld-${sontag_clang_version_major}"
+        "lld")
 
     set(SONTAG_TOOLCHAIN_BIN_DIR_RESOLVED "${sontag_toolchain_bin_dir_resolved}" CACHE PATH
         "resolved LLVM toolchain binary directory used by sontag" FORCE)
@@ -158,7 +170,7 @@ function(configure_build_opts)
     set(SONTAG_LLVM_NM_EXECUTABLE "${sontag_llvm_nm_candidate}" CACHE FILEPATH
         "llvm-nm executable path used by sontag" FORCE)
     set(SONTAG_LLD_EXECUTABLE "${sontag_lld_candidate}" CACHE FILEPATH
-        "ld.lld executable path used by sontag" FORCE)
+        "lld executable path used by sontag" FORCE)
 
     set(sontag_toolchain_bin_dir_resolved_escaped "${sontag_toolchain_bin_dir_resolved}")
     string(REPLACE "\\" "\\\\" sontag_toolchain_bin_dir_resolved_escaped "${sontag_toolchain_bin_dir_resolved_escaped}")
@@ -205,7 +217,7 @@ function(configure_build_opts)
     message(STATUS "sontag llvm-mca executable: ${SONTAG_LLVM_MCA_EXECUTABLE}")
     message(STATUS "sontag llvm-objdump executable: ${SONTAG_LLVM_OBJDUMP_EXECUTABLE}")
     message(STATUS "sontag llvm-nm executable: ${SONTAG_LLVM_NM_EXECUTABLE}")
-    message(STATUS "sontag ld.lld executable: ${SONTAG_LLD_EXECUTABLE}")
+    message(STATUS "sontag lld executable: ${SONTAG_LLD_EXECUTABLE}")
 
     if(SONTAG_USE_LIBCXX)
         add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>")
