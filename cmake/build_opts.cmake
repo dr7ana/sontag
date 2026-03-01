@@ -108,15 +108,24 @@ function(configure_build_opts)
     macro(sontag_require_tool out_var friendly_name)
         set(_sontag_tool_names ${ARGN})
         set(${out_var} "")
+        set(_sontag_tool_dirs ${sontag_tool_search_hints})
+        list(REMOVE_DUPLICATES _sontag_tool_dirs)
 
-        foreach(_sontag_tool_name IN LISTS _sontag_tool_names)
-            if(EXISTS "${sontag_toolchain_bin_dir_resolved}/${_sontag_tool_name}")
-                set(${out_var} "${sontag_toolchain_bin_dir_resolved}/${_sontag_tool_name}")
+        foreach(_sontag_tool_dir IN LISTS _sontag_tool_dirs)
+            foreach(_sontag_tool_name IN LISTS _sontag_tool_names)
+                if(EXISTS "${_sontag_tool_dir}/${_sontag_tool_name}")
+                    set(${out_var} "${_sontag_tool_dir}/${_sontag_tool_name}")
+                    break()
+                endif()
+            endforeach()
+            if(${out_var})
                 break()
             endif()
         endforeach()
 
         if(NOT ${out_var})
+            # Clear cached NOTFOUND entries from prior configure attempts.
+            unset(${out_var} CACHE)
             find_program(${out_var}
                 NAMES ${_sontag_tool_names}
                 HINTS ${sontag_tool_search_hints})
