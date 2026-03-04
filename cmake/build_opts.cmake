@@ -138,11 +138,13 @@ function(configure_build_opts)
         endif()
     endmacro()
 
+    get_filename_component(sontag_cxx_compiler_basename "${CMAKE_CXX_COMPILER}" NAME)
     sontag_require_tool(
         sontag_clang_candidate
         "clang++"
-        "clang++"
-        "clang++-${sontag_clang_version_major}")
+        "${sontag_cxx_compiler_basename}"
+        "clang++-${sontag_clang_version_major}"
+        "clang++")
     sontag_require_tool(
         sontag_llvm_mca_candidate
         "llvm-mca"

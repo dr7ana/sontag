@@ -3604,12 +3604,28 @@ examples:
         }
 
         static bool source_needs_pthread(const std::vector<std::string>& cells) {
+            static constexpr auto pthread_indicators = std::array<std::string_view, 16>{
+                    "#include <mutex>"sv,
+                    "#include <thread>"sv,
+                    "#include <condition_variable>"sv,
+                    "#include <atomic>"sv,
+                    "#include <shared_mutex>"sv,
+                    "#include <future>"sv,
+                    "std::mutex"sv,
+                    "std::recursive_mutex"sv,
+                    "std::shared_mutex"sv,
+                    "std::lock_guard"sv,
+                    "std::scoped_lock"sv,
+                    "std::unique_lock"sv,
+                    "std::thread"sv,
+                    "std::jthread"sv,
+                    "std::condition_variable"sv,
+                    "pthread_"sv};
             for (const auto& cell : cells) {
-                if (cell.find("#include <mutex>") != std::string::npos ||
-                    cell.find("#include <thread>") != std::string::npos ||
-                    cell.find("#include <condition_variable>") != std::string::npos ||
-                    cell.find("#include <atomic>") != std::string::npos) {
-                    return true;
+                for (auto indicator : pthread_indicators) {
+                    if (cell.find(indicator) != std::string::npos) {
+                        return true;
+                    }
                 }
             }
             return false;

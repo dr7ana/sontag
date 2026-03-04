@@ -200,7 +200,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_analysis"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -240,7 +240,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_analysis_build_hash_namespace"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -275,7 +275,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_analysis_build_hash_order"};
 
         analysis_request first_request{};
-        first_request.clang_path = "/usr/bin/clang++";
+        first_request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         first_request.session_dir = temp.path / "session";
         first_request.language_standard = cxx_standard::cxx23;
         first_request.opt_level = optimization_level::o2;
@@ -307,7 +307,7 @@ namespace sontag::test {
                 "}\n");
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -372,7 +372,7 @@ namespace sontag::test {
         retarget_root(project_a);
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -401,7 +401,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_mem_trace_cache_hit"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -426,7 +426,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_dump_cache_hit"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -451,7 +451,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m3_graph_cfg_cache_hit"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -473,7 +473,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m3_graph_call_cache_hit"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -499,7 +499,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m3_graph_defuse_cache_hit"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -527,7 +527,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m3_inspect_asm_cache_hit"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -553,7 +553,7 @@ namespace sontag::test {
         detail::make_executable_file(mca_wrapper, detail::make_mca_wrapper_script());
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.mca_path = mca_wrapper;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
@@ -582,7 +582,7 @@ namespace sontag::test {
         detail::make_executable_file(mca_wrapper, detail::make_mca_wrapper_script());
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.mca_path = mca_wrapper;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
@@ -612,7 +612,7 @@ namespace sontag::test {
 
         for (auto cpu : {std::string_view{"generic"}, std::string_view{"apple-m4"}}) {
             analysis_request request{};
-            request.clang_path = "/usr/bin/clang++";
+            request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
             request.mca_path = mca_wrapper;
             request.session_dir = temp.path / ("session_" + std::string{cpu});
             request.language_standard = cxx_standard::cxx23;
@@ -638,7 +638,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m3_resolver_cache_equivalence"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -683,7 +683,7 @@ namespace sontag::test {
         decl << "int entry(int x) { return fn1(x) + fn2(x) + fn3(x); }\n";
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -724,7 +724,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m3_dump_symbol_switch_layer_b"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -750,7 +750,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_link_policy"};
 
         analysis_request dynamic_request{};
-        dynamic_request.clang_path = "/usr/bin/clang++";
+        dynamic_request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         dynamic_request.session_dir = temp.path / "session_dynamic";
         dynamic_request.language_standard = cxx_standard::cxx23;
         dynamic_request.opt_level = optimization_level::o0;
@@ -782,7 +782,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_symbol"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -818,7 +818,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m3_asm_runtime_symbol_fallback"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -849,7 +849,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_sequence"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -883,7 +883,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_verbose"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -904,7 +904,7 @@ namespace sontag::test {
         detail::make_executable_file(wrapper_path, wrapper_script);
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.objdump_path = wrapper_path;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
@@ -941,7 +941,7 @@ namespace sontag::test {
         detail::make_executable_file(wrapper_path, wrapper_script);
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.objdump_path = wrapper_path;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
@@ -974,7 +974,7 @@ namespace sontag::test {
         detail::make_executable_file(wrapper_path, wrapper_script);
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.objdump_path = wrapper_path;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
@@ -999,7 +999,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m3_graph_cfg"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -1030,7 +1030,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m3_graph_cfg_symbol"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -1058,7 +1058,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m3_graph_call"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -1100,7 +1100,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_symbols"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o2;
@@ -1126,7 +1126,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_resolve_symbol_info"};
 
         analysis_request linked_request{};
-        linked_request.clang_path = "/usr/bin/clang++";
+        linked_request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         linked_request.session_dir = temp.path / "session_linked";
         linked_request.language_standard = cxx_standard::cxx23;
         linked_request.opt_level = optimization_level::o0;
@@ -1205,7 +1205,7 @@ namespace sontag::test {
         detail::make_executable_file(nm_wrapper_path, detail::make_nm_object_binary_split_script());
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.nm_path = nm_wrapper_path;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
@@ -1227,7 +1227,7 @@ namespace sontag::test {
         detail::make_executable_file(nm_wrapper_path, detail::make_nm_short_token_collision_script());
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.nm_path = nm_wrapper_path;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
@@ -1248,7 +1248,7 @@ namespace sontag::test {
         detail::make_executable_file(nm_wrapper_path, detail::make_nm_addendum_collision_script());
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.nm_path = nm_wrapper_path;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
@@ -1267,7 +1267,7 @@ namespace sontag::test {
         detail::temp_dir temp{"sontag_m1_mem_trace_non_main"};
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -1306,7 +1306,7 @@ namespace sontag::test {
                 "}\n");
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -1347,7 +1347,7 @@ namespace sontag::test {
                 "}\n");
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -1386,7 +1386,7 @@ namespace sontag::test {
                 "}\n");
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -1422,7 +1422,7 @@ namespace sontag::test {
                 "}\n");
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -1477,7 +1477,7 @@ namespace sontag::test {
         detail::write_text_file(project_dir / "compile_commands.json", compile_db);
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;
@@ -1525,7 +1525,7 @@ namespace sontag::test {
         detail::write_text_file(project_dir / "compile_commands.json", compile_db);
 
         analysis_request request{};
-        request.clang_path = "/usr/bin/clang++";
+        request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
         request.session_dir = temp.path / "session";
         request.language_standard = cxx_standard::cxx23;
         request.opt_level = optimization_level::o0;

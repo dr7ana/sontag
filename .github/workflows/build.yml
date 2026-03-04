@@ -41,7 +41,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install llvm@21
-          brew install lld@20
+          brew install lld@21
 
       - name: Configure
         run: |
