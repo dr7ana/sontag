@@ -1,0 +1,82 @@
+name: Build
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: linux-x86_64
+          - os: macos-26
+            name: macos-arm64-26
+          - os: macos-15
+            name: macos-arm64-15
+          - os: macos-15-intel
+            name: macos-x86_64
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install LLVM (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21 all
+          sudo update-alternatives --install /usr/bin/clang        clang        /usr/bin/clang-21 100
+          sudo update-alternatives --install /usr/bin/clang++      clang++      /usr/bin/clang++-21 100
+          sudo update-alternatives --install /usr/bin/llvm-mca     llvm-mca     /usr/bin/llvm-mca-21 100
+          sudo update-alternatives --install /usr/bin/llvm-objdump llvm-objdump /usr/bin/llvm-objdump-21 100
+          sudo update-alternatives --install /usr/bin/llvm-nm      llvm-nm      /usr/bin/llvm-nm-21 100
+          sudo update-alternatives --install /usr/bin/ld.lld       ld.lld       /usr/bin/ld.lld-21 100
+
+      - name: Install LLVM (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm@21
+          brew install lld@20
+
+      - name: Configure
+        run: |
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            LLVM_PREFIX=$(brew --prefix llvm@21)
+            CC="${LLVM_PREFIX}/bin/clang"
+            CXX="${LLVM_PREFIX}/bin/clang++"
+          else
+            CC=clang-21
+            CXX=clang++-21
+          fi
+
+          echo "CC=${CC}"
+          echo "CXX=${CXX}"
+          which "${CC}" || true
+          which "${CXX}" || true
+          "${CXX}" --version || true
+
+          cmake -B build -G Ninja \
+            -DCMAKE_C_COMPILER="${CC}" \
+            -DCMAKE_CXX_COMPILER="${CXX}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSONTAG_MCP=ON \
+            -DSONTAG_BUILD_TESTS=ON \
+            -DSONTAG_USE_LIBCXX=ON \
+            -DWARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ./build/tests/alltests
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: sontag-${{ matrix.name }}
+          path: build/sontag
