@@ -1818,6 +1818,11 @@ namespace sontag {
                 std::string_view artifact_id) {
             std::vector<std::string> candidates{};
             append_unique(candidates, configured_tool_path.string());
+            auto clang_dir = request.clang_path.parent_path();
+            if (!clang_dir.empty()) {
+                // Prefer deterministic absolute tool paths next to configured clang.
+                append_unique(candidates, (clang_dir / configured_tool_path.filename()).string());
+            }
             if (configured_tool_path.has_parent_path()) {
                 return candidates;
             }
@@ -1838,7 +1843,6 @@ namespace sontag {
                 }
             }
 
-            auto clang_dir = request.clang_path.parent_path();
             auto configured_dir = configured_tool_path.parent_path();
             for (const auto& suffix : suffixes_with_major) {
                 std::string tool_name{versioned_prefix};

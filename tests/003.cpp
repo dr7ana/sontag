@@ -92,7 +92,7 @@ namespace sontag::test {
 
         static void configure_analysis_tool_paths(analysis_request& request) {
             request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
-            if constexpr (internal::platform::is_macos && internal::platform::is_arm64) {
+            if constexpr (internal::platform::is_macos) {
                 request.objdump_path = SONTAG_LLVM_OBJDUMP_EXECUTABLE_PATH;
                 request.mca_path = SONTAG_LLVM_MCA_EXECUTABLE_PATH;
                 request.nm_path = SONTAG_LLVM_NM_EXECUTABLE_PATH;
