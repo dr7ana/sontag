@@ -584,21 +584,21 @@ namespace sontag::cli {
             return "unknown-target"sv;
         }
 
-        static std::string_view effective_target_value(const startup_config& cfg) {
+        static constexpr std::string_view effective_target_value(const startup_config& cfg) {
             if (cfg.target_triple) {
                 return *cfg.target_triple;
             }
             return host_target_literal();
         }
 
-        static std::string_view effective_cpu_value(const startup_config& cfg) {
+        static constexpr std::string_view effective_cpu_value(const startup_config& cfg) {
             if (cfg.cpu) {
                 return *cfg.cpu;
             }
             return host_cpu_literal();
         }
 
-        static std::string_view effective_mca_cpu_value(const startup_config& cfg) {
+        static constexpr std::string_view effective_mca_cpu_value(const startup_config& cfg) {
             if (cfg.mca_cpu) {
                 return *cfg.mca_cpu;
             }

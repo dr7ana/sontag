@@ -4340,9 +4340,118 @@ namespace sontag {
             return extracted.str();
         }
 
+        static std::optional<uint64_t> parse_dyld_disassembly_address(std::string_view line) {
+            auto trimmed = trim_ascii(line);
+            auto token_end = trimmed.find_first_of(" \t");
+            auto token = token_end == std::string_view::npos ? trimmed : trimmed.substr(0U, token_end);
+            return metrics::parse_hex_u64(token);
+        }
+
+        struct dyld_function_start {
+            uint64_t address{};
+            std::string symbol{};
+        };
+
+        static std::optional<dyld_function_start> parse_dyld_function_start_line(std::string_view line) {
+            auto trimmed = trim_ascii(line);
+            if (!trimmed.starts_with("0x"sv)) {
+                return std::nullopt;
+            }
+            auto first_space = trimmed.find_first_of(" \t");
+            if (first_space == std::string_view::npos) {
+                return std::nullopt;
+            }
+            auto address_token = trimmed.substr(0U, first_space);
+            auto symbol = trim_ascii(trimmed.substr(first_space + 1U));
+            if (symbol.empty()) {
+                return std::nullopt;
+            }
+            auto address = metrics::parse_hex_u64(address_token);
+            if (!address) {
+                return std::nullopt;
+            }
+            return dyld_function_start{.address = *address, .symbol = std::string{symbol}};
+        }
+
+        static std::string extract_dyld_info_for_symbol_by_function_starts(
+                std::string_view disassembly_text,
+                std::string_view function_starts_text,
+                std::string_view mangled_symbol,
+                std::string_view display_symbol) {
+            auto function_start_lines = split_lines(function_starts_text);
+            std::vector<dyld_function_start> entries{};
+            entries.reserve(function_start_lines.size());
+            for (const auto& line : function_start_lines) {
+                auto parsed = parse_dyld_function_start_line(line);
+                if (!parsed) {
+                    continue;
+                }
+                entries.push_back(std::move(*parsed));
+            }
+            if (entries.empty()) {
+                return {};
+            }
+
+            auto match_index = std::optional<size_t>{};
+            for (size_t i = 0U; i < entries.size(); ++i) {
+                auto demangled = demangle_symbol_name(entries[i].symbol);
+                if (symbol_names_equivalent(entries[i].symbol, mangled_symbol) ||
+                    symbol_names_equivalent(entries[i].symbol, display_symbol) ||
+                    symbol_names_equivalent(demangled, display_symbol)) {
+                    match_index = i;
+                    break;
+                }
+            }
+            if (!match_index) {
+                return {};
+            }
+
+            auto begin_address = entries[*match_index].address;
+            auto end_address = std::optional<uint64_t>{};
+            if (*match_index + 1U < entries.size()) {
+                end_address = entries[*match_index + 1U].address;
+            }
+
+            auto disassembly_lines = split_lines(disassembly_text);
+            std::ostringstream extracted{};
+            extracted << entries[*match_index].symbol << ":\n";
+            bool in_symbol = false;
+            for (const auto& line : disassembly_lines) {
+                auto address = parse_dyld_disassembly_address(line);
+                if (!address) {
+                    if (in_symbol) {
+                        extracted << line << '\n';
+                    }
+                    continue;
+                }
+                if (!in_symbol) {
+                    if (*address == begin_address) {
+                        in_symbol = true;
+                        extracted << line << '\n';
+                    }
+                    continue;
+                }
+                if (end_address && *address >= *end_address) {
+                    break;
+                }
+                extracted << line << '\n';
+            }
+            return extracted.str();
+        }
+
         static constexpr bool macos_runtime_symbol_prefers_libcxx(
                 std::string_view mangled_symbol, std::string_view display_symbol) {
             return contains_token(mangled_symbol, "St3__1"sv) || contains_token(display_symbol, "std::__1::"sv);
+        }
+
+        static std::optional<std::string_view> macos_dyld_arch_for_request(const analysis_request& request) {
+            if (is_x86_target(request)) {
+                return "x86_64"sv;
+            }
+            if (is_aarch64_target(request)) {
+                return "arm64"sv;
+            }
+            return std::nullopt;
         }
 
         static std::optional<std::string> try_extract_macos_runtime_symbol_disassembly(
@@ -4365,27 +4474,64 @@ namespace sontag {
                 dylib_candidates.emplace_back("/usr/lib/libc++.1.dylib");
             }
             dylib_candidates.emplace_back("/usr/lib/libSystem.B.dylib");
+            auto dyld_arch = macos_dyld_arch_for_request(request);
 
             for (size_t i = 0U; i < dylib_candidates.size(); ++i) {
                 const auto& dylib = dylib_candidates[i];
-                auto stdout_path = kind_dir / "{}.dyld.{}.stdout.txt"_format(artifact_id, i);
-                auto stderr_path = kind_dir / "{}.dyld.{}.stderr.txt"_format(artifact_id, i);
-                auto command = std::vector<std::string>{"/usr/bin/dyld_info", "-disassemble", dylib};
-                auto exit_code = run_process(command, stdout_path, stderr_path);
-                if (exit_code != 0) {
-                    if (request.verbose) {
-                        auto stderr_text = read_text_file(stderr_path);
-                        if (!stderr_text.empty()) {
-                            debug_log(
-                                    "dyld_info disassembly failed for {} (exit {}): {}", dylib, exit_code, stderr_text);
+                auto dyld_tools = std::vector<std::vector<std::string>>{
+                        {"/usr/bin/dyld_info"},
+                        {"dyld_info"},
+                        {"/usr/bin/xcrun", "dyld_info"},
+                };
+                for (size_t tool_index = 0U; tool_index < dyld_tools.size(); ++tool_index) {
+                    auto stdout_path = kind_dir / "{}.dyld.{}.{}.stdout.txt"_format(artifact_id, i, tool_index);
+                    auto stderr_path = kind_dir / "{}.dyld.{}.{}.stderr.txt"_format(artifact_id, i, tool_index);
+                    auto command = dyld_tools[tool_index];
+                    if (dyld_arch) {
+                        command.emplace_back("-arch");
+                        command.emplace_back(std::string{*dyld_arch});
+                    }
+                    command.emplace_back("-disassemble");
+                    command.emplace_back(dylib);
+
+                    auto exit_code = run_process(command, stdout_path, stderr_path);
+                    if (exit_code != 0) {
+                        if (request.verbose) {
+                            auto stderr_text = read_text_file(stderr_path);
+                            if (!stderr_text.empty()) {
+                                debug_log(
+                                        "dyld_info disassembly failed for {} (exit {}): {}",
+                                        dylib,
+                                        exit_code,
+                                        stderr_text);
+                            }
+                        }
+                        continue;
+                    }
+                    auto disassembly_text = read_text_file(stdout_path);
+                    auto extracted = extract_dyld_info_for_symbol(disassembly_text, mangled_symbol, display_symbol);
+                    if (trim_ascii(extracted).empty()) {
+                        auto starts_stdout_path =
+                                kind_dir / "{}.dyld.{}.{}.starts.stdout.txt"_format(artifact_id, i, tool_index);
+                        auto starts_stderr_path =
+                                kind_dir / "{}.dyld.{}.{}.starts.stderr.txt"_format(artifact_id, i, tool_index);
+                        auto starts_command = dyld_tools[tool_index];
+                        if (dyld_arch) {
+                            starts_command.emplace_back("-arch");
+                            starts_command.emplace_back(std::string{*dyld_arch});
+                        }
+                        starts_command.emplace_back("-function_starts");
+                        starts_command.emplace_back(dylib);
+                        auto starts_exit = run_process(starts_command, starts_stdout_path, starts_stderr_path);
+                        if (starts_exit == 0) {
+                            auto starts_text = read_text_file(starts_stdout_path);
+                            extracted = extract_dyld_info_for_symbol_by_function_starts(
+                                    disassembly_text, starts_text, mangled_symbol, display_symbol);
                         }
                     }
-                    continue;
-                }
-                auto disassembly_text = read_text_file(stdout_path);
-                auto extracted = extract_dyld_info_for_symbol(disassembly_text, mangled_symbol, display_symbol);
-                if (!trim_ascii(extracted).empty()) {
-                    return extracted;
+                    if (!trim_ascii(extracted).empty()) {
+                        return extracted;
+                    }
                 }
             }
             return std::nullopt;
@@ -4491,6 +4637,44 @@ namespace sontag {
                     instructions.append(instruction);
                     instructions.push_back('\n');
                 }
+            }
+
+            std::string prepared{};
+            prepared.reserve(instructions.size() + 64U);
+            prepared.append(".text\n");
+            if (is_x86_target(request) && request.asm_syntax == "intel"sv) {
+                prepared.append(".intel_syntax noprefix\n");
+            }
+            prepared.append(sanitize_mca_input(instructions, false, !is_x86_target(request)));
+            return prepared;
+        }
+
+        static std::string prepare_mca_from_dyld_disassembly(
+                const analysis_request& request, std::string_view disassembly_text) {
+            auto lines = split_lines(disassembly_text);
+            std::string instructions{};
+            instructions.reserve(disassembly_text.size());
+
+            for (const auto& line : lines) {
+                auto trimmed = trim_ascii(line);
+                if (trimmed.empty()) {
+                    continue;
+                }
+                auto address = parse_dyld_disassembly_address(trimmed);
+                if (!address) {
+                    continue;
+                }
+
+                auto token_end = trimmed.find_first_of(" \t");
+                if (token_end == std::string_view::npos) {
+                    continue;
+                }
+                auto tail = trim_ascii(trimmed.substr(token_end + 1U));
+                if (tail.empty()) {
+                    continue;
+                }
+                instructions.append(tail);
+                instructions.push_back('\n');
             }
 
             std::string prepared{};
@@ -6038,6 +6222,19 @@ namespace sontag {
 
                     auto extracted = detail::extract_asm_for_symbol(asm_text, *resolved);
                     if (extracted.empty()) {
+                        if constexpr (internal::platform::is_macos) {
+                            if (auto runtime_disassembly = detail::try_extract_macos_runtime_symbol_disassembly(
+                                        request, kind_dir, id, *resolved, *request.symbol);
+                                runtime_disassembly.has_value()) {
+                                auto runtime_mca_text = detail::prepare_mca_from_dyld_disassembly(
+                                        request, *runtime_disassembly);
+                                if (!detail::trim_ascii(runtime_mca_text).empty()) {
+                                    asm_text = std::move(runtime_mca_text);
+                                }
+                            }
+                        }
+                    }
+                    if (extracted.empty() && detail::trim_ascii(asm_text).empty()) {
                         auto dump_result = run_analysis(request, analysis_kind::dump);
                         if (dump_result.success && !dump_result.artifact_text.empty()) {
                             asm_text = detail::prepare_mca_from_objdump(request, dump_result.artifact_text);
@@ -6592,12 +6789,10 @@ namespace sontag {
 
                 if (extracted.empty() && kind == analysis_kind::asm_text) {
                     if constexpr (internal::platform::is_macos) {
-                        if (detail::resolved_symbol_is_undefined_in_snapshot(request, *resolved)) {
-                            if (auto runtime_disassembly = detail::try_extract_macos_runtime_symbol_disassembly(
-                                        request, kind_dir, id, *resolved, *request.symbol);
-                                runtime_disassembly.has_value()) {
-                                extracted = std::move(*runtime_disassembly);
-                            }
+                        if (auto runtime_disassembly = detail::try_extract_macos_runtime_symbol_disassembly(
+                                    request, kind_dir, id, *resolved, *request.symbol);
+                            runtime_disassembly.has_value()) {
+                            extracted = std::move(*runtime_disassembly);
                         }
                     }
                 }
@@ -6713,12 +6908,10 @@ namespace sontag {
                 if (extracted.empty()) {
                     if (kind == analysis_kind::asm_text) {
                         if constexpr (internal::platform::is_macos) {
-                            if (detail::resolved_symbol_is_undefined_in_snapshot(request, *resolved)) {
-                                if (auto runtime_disassembly = detail::try_extract_macos_runtime_symbol_disassembly(
-                                            request, kind_dir, id, *resolved, *request.symbol);
-                                    runtime_disassembly.has_value()) {
-                                    extracted = std::move(*runtime_disassembly);
-                                }
+                            if (auto runtime_disassembly = detail::try_extract_macos_runtime_symbol_disassembly(
+                                        request, kind_dir, id, *resolved, *request.symbol);
+                                runtime_disassembly.has_value()) {
+                                extracted = std::move(*runtime_disassembly);
                             }
                         }
                     }
