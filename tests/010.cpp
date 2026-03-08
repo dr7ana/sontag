@@ -213,14 +213,12 @@ namespace sontag::test {
                 "asm.bb_count"sv,
                 "asm.stack_frame_bytes"sv,
                 "asm.spill_fill_count"sv,
-                "build.compile_time_ms"sv};
-#if !(SONTAG_PLATFORM_MACOS && SONTAG_ARCH_ARM64)
-        expected_metric_names.push_back("mca.block_rthroughput"sv);
-        expected_metric_names.push_back("mca.ipc"sv);
-        expected_metric_names.push_back("mca.total_uops"sv);
-        expected_metric_names.push_back("mca.rf_integer_max_mappings"sv);
-        expected_metric_names.push_back("mca.rf_fp_max_mappings"sv);
-#endif
+                "build.compile_time_ms"sv,
+                "mca.block_rthroughput"sv,
+                "mca.ipc"sv,
+                "mca.total_uops"sv,
+                "mca.rf_integer_max_mappings"sv,
+                "mca.rf_fp_max_mappings"sv};
 
         for (const auto& level : report.levels) {
             REQUIRE(level.metrics.size() == expected_metric_names.size());

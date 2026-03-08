@@ -92,11 +92,11 @@ namespace sontag::test {
 
         static void configure_analysis_tool_paths(analysis_request& request) {
             request.clang_path = SONTAG_CLANG_EXECUTABLE_PATH;
-#if SONTAG_PLATFORM_MACOS && SONTAG_ARCH_ARM64
-            request.objdump_path = SONTAG_LLVM_OBJDUMP_EXECUTABLE_PATH;
-            request.mca_path = SONTAG_LLVM_MCA_EXECUTABLE_PATH;
-            request.nm_path = SONTAG_LLVM_NM_EXECUTABLE_PATH;
-#endif
+            if constexpr (internal::platform::is_macos && internal::platform::is_arm64) {
+                request.objdump_path = SONTAG_LLVM_OBJDUMP_EXECUTABLE_PATH;
+                request.mca_path = SONTAG_LLVM_MCA_EXECUTABLE_PATH;
+                request.nm_path = SONTAG_LLVM_NM_EXECUTABLE_PATH;
+            }
         }
 
         static std::string make_objdump_wrapper_script(const fs::path& args_path) {
@@ -772,7 +772,9 @@ namespace sontag::test {
         auto dynamic_result = run_analysis(dynamic_request, analysis_kind::mem_trace);
         CHECK_FALSE(dynamic_result.success);
         CHECK(detail::has_exact_arg(dynamic_result.command, "-Wl,--sontag-nonexistent-link-flag"));
-        CHECK(detail::has_exact_arg(dynamic_result.command, "-ldl"));
+        if constexpr (!internal::platform::is_macos) {
+            CHECK(detail::has_exact_arg(dynamic_result.command, "-ldl"));
+        }
         CHECK_FALSE(detail::has_exact_arg(dynamic_result.command, "-static"));
         CHECK_FALSE(detail::has_exact_arg(dynamic_result.command, "-static-libgcc"));
 
@@ -782,8 +784,10 @@ namespace sontag::test {
 
         auto static_result = run_analysis(static_request, analysis_kind::mem_trace);
         CHECK_FALSE(static_result.success);
-        CHECK(detail::has_exact_arg(static_result.command, "-static"));
-        CHECK(detail::has_exact_arg(static_result.command, "-static-libgcc"));
+        if constexpr (!internal::platform::is_macos) {
+            CHECK(detail::has_exact_arg(static_result.command, "-static"));
+            CHECK(detail::has_exact_arg(static_result.command, "-static-libgcc"));
+        }
         CHECK_FALSE(detail::has_exact_arg(static_result.command, "-ldl"));
     }
 
@@ -840,7 +844,7 @@ namespace sontag::test {
                 "std::lock_guard<std::mutex> guard(m);\n"
                 "cv.notify_one();\n"};
         request.libraries = {"pthread"};
-        request.symbol = "_ZNSt3__118condition_variable10notify_oneEv";
+        request.symbol = "std::__1::condition_variable::notify_one()";
 
         auto cold_result = run_analysis(request, analysis_kind::asm_text);
         REQUIRE(cold_result.success);

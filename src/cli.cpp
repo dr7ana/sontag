@@ -2202,6 +2202,22 @@ namespace sontag::cli {
                 return std::nullopt;
             }
 
+            if constexpr (internal::platform::is_macos) {
+                // Preserve caller-visible path spelling on macOS (e.g. /var/... vs /private/var/...).
+                // weakly_canonical resolves through symlinks and rewrites these prefixes, which breaks
+                // path-stable import/session output expectations.
+                auto normalized = path;
+                if (normalized.is_relative()) {
+                    std::error_code ec{};
+                    auto cwd = fs::current_path(ec);
+                    if (ec) {
+                        return normalized.lexically_normal().string();
+                    }
+                    normalized = cwd / normalized;
+                }
+                return normalized.lexically_normal().string();
+            }
+
             std::error_code ec{};
             auto weak = fs::weakly_canonical(path, ec);
             if (!ec) {

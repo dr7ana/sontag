@@ -1701,22 +1701,24 @@ namespace sontag {
         }
 
         static void append_link_flags(std::vector<std::string>& args, const analysis_request& request) {
-            args.push_back("-fuse-ld=" + std::string{internal::platform::tool::lld_path});
-            args.emplace_back("-fPIC");
-            args.emplace_back("-flto=thin");
-            args.emplace_back("-nostdlib++");
-            args.emplace_back("-Wl,--push-state,-Bstatic");
-            args.emplace_back("-lc++");
-            args.emplace_back("-lc");
-            args.emplace_back("-Wl,--pop-state");
+            if constexpr (!internal::platform::is_macos) {
+                args.push_back("-fuse-ld={}"_format(internal::platform::tool::lld_path));
+                args.emplace_back("-fPIC");
+                args.emplace_back("-flto=thin");
+                args.emplace_back("-nostdlib++");
+                args.emplace_back("-Wl,--push-state,-Bstatic");
+                args.emplace_back("-lc++");
+                args.emplace_back("-lc");
+                args.emplace_back("-Wl,--pop-state");
 
-            args.emplace_back("-lc++abi");
-            if (request.link == link_mode::staticlink) {
-                args.emplace_back("-static");
-                args.emplace_back("-static-libgcc");
-            }
-            else {
-                args.emplace_back("-ldl");
+                args.emplace_back("-lc++abi");
+                if (request.link == link_mode::staticlink) {
+                    args.emplace_back("-static");
+                    args.emplace_back("-static-libgcc");
+                }
+                else {
+                    args.emplace_back("-ldl");
+                }
             }
             for (const auto& dir : request.library_dirs) {
                 args.push_back("-L" + dir.string());
@@ -1969,6 +1971,17 @@ namespace sontag {
             return std::string{mangled};
         }
 
+        static std::string normalize_nm_symbol_name(std::string_view symbol) {
+            auto normalized = trim_ascii(symbol);
+            if constexpr (internal::platform::is_macos) {
+                // Mach-O prepends '_' to C symbols (e.g. _main); keep Itanium names intact.
+                if (!normalized.empty() && normalized.front() == '_' && !looks_like_itanium_symbol(normalized)) {
+                    normalized = strip_one_leading_underscore(normalized);
+                }
+            }
+            return std::string{normalized};
+        }
+
         static std::optional<analysis_symbol> parse_nm_symbol_line(std::string_view line) {
             auto trimmed = trim_ascii(line);
             if (trimmed.empty()) {
@@ -1992,8 +2005,9 @@ namespace sontag {
                 if (mangled.empty()) {
                     return std::nullopt;
                 }
+                auto normalized = normalize_nm_symbol_name(mangled);
                 return analysis_symbol{
-                        .kind = kind, .mangled = std::string{mangled}, .demangled = demangle_symbol_name(mangled)};
+                        .kind = kind, .mangled = normalized, .demangled = demangle_symbol_name(normalized)};
             }
 
             // Legacy/default nm format: <value> <type> <name>
@@ -2002,17 +2016,18 @@ namespace sontag {
                 if (mangled.empty()) {
                     return std::nullopt;
                 }
+                auto normalized = normalize_nm_symbol_name(mangled);
                 return analysis_symbol{
-                        .kind = kind, .mangled = std::string{mangled}, .demangled = demangle_symbol_name(mangled)};
+                        .kind = kind, .mangled = normalized, .demangled = demangle_symbol_name(normalized)};
             }
 
             auto mangled = trim_ascii(tokens[0]);
             if (mangled.empty()) {
                 return std::nullopt;
             }
+            auto normalized = normalize_nm_symbol_name(mangled);
 
-            return analysis_symbol{
-                    .kind = kind, .mangled = std::string{mangled}, .demangled = demangle_symbol_name(mangled)};
+            return analysis_symbol{.kind = kind, .mangled = normalized, .demangled = demangle_symbol_name(normalized)};
         }
 
         static std::vector<analysis_symbol> parse_nm_symbols(std::string_view nm_output) {
@@ -2457,11 +2472,14 @@ namespace sontag {
                 const analysis_request& request,
                 const fs::path& target_path,
                 bool from_object,
+                bool defined_only,
                 const fs::path& nm_stdout_path,
                 const fs::path& nm_stderr_path) {
             std::vector<std::string> nm_args{};
             nm_args.push_back(request.nm_path.string());
-            nm_args.emplace_back(arg_tokens::nm_defined_only);
+            if (defined_only) {
+                nm_args.emplace_back(arg_tokens::nm_defined_only);
+            }
             nm_args.emplace_back(arg_tokens::nm_posix_format);
             nm_args.push_back(target_path.string());
             auto nm_exit = run_process(nm_args, nm_stdout_path, nm_stderr_path);
@@ -2670,7 +2688,7 @@ namespace sontag {
             auto merged_symbols = std::vector<analysis_symbol>{};
             for (const auto& object_path : build->object_paths) {
                 auto object_symbols =
-                        collect_symbols_from_target(request, object_path, true, nm_stdout_path, nm_stderr_path);
+                        collect_symbols_from_target(request, object_path, true, true, nm_stdout_path, nm_stderr_path);
                 if (!object_symbols) {
                     return std::nullopt;
                 }
@@ -2695,8 +2713,8 @@ namespace sontag {
             }
 
             if (linked) {
-                if (auto linked_symbols =
-                            collect_symbols_from_target(request, binary_path, false, nm_stdout_path, nm_stderr_path);
+                if (auto linked_symbols = collect_symbols_from_target(
+                            request, binary_path, false, false, nm_stdout_path, nm_stderr_path);
                     linked_symbols.has_value()) {
                     merged_symbols.insert(
                             merged_symbols.end(),
@@ -2773,7 +2791,7 @@ namespace sontag {
 
             auto merged_symbols = std::vector<analysis_symbol>{};
             if (auto object_symbols =
-                        collect_symbols_from_target(request, object_path, true, nm_stdout_path, nm_stderr_path);
+                        collect_symbols_from_target(request, object_path, true, true, nm_stdout_path, nm_stderr_path);
                 object_symbols.has_value()) {
                 merged_symbols = std::move(*object_symbols);
             }
@@ -2801,8 +2819,8 @@ namespace sontag {
             }
 
             if (linked) {
-                if (auto linked_symbols =
-                            collect_symbols_from_target(request, binary_path, false, nm_stdout_path, nm_stderr_path);
+                if (auto linked_symbols = collect_symbols_from_target(
+                            request, binary_path, false, false, nm_stdout_path, nm_stderr_path);
                     linked_symbols.has_value()) {
                     merged_symbols.insert(
                             merged_symbols.end(),
@@ -3252,6 +3270,24 @@ namespace sontag {
                 return std::nullopt;
             }
             return resolve_symbol_match(*symbols, symbol);
+        }
+
+        static constexpr bool is_undefined_symbol_kind(char kind) noexcept {
+            return kind == 'U' || kind == 'u';
+        }
+
+        static bool resolved_symbol_is_undefined_in_snapshot(
+                const analysis_request& request, std::string_view resolved_symbol) {
+            auto symbols = try_collect_defined_symbols(request);
+            if (!symbols) {
+                return false;
+            }
+            for (const auto& symbol : *symbols) {
+                if (symbol_names_equivalent(symbol.mangled, resolved_symbol)) {
+                    return is_undefined_symbol_kind(symbol.kind);
+                }
+            }
+            return false;
         }
 
         static std::optional<std::string_view> parse_ir_function_name_from_define_line(std::string_view line) {
@@ -4252,6 +4288,103 @@ namespace sontag {
             }
 
             return extracted.str();
+        }
+
+        static constexpr std::optional<std::string_view> parse_dyld_info_symbol_header_name(std::string_view line) {
+            auto trimmed = trim_ascii(line);
+            if (trimmed.size() < 2U || !trimmed.ends_with(':')) {
+                return std::nullopt;
+            }
+            auto name = trimmed.substr(0U, trimmed.size() - 1U);
+            if (name.empty() || name.find(' ') != std::string_view::npos || name.find('\t') != std::string_view::npos) {
+                return std::nullopt;
+            }
+            if (name.starts_with("0x"sv)) {
+                return std::nullopt;
+            }
+            return name;
+        }
+
+        static std::string extract_dyld_info_for_symbol(
+                std::string_view disassembly_text, std::string_view mangled_symbol, std::string_view display_symbol) {
+            auto lines = split_lines(disassembly_text);
+            std::ostringstream extracted{};
+            bool in_symbol = false;
+
+            for (const auto& line : lines) {
+                auto header_name = parse_dyld_info_symbol_header_name(line);
+                if (header_name) {
+                    auto demangled_header = demangle_symbol_name(*header_name);
+                    if (in_symbol) {
+                        break;
+                    }
+                    if (symbol_names_equivalent(*header_name, mangled_symbol) ||
+                        symbol_names_equivalent(*header_name, display_symbol) ||
+                        symbol_names_equivalent(demangled_header, display_symbol)) {
+                        in_symbol = true;
+                        extracted << line << '\n';
+                        continue;
+                    }
+                }
+
+                if (!in_symbol) {
+                    continue;
+                }
+                extracted << line << '\n';
+            }
+
+            return extracted.str();
+        }
+
+        static constexpr bool macos_runtime_symbol_prefers_libcxx(
+                std::string_view mangled_symbol, std::string_view display_symbol) {
+            return contains_token(mangled_symbol, "St3__1"sv) || contains_token(display_symbol, "std::__1::"sv);
+        }
+
+        static std::optional<std::string> try_extract_macos_runtime_symbol_disassembly(
+                const analysis_request& request,
+                const fs::path& kind_dir,
+                std::string_view artifact_id,
+                std::string_view mangled_symbol,
+                std::string_view display_symbol) {
+            if constexpr (!internal::platform::is_macos) {
+                static_cast<void>(request);
+                static_cast<void>(kind_dir);
+                static_cast<void>(artifact_id);
+                static_cast<void>(mangled_symbol);
+                static_cast<void>(display_symbol);
+                return std::nullopt;
+            }
+
+            auto dylib_candidates = std::vector<std::string>{};
+            if (macos_runtime_symbol_prefers_libcxx(mangled_symbol, display_symbol)) {
+                dylib_candidates.emplace_back("/usr/lib/libc++.1.dylib");
+            }
+            dylib_candidates.emplace_back("/usr/lib/libSystem.B.dylib");
+
+            for (size_t i = 0U; i < dylib_candidates.size(); ++i) {
+                const auto& dylib = dylib_candidates[i];
+                auto stdout_path = kind_dir / "{}.dyld.{}.stdout.txt"_format(artifact_id, i);
+                auto stderr_path = kind_dir / "{}.dyld.{}.stderr.txt"_format(artifact_id, i);
+                auto command = std::vector<std::string>{"/usr/bin/dyld_info", "-disassemble", dylib};
+                auto exit_code = run_process(command, stdout_path, stderr_path);
+                if (exit_code != 0) {
+                    if (request.verbose) {
+                        auto stderr_text = read_text_file(stderr_path);
+                        if (!stderr_text.empty()) {
+                            debug_log(
+                                    "dyld_info disassembly failed for {} (exit {}): {}", dylib, exit_code, stderr_text);
+                        }
+                    }
+                    continue;
+                }
+                auto disassembly_text = read_text_file(stdout_path);
+                auto extracted = extract_dyld_info_for_symbol(disassembly_text, mangled_symbol, display_symbol);
+                if (!trim_ascii(extracted).empty()) {
+                    return extracted;
+                }
+            }
+            return std::nullopt;
         }
 
         static constexpr bool should_strip_mca_line(std::string_view trimmed_line) noexcept {
@@ -6454,7 +6587,28 @@ namespace sontag {
                 }
 
                 if (extracted.empty() && kind == analysis_kind::asm_text) {
-                    auto dump_result = run_analysis(request, analysis_kind::dump);
+                    if constexpr (internal::platform::is_macos) {
+                        if (detail::resolved_symbol_is_undefined_in_snapshot(request, *resolved)) {
+                            if (auto runtime_disassembly = detail::try_extract_macos_runtime_symbol_disassembly(
+                                        request, kind_dir, id, *resolved, *request.symbol);
+                                runtime_disassembly.has_value()) {
+                                extracted = std::move(*runtime_disassembly);
+                            }
+                        }
+                    }
+                }
+
+                if (extracted.empty() && kind == analysis_kind::asm_text) {
+                    auto dump_request = request;
+                    if constexpr (internal::platform::is_macos) {
+                        // Runtime/imported symbols on Mach-O often have no local text body in the snapshot.
+                        dump_request.symbol = std::nullopt;
+                    }
+                    else if (detail::resolved_symbol_is_undefined_in_snapshot(request, *resolved)) {
+                        // Undefined runtime symbols have no local asm section to extract.
+                        dump_request.symbol = std::nullopt;
+                    }
+                    auto dump_result = run_analysis(dump_request, analysis_kind::dump);
                     if (dump_result.success && !detail::trim_ascii(dump_result.artifact_text).empty()) {
                         extracted = std::move(dump_result.artifact_text);
                     }
@@ -6554,7 +6708,29 @@ namespace sontag {
 
                 if (extracted.empty()) {
                     if (kind == analysis_kind::asm_text) {
-                        auto dump_result = run_analysis(request, analysis_kind::dump);
+                        if constexpr (internal::platform::is_macos) {
+                            if (detail::resolved_symbol_is_undefined_in_snapshot(request, *resolved)) {
+                                if (auto runtime_disassembly = detail::try_extract_macos_runtime_symbol_disassembly(
+                                            request, kind_dir, id, *resolved, *request.symbol);
+                                    runtime_disassembly.has_value()) {
+                                    extracted = std::move(*runtime_disassembly);
+                                }
+                            }
+                        }
+                    }
+                    if (extracted.empty() && kind == analysis_kind::asm_text) {
+                        auto dump_request = request;
+                        if constexpr (internal::platform::is_macos) {
+                            // On Mach-O, runtime symbols can resolve through undefined/imported entries with no
+                            // local text body in the snapshot assembly. Use full linked dump for fallback.
+                            dump_request.symbol = std::nullopt;
+                        }
+                        else if (detail::resolved_symbol_is_undefined_in_snapshot(request, *resolved)) {
+                            // Undefined runtime symbols (e.g. dynamic library entries) have no local text body.
+                            // Fall back to full linked dump instead of symbol-scoped extraction.
+                            dump_request.symbol = std::nullopt;
+                        }
+                        auto dump_result = run_analysis(dump_request, analysis_kind::dump);
                         if (dump_result.success && !detail::trim_ascii(dump_result.artifact_text).empty()) {
                             extracted = std::move(dump_result.artifact_text);
                         }

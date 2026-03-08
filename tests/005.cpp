@@ -2860,10 +2860,20 @@ namespace sontag::test {
         auto output = detail::run_repl_script_capture_output(cfg, script);
 
         CHECK(output.out.find("imported directories") != std::string::npos);
-        const auto has_decimal_immediate = output.out.find("mov  eax, 101") != std::string::npos;
-        const auto has_hex_immediate = output.out.find("mov  eax, 0x65") != std::string::npos;
-        const auto has_x86_encoding = output.out.find("b8 65 00 00 00") != std::string::npos;
-        CHECK((has_decimal_immediate || has_hex_immediate || has_x86_encoding));
+        if constexpr (internal::platform::is_arm64) {
+            const auto has_decimal_immediate = output.out.find("mov w0, #101") != std::string::npos ||
+                                               output.out.find("mov  w0, #101") != std::string::npos;
+            const auto has_hex_immediate = output.out.find("mov w0, #0x65") != std::string::npos ||
+                                           output.out.find("mov  w0, #0x65") != std::string::npos;
+            const auto has_encoding = output.out.find("52800ca0") != std::string::npos;
+            CHECK((has_decimal_immediate || has_hex_immediate || has_encoding));
+        }
+        else {
+            const auto has_decimal_immediate = output.out.find("mov  eax, 101") != std::string::npos;
+            const auto has_hex_immediate = output.out.find("mov  eax, 0x65") != std::string::npos;
+            const auto has_encoding = output.out.find("b8 65 00 00 00") != std::string::npos;
+            CHECK((has_decimal_immediate || has_hex_immediate || has_encoding));
+        }
         CHECK(output.err.empty());
     }
 

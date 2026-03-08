@@ -70,7 +70,7 @@ jobs:
             -DWARNINGS_AS_ERRORS=ON
 
       - name: Build
-        run: cmake --build build
+        run: ninja -v
 
       - name: Test
         run: ./build/tests/alltests
