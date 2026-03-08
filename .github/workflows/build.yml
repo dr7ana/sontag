@@ -29,6 +29,7 @@ jobs:
       - name: Install LLVM (Linux)
         if: runner.os == 'Linux'
         run: |
+          sudo apt install --no-install-recommends ninja-build -yqq
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21 all
           sudo update-alternatives --install /usr/bin/clang        clang        /usr/bin/clang-21 100
           sudo update-alternatives --install /usr/bin/clang++      clang++      /usr/bin/clang++-21 100
@@ -40,13 +41,13 @@ jobs:
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install llvm@21
-          brew install lld@21
+          brew install llvm
+          brew install lld
 
       - name: Configure
         run: |
           if [[ "${{ runner.os }}" == "macOS" ]]; then
-            LLVM_PREFIX=$(brew --prefix llvm@21)
+            LLVM_PREFIX=$(brew --prefix llvm)
             CC="${LLVM_PREFIX}/bin/clang"
             CXX="${LLVM_PREFIX}/bin/clang++"
           else
@@ -70,7 +71,7 @@ jobs:
             -DWARNINGS_AS_ERRORS=ON
 
       - name: Build
-        run: ninja -v
+        run: cmake --build build
 
       - name: Test
         run: ./build/tests/alltests
