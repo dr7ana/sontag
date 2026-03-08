@@ -4312,21 +4312,35 @@ namespace sontag {
         static std::string extract_dyld_info_for_symbol(
                 std::string_view disassembly_text, std::string_view mangled_symbol, std::string_view display_symbol) {
             auto lines = split_lines(disassembly_text);
-            std::ostringstream extracted{};
-            bool in_symbol = false;
+            struct candidate_block {
+                std::string text{};
+                size_t instruction_rows{};
+                bool has_pthread_cond_signal{};
+            };
+
+            auto candidates = std::vector<candidate_block>{};
+            auto in_symbol = false;
+            auto current = candidate_block{};
+            auto wants_pthread_signal =
+                    contains_token(mangled_symbol, "condition_variable10notify_one"sv) ||
+                    contains_token(display_symbol, "condition_variable::notify_one"sv);
 
             for (const auto& line : lines) {
                 auto header_name = parse_dyld_info_symbol_header_name(line);
                 if (header_name) {
-                    auto demangled_header = demangle_symbol_name(*header_name);
                     if (in_symbol) {
-                        break;
+                        candidates.push_back(std::move(current));
+                        current = candidate_block{};
+                        in_symbol = false;
                     }
+
+                    auto demangled_header = demangle_symbol_name(*header_name);
                     if (symbol_names_equivalent(*header_name, mangled_symbol) ||
                         symbol_names_equivalent(*header_name, display_symbol) ||
                         symbol_names_equivalent(demangled_header, display_symbol)) {
                         in_symbol = true;
-                        extracted << line << '\n';
+                        current.text.append(line);
+                        current.text.push_back('\n');
                         continue;
                     }
                 }
@@ -4334,10 +4348,42 @@ namespace sontag {
                 if (!in_symbol) {
                     continue;
                 }
-                extracted << line << '\n';
+
+                current.text.append(line);
+                current.text.push_back('\n');
+                auto trimmed = trim_ascii(line);
+                auto token_end = trimmed.find_first_of(" \t");
+                auto token = token_end == std::string_view::npos ? trimmed : trimmed.substr(0U, token_end);
+                if (metrics::parse_hex_u64(token).has_value()) {
+                    ++current.instruction_rows;
+                }
+                if (line.find("pthread_cond_signal"sv) != std::string::npos) {
+                    current.has_pthread_cond_signal = true;
+                }
             }
 
-            return extracted.str();
+            if (in_symbol) {
+                candidates.push_back(std::move(current));
+            }
+            if (candidates.empty()) {
+                return {};
+            }
+
+            auto best_it = std::ranges::max_element(candidates, [&](const auto& lhs, const auto& rhs) {
+                auto lhs_score = lhs.instruction_rows;
+                auto rhs_score = rhs.instruction_rows;
+                if (wants_pthread_signal) {
+                    if (lhs.has_pthread_cond_signal) {
+                        lhs_score += 1000000U;
+                    }
+                    if (rhs.has_pthread_cond_signal) {
+                        rhs_score += 1000000U;
+                    }
+                }
+                return lhs_score < rhs_score;
+            });
+
+            return best_it != candidates.end() ? best_it->text : std::string{};
         }
 
         static std::optional<uint64_t> parse_dyld_disassembly_address(std::string_view line) {
@@ -4345,6 +4391,12 @@ namespace sontag {
             auto token_end = trimmed.find_first_of(" \t");
             auto token = token_end == std::string_view::npos ? trimmed : trimmed.substr(0U, token_end);
             return metrics::parse_hex_u64(token);
+        }
+
+        static bool has_dyld_disassembly_rows(std::string_view disassembly_text) {
+            auto lines = split_lines(disassembly_text);
+            return std::ranges::any_of(
+                    lines, [](std::string_view line) { return parse_dyld_disassembly_address(line).has_value(); });
         }
 
         struct dyld_function_start {
@@ -4416,6 +4468,7 @@ namespace sontag {
             std::ostringstream extracted{};
             extracted << entries[*match_index].symbol << ":\n";
             bool in_symbol = false;
+            bool saw_instruction = false;
             for (const auto& line : disassembly_lines) {
                 auto address = parse_dyld_disassembly_address(line);
                 if (!address) {
@@ -4428,6 +4481,7 @@ namespace sontag {
                     if (*address == begin_address) {
                         in_symbol = true;
                         extracted << line << '\n';
+                        saw_instruction = true;
                     }
                     continue;
                 }
@@ -4435,6 +4489,10 @@ namespace sontag {
                     break;
                 }
                 extracted << line << '\n';
+                saw_instruction = true;
+            }
+            if (!saw_instruction) {
+                return {};
             }
             return extracted.str();
         }
@@ -4452,6 +4510,128 @@ namespace sontag {
                 return "arm64"sv;
             }
             return std::nullopt;
+        }
+
+        static std::vector<std::string> macos_runtime_symbol_candidates(std::string_view mangled_symbol) {
+            std::vector<std::string> candidates{};
+            append_unique(candidates, std::string{trim_ascii(mangled_symbol)});
+
+            auto stripped = strip_one_leading_underscore(trim_ascii(mangled_symbol));
+            if (stripped != trim_ascii(mangled_symbol)) {
+                append_unique(candidates, std::string{stripped});
+            }
+
+            auto trimmed = trim_ascii(mangled_symbol);
+            if (!trimmed.empty() && trimmed.front() != '_') {
+                append_unique(candidates, "_{}"_format(trimmed));
+            }
+            return candidates;
+        }
+
+        static std::optional<std::string> try_extract_macos_runtime_symbol_objdump(
+                const analysis_request& request,
+                const fs::path& kind_dir,
+                std::string_view artifact_id,
+                std::span<const std::string> dylib_candidates,
+                std::string_view mangled_symbol,
+                std::string_view display_symbol) {
+            auto objdump_candidates = build_objdump_executable_candidates(request, kind_dir, artifact_id);
+            if (objdump_candidates.empty()) {
+                return std::nullopt;
+            }
+
+            auto symbol_candidates = macos_runtime_symbol_candidates(mangled_symbol);
+            if (symbol_candidates.empty()) {
+                return std::nullopt;
+            }
+            auto wants_pthread_signal =
+                    contains_token(mangled_symbol, "condition_variable10notify_one"sv) ||
+                    contains_token(display_symbol, "condition_variable::notify_one"sv);
+
+            for (size_t dylib_index = 0U; dylib_index < dylib_candidates.size(); ++dylib_index) {
+                const auto& dylib = dylib_candidates[dylib_index];
+                for (size_t tool_index = 0U; tool_index < objdump_candidates.size(); ++tool_index) {
+                    const auto& tool = objdump_candidates[tool_index];
+                    for (size_t symbol_index = 0U; symbol_index < symbol_candidates.size(); ++symbol_index) {
+                        const auto& symbol = symbol_candidates[symbol_index];
+                        auto stdout_path = kind_dir / "{}.runtime.objdump.{}.{}.{}.stdout.txt"_format(
+                                                              artifact_id, dylib_index, tool_index, symbol_index);
+                        auto stderr_path = kind_dir / "{}.runtime.objdump.{}.{}.{}.stderr.txt"_format(
+                                                              artifact_id, dylib_index, tool_index, symbol_index);
+                        auto command = build_objdump_command(request, dylib, tool, std::optional<std::string>{symbol});
+                        auto exit_code = run_process(command, stdout_path, stderr_path);
+                        if (exit_code != 0) {
+                            continue;
+                        }
+
+                        auto dump_text = read_text_file(stdout_path);
+                        auto extracted = extract_objdump_for_symbol(dump_text, mangled_symbol, display_symbol);
+                        if (!trim_ascii(extracted).empty()) {
+                            if (wants_pthread_signal && extracted.find("pthread_cond_signal"sv) == std::string::npos) {
+                                continue;
+                            }
+                            return extracted;
+                        }
+                    }
+
+                    auto all_stdout_path = kind_dir / "{}.runtime.objdump.{}.{}.all.stdout.txt"_format(
+                                                              artifact_id, dylib_index, tool_index);
+                    auto all_stderr_path = kind_dir / "{}.runtime.objdump.{}.{}.all.stderr.txt"_format(
+                                                              artifact_id, dylib_index, tool_index);
+                    auto all_command = build_objdump_command(request, dylib, tool, std::nullopt);
+                    auto all_exit_code = run_process(all_command, all_stdout_path, all_stderr_path);
+                    if (all_exit_code != 0) {
+                        continue;
+                    }
+                    auto all_dump_text = read_text_file(all_stdout_path);
+                    auto all_extracted = extract_objdump_for_symbol(all_dump_text, mangled_symbol, display_symbol);
+                    if (!trim_ascii(all_extracted).empty()) {
+                        if (wants_pthread_signal &&
+                            all_extracted.find("pthread_cond_signal"sv) == std::string::npos) {
+                            continue;
+                        }
+                        return all_extracted;
+                    }
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        static std::string normalize_dyld_runtime_disassembly(std::string_view disassembly_text) {
+            auto lines = split_lines(disassembly_text);
+            std::ostringstream normalized{};
+            bool saw_instruction = false;
+
+            for (const auto& line : lines) {
+                auto trimmed = trim_ascii(line);
+                auto address = parse_dyld_disassembly_address(trimmed);
+                if (!address) {
+                    normalized << line << '\n';
+                    continue;
+                }
+
+                auto token_end = trimmed.find_first_of(" \t");
+                if (token_end == std::string_view::npos) {
+                    continue;
+                }
+                auto address_token = std::string{trimmed.substr(0U, token_end)};
+                if (address_token.starts_with("0x"sv) || address_token.starts_with("0X"sv)) {
+                    address_token = address_token.substr(2U);
+                }
+                auto instruction = trim_ascii(trimmed.substr(token_end + 1U));
+                if (instruction.empty()) {
+                    continue;
+                }
+
+                normalized << address_token << ": 00 " << instruction << '\n';
+                saw_instruction = true;
+            }
+
+            if (!saw_instruction) {
+                return std::string{disassembly_text};
+            }
+            return normalized.str();
         }
 
         static std::optional<std::string> try_extract_macos_runtime_symbol_disassembly(
@@ -4474,6 +4654,13 @@ namespace sontag {
                 dylib_candidates.emplace_back("/usr/lib/libc++.1.dylib");
             }
             dylib_candidates.emplace_back("/usr/lib/libSystem.B.dylib");
+
+            if (auto objdump_extract = try_extract_macos_runtime_symbol_objdump(
+                        request, kind_dir, artifact_id, dylib_candidates, mangled_symbol, display_symbol);
+                objdump_extract.has_value()) {
+                return objdump_extract;
+            }
+
             auto dyld_arch = macos_dyld_arch_for_request(request);
 
             for (size_t i = 0U; i < dylib_candidates.size(); ++i) {
@@ -4510,6 +4697,9 @@ namespace sontag {
                     }
                     auto disassembly_text = read_text_file(stdout_path);
                     auto extracted = extract_dyld_info_for_symbol(disassembly_text, mangled_symbol, display_symbol);
+                    if (!trim_ascii(extracted).empty() && !has_dyld_disassembly_rows(extracted)) {
+                        extracted.clear();
+                    }
                     if (trim_ascii(extracted).empty()) {
                         auto starts_stdout_path =
                                 kind_dir / "{}.dyld.{}.{}.starts.stdout.txt"_format(artifact_id, i, tool_index);
@@ -4529,8 +4719,8 @@ namespace sontag {
                                     disassembly_text, starts_text, mangled_symbol, display_symbol);
                         }
                     }
-                    if (!trim_ascii(extracted).empty()) {
-                        return extracted;
+                    if (!trim_ascii(extracted).empty() && has_dyld_disassembly_rows(extracted)) {
+                        return normalize_dyld_runtime_disassembly(extracted);
                     }
                 }
             }
@@ -6226,8 +6416,8 @@ namespace sontag {
                             if (auto runtime_disassembly = detail::try_extract_macos_runtime_symbol_disassembly(
                                         request, kind_dir, id, *resolved, *request.symbol);
                                 runtime_disassembly.has_value()) {
-                                auto runtime_mca_text = detail::prepare_mca_from_dyld_disassembly(
-                                        request, *runtime_disassembly);
+                                auto runtime_mca_text =
+                                        detail::prepare_mca_from_dyld_disassembly(request, *runtime_disassembly);
                                 if (!detail::trim_ascii(runtime_mca_text).empty()) {
                                     asm_text = std::move(runtime_mca_text);
                                 }
