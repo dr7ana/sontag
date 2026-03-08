@@ -13,10 +13,8 @@ jobs:
             name: linux-x86_64
           - os: macos-26
             name: macos-arm64-26
-          - os: macos-15
-            name: macos-arm64-15
-          - os: macos-15-intel
-            name: macos-x86_64
+          - os: macos-26-intel
+            name: macos-x86_64-26
 
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -71,7 +69,8 @@ jobs:
             -DWARNINGS_AS_ERRORS=ON
 
       - name: Build
-        run: cmake --build build
+        run: ninja -v
+        working-directory: ./build
 
       - name: Test
         run: ./build/tests/alltests
