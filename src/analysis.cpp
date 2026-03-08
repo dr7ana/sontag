@@ -4318,12 +4318,11 @@ namespace sontag {
                 bool has_pthread_cond_signal{};
             };
 
-            auto candidates = std::vector<candidate_block>{};
+            std::vector<candidate_block> candidates{};
             auto in_symbol = false;
-            auto current = candidate_block{};
-            auto wants_pthread_signal =
-                    contains_token(mangled_symbol, "condition_variable10notify_one"sv) ||
-                    contains_token(display_symbol, "condition_variable::notify_one"sv);
+            candidate_block current{};
+            auto wants_pthread_signal = contains_token(mangled_symbol, "condition_variable10notify_one"sv) ||
+                                        contains_token(display_symbol, "condition_variable::notify_one"sv);
 
             for (const auto& line : lines) {
                 auto header_name = parse_dyld_info_symbol_header_name(line);
@@ -4544,9 +4543,8 @@ namespace sontag {
             if (symbol_candidates.empty()) {
                 return std::nullopt;
             }
-            auto wants_pthread_signal =
-                    contains_token(mangled_symbol, "condition_variable10notify_one"sv) ||
-                    contains_token(display_symbol, "condition_variable::notify_one"sv);
+            auto wants_pthread_signal = contains_token(mangled_symbol, "condition_variable10notify_one"sv) ||
+                                        contains_token(display_symbol, "condition_variable::notify_one"sv);
 
             for (size_t dylib_index = 0U; dylib_index < dylib_candidates.size(); ++dylib_index) {
                 const auto& dylib = dylib_candidates[dylib_index];
@@ -4586,8 +4584,7 @@ namespace sontag {
                     auto all_dump_text = read_text_file(all_stdout_path);
                     auto all_extracted = extract_objdump_for_symbol(all_dump_text, mangled_symbol, display_symbol);
                     if (!trim_ascii(all_extracted).empty()) {
-                        if (wants_pthread_signal &&
-                            all_extracted.find("pthread_cond_signal"sv) == std::string::npos) {
+                        if (wants_pthread_signal && all_extracted.find("pthread_cond_signal"sv) == std::string::npos) {
                             continue;
                         }
                         return all_extracted;
@@ -4649,7 +4646,7 @@ namespace sontag {
                 return std::nullopt;
             }
 
-            auto dylib_candidates = std::vector<std::string>{};
+            std::vector<std::string> dylib_candidates{};
             if (macos_runtime_symbol_prefers_libcxx(mangled_symbol, display_symbol)) {
                 dylib_candidates.emplace_back("/usr/lib/libc++.1.dylib");
             }
@@ -4665,7 +4662,7 @@ namespace sontag {
 
             for (size_t i = 0U; i < dylib_candidates.size(); ++i) {
                 const auto& dylib = dylib_candidates[i];
-                auto dyld_tools = std::vector<std::vector<std::string>>{
+                std::vector<std::vector<std::string>> dyld_tools{
                         {"/usr/bin/dyld_info"},
                         {"dyld_info"},
                         {"/usr/bin/xcrun", "dyld_info"},
@@ -4722,6 +4719,56 @@ namespace sontag {
                     if (!trim_ascii(extracted).empty() && has_dyld_disassembly_rows(extracted)) {
                         return normalize_dyld_runtime_disassembly(extracted);
                     }
+                }
+            }
+
+            std::vector<std::vector<std::string>> dyld_tools{
+                    {"/usr/bin/dyld_info"},
+                    {"dyld_info"},
+                    {"/usr/bin/xcrun", "dyld_info"},
+            };
+            for (size_t tool_index = 0U; tool_index < dyld_tools.size(); ++tool_index) {
+                auto stdout_path = kind_dir / "{}.dyld.cache.{}.stdout.txt"_format(artifact_id, tool_index);
+                auto stderr_path = kind_dir / "{}.dyld.cache.{}.stderr.txt"_format(artifact_id, tool_index);
+                auto command = dyld_tools[tool_index];
+                if (dyld_arch) {
+                    command.emplace_back("-arch");
+                    command.emplace_back(std::string{*dyld_arch});
+                }
+                command.emplace_back("-all_dyld_cache");
+                command.emplace_back("-disassemble");
+
+                auto exit_code = run_process(command, stdout_path, stderr_path);
+                if (exit_code != 0) {
+                    continue;
+                }
+
+                auto disassembly_text = read_text_file(stdout_path);
+                auto extracted = extract_dyld_info_for_symbol(disassembly_text, mangled_symbol, display_symbol);
+                if (!trim_ascii(extracted).empty() && !has_dyld_disassembly_rows(extracted)) {
+                    extracted.clear();
+                }
+                if (trim_ascii(extracted).empty()) {
+                    auto starts_stdout_path =
+                            kind_dir / "{}.dyld.cache.{}.starts.stdout.txt"_format(artifact_id, tool_index);
+                    auto starts_stderr_path =
+                            kind_dir / "{}.dyld.cache.{}.starts.stderr.txt"_format(artifact_id, tool_index);
+                    auto starts_command = dyld_tools[tool_index];
+                    if (dyld_arch) {
+                        starts_command.emplace_back("-arch");
+                        starts_command.emplace_back(std::string{*dyld_arch});
+                    }
+                    starts_command.emplace_back("-all_dyld_cache");
+                    starts_command.emplace_back("-function_starts");
+                    auto starts_exit = run_process(starts_command, starts_stdout_path, starts_stderr_path);
+                    if (starts_exit == 0) {
+                        auto starts_text = read_text_file(starts_stdout_path);
+                        extracted = extract_dyld_info_for_symbol_by_function_starts(
+                                disassembly_text, starts_text, mangled_symbol, display_symbol);
+                    }
+                }
+                if (!trim_ascii(extracted).empty() && has_dyld_disassembly_rows(extracted)) {
+                    return normalize_dyld_runtime_disassembly(extracted);
                 }
             }
             return std::nullopt;
